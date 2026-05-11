@@ -231,6 +231,35 @@
   .pill.accepted { background:var(--green-l); color:var(--green); }
   .pill.declined { background:#FCE4E4; color:var(--red); }
 
+  /* v7.40: Status chip toggles + imported toggle (filter bar) */
+  .chip-row { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin:0 0 12px; }
+  .chip-row-label { font-size:11px; font-weight:600; letter-spacing:0.08em; text-transform:uppercase; color:var(--text-mute); margin-right:4px; }
+  .chip {
+    display:inline-flex; align-items:center; gap:4px;
+    padding:5px 12px; border-radius:14px;
+    font-size:12px; font-weight:600; letter-spacing:0.02em;
+    background:var(--paper); color:var(--text-mute);
+    border:1.5px solid var(--line-dark);
+    cursor:pointer; user-select:none;
+    transition:background 0.12s, color 0.12s, border-color 0.12s;
+  }
+  .chip:hover { border-color:var(--navy); color:var(--navy); }
+  .chip.active { background:var(--navy); color:white; border-color:var(--navy); }
+  .chip.active.status-draft { background:var(--steel); border-color:var(--steel); }
+  .chip.active.status-sent { background:#1E5BAE; border-color:#1E5BAE; }
+  .chip.active.status-accepted { background:var(--green); border-color:var(--green); }
+  .chip.active.status-declined { background:var(--red); border-color:var(--red); }
+  .chip.active.status-open { background:var(--steel); border-color:var(--steel); }
+  .chip.active.status-in_progress { background:#1E5BAE; border-color:#1E5BAE; }
+  .chip.active.status-shipped { background:var(--green); border-color:var(--green); }
+  .chip.active.status-closed { background:var(--green); border-color:var(--green); }
+  .chip.active.status-cancelled { background:var(--red); border-color:var(--red); }
+  .chip .chip-check { font-size:11px; opacity:0; transition:opacity 0.12s; }
+  .chip.active .chip-check { opacity:1; }
+  .chip-imported.active { background:#6B7280; color:white; border-color:#6B7280; }
+  body[data-theme="dark"] .chip { background:var(--bg); color:var(--steel-l); border-color:var(--line-dark); }
+  body[data-theme="dark"] .chip:hover { border-color:var(--steel-l); color:white; }
+
   /* Modal */
   .modal-backdrop { position:fixed; inset:0; background:rgba(15,25,45,0.55); z-index:100; display:flex; align-items:center; justify-content:center; padding:32px; }
   .modal { background:var(--paper); width:480px; max-width:100%; max-height:90vh; overflow-y:auto; border:2px solid var(--navy); }
@@ -497,7 +526,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.39.0';
+const APP_VERSION = '7.40.0';
 
 // v7.34.1: Pre-baked Firebase config for the Keystone shop's keystone-quoting
 // project. Users still need to enter their own email + password, but the
@@ -512,8 +541,10 @@ const KEYSTONE_FIREBASE_CONFIG = {
 };
 
 // v7.35: Azure AD app registration for Microsoft Graph (Outlook RFQ inbox).
-// "Allow public client flows" must be Yes in the Azure portal — that's what
-// makes the device-code OAuth work from file:// URLs (no redirect URI needed).
+// v7.36: Switched from device-code OAuth (CORS-blocked from browsers) to
+// PKCE redirect flow. Azure registration must be a Single-page application
+// platform with redirect URI exactly: https://keymf-justin.github.io/ai-quote/
+// (trailing slash matters — Azure compares strings literally).
 const AI_QUOTE_AZURE_CONFIG = {
   clientId: "1f3f666c-762f-4744-97fc-06d93d7b7d11",
   tenantId: "0cc812a1-488c-46c0-a155-da5951bafa8e",
@@ -611,8 +642,8 @@ const state = {
     priceBookImport: { open: false, text: '', preview: null, error: '' },
     customerView: 'cards',         // 'cards' | 'table'
     vendorView: 'table',           // 'cards' | 'table'
-    quoteFilters: { search:'', status:'all', customerId:'all', dateRange:'all' },
-    orderFilters: { search:'', status:'all' },
+    quoteFilters: { search:'', statuses:[], customerId:'all', dateRange:'all', showImported:true }, // v7.40: statuses[] replaces status, showImported toggles historical
+    orderFilters: { search:'', statuses:[], showImported:true },                                     // v7.40
     poFilters: { search:'', status:'all', vendorId:'all' },              // v7.19
     packingSlipFilters: { search:'', status:'all', customerId:'all' },   // v7.19
     invoiceFilters: { search:'', status:'all', customerId:'all' },        // v7.19
@@ -629,6 +660,16 @@ const state = {
     quoteArchiveFilters: { search:'', customerId:'all', salesman:'all', quotedBy:'all', dateFrom:'', dateTo:'' }, // v7.38
     quoteArchiveImport: { open:false, rowsText:'', rows:null, headers:null, map:null, filename:'', sheetName:'', loading:false, error:'' }, // v7.38
     followUpDays: 14,
+    // v7.37 Customer History panel — per-section search + show-all toggles
+    custHist: {
+      open: true,                     // whole panel collapse state
+      qSearch: '',                    // search box for quotes section
+      qShowAll: false,                // show all quotes vs first N
+      flightSearch: '',               // search box for in-flight
+      flightShowAll: false,
+      paidSearch: '',                 // search box for closed (paid) invoices
+      paidShowAll: false,
+    },
   },
 };
 
@@ -675,6 +716,31 @@ function migrateState() {
   if (!Array.isArray(state.archivedInvoices)) state.archivedInvoices = [];
   // v7.38: Quote history archive
   if (!Array.isArray(state.archivedQuotes)) state.archivedQuotes = [];
+  // v7.40: quoteFilters/orderFilters — single status string → multi-select statuses[] + showImported toggle
+  if (state.ui.quoteFilters) {
+    const qf = state.ui.quoteFilters;
+    if (!Array.isArray(qf.statuses)) {
+      qf.statuses = (qf.status && qf.status !== 'all') ? [qf.status] : [];
+    }
+    if (qf.showImported == null) qf.showImported = true;
+    delete qf.status;
+  }
+  if (state.ui.orderFilters) {
+    const of = state.ui.orderFilters;
+    if (!Array.isArray(of.statuses)) {
+      of.statuses = (of.status && of.status !== 'all') ? [of.status] : [];
+    }
+    if (of.showImported == null) of.showImported = true;
+    delete of.status;
+  }
+  // v7.37: Customer History panel UI state
+  if (!state.ui.custHist) {
+    state.ui.custHist = {
+      open: true, qSearch: '', qShowAll: false,
+      flightSearch: '', flightShowAll: false,
+      paidSearch: '', paidShowAll: false,
+    };
+  }
   if (state.settings) {
     if (state.settings.nextPoNum == null) state.settings.nextPoNum = 1001;
     if (state.settings.nextPackingSlipNum == null) state.settings.nextPackingSlipNum = 1001;
@@ -1273,14 +1339,16 @@ window.SyncEngine = SyncEngine;
 // connect their OWN Outlook; the parsed RFQs that result both flow into the
 // shared rfqInbox queue, but neither can read the other's mail.
 //
-// Auth flow: device-code OAuth. The app shows the user a code, they go to
-// microsoft.com/devicelogin, enter the code, sign in, approve. We poll the
-// token endpoint until it returns access+refresh tokens. Refresh token then
-// lasts ~90 days idle, transparently refreshes on use.
+// Auth flow: PKCE redirect (v7.36). Browser navigates away to Microsoft's
+// authorize endpoint, user signs in + consents, Microsoft redirects back to
+// our SPA registered redirect URI with an authorization code in the query
+// string. We swap the code for access+refresh tokens at the /token endpoint
+// (which IS CORS-enabled for SPA platforms). Refresh token lasts ~90 days
+// idle and transparently refreshes on use.
 //
-// The "Allow public client flows" toggle in Azure (set to Yes in this app
-// registration) is what lets device-code work from file:// URLs without
-// needing a registered redirect URI.
+// (Earlier versions tried device-code flow, but Microsoft's /devicecode
+//  endpoint is not CORS-enabled and rejects browser requests by design —
+//  device-code is meant for headless devices like smart TVs, not browsers.)
 const OUTLOOK_TOKEN_KEY = 'aiquote-outlook-token';
 
 const OutlookGraph = {
@@ -1443,9 +1511,9 @@ const OutlookGraph = {
     return true;
   },
 
-  // Cancel a pending redirect (rarely useful since the redirect happens
-  // immediately, but available for symmetry with the old API).
-  cancelDeviceCodeFlow() {
+  // Cancel a pending PKCE redirect (rarely useful since the redirect happens
+  // immediately, but called from disconnect() and the cancel-connect button).
+  cancelPkceFlow() {
     this.pending = null;
     sessionStorage.removeItem('aiquote-pkce-verifier');
     sessionStorage.removeItem('aiquote-pkce-state');
@@ -1629,7 +1697,7 @@ const OutlookGraph = {
   },
 
   disconnect() {
-    this.cancelDeviceCodeFlow();
+    this.cancelPkceFlow();
     this.clearPersistent();
     this._notifyStatusChange('Disconnected');
   },
@@ -2822,6 +2890,65 @@ function getActiveQuote() { return getQuote(state.ui.activeQuoteId); }
 function getOrder(id) { return state.orders.find(o => o.id === id); }
 function getActiveOrder() { return getOrder(state.ui.activeOrderId); }
 
+// ============================================================================
+// CUSTOMER HISTORY HELPERS (v7.37 — for the Customer History panel that
+// appears on the quote-builder once a customer is selected). Each helper
+// returns most-recent-first arrays. All guarded against missing slices so
+// they never throw on a fresh install or partial data.
+// ============================================================================
+function chHistoryQuotes(customerId, excludeId) {
+  if (!customerId) return [];
+  return (state.quotes || [])
+    .filter(q => q && q.customerId === customerId && q.id !== excludeId)
+    .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+}
+function chDraftOrSentQuotes(customerId, excludeId) {
+  if (!customerId) return [];
+  return (state.quotes || [])
+    .filter(q => q && q.customerId === customerId && q.id !== excludeId
+      && (q.status === 'draft' || q.status === 'sent'))
+    .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+}
+function chOpenInvoices(customerId) {
+  if (!customerId) return [];
+  return (state.invoices || [])
+    .filter(inv => inv && inv.customerId === customerId
+      && !['paid', 'void', 'draft'].includes(inv.status))
+    .sort((a, b) => (b.invoiceDate || '').localeCompare(a.invoiceDate || ''));
+}
+function chClosedInvoices(customerId) {
+  if (!customerId) return [];
+  return (state.invoices || [])
+    .filter(inv => inv && inv.customerId === customerId && inv.status === 'paid')
+    .sort((a, b) => (b.invoiceDate || '').localeCompare(a.invoiceDate || ''));
+}
+function chOpenOrders(customerId) {
+  if (!customerId) return [];
+  return (state.orders || [])
+    .filter(o => o && o.customerId === customerId
+      && !['shipped', 'closed', 'cancelled'].includes(o.status))
+    .sort((a, b) => (b.orderDate || '').localeCompare(a.orderDate || ''));
+}
+// Sum of "in flight" — what they owe + what's being made + what's awaiting decision.
+function chInFlightTotal(customerId) {
+  if (!customerId) return { invoices: 0, orders: 0, quotes: 0, count: 0 };
+  const c = getCustomer(customerId);
+  let invoiceTotal = 0, orderTotal = 0, quoteTotal = 0, count = 0;
+  for (const inv of chOpenInvoices(customerId)) {
+    invoiceTotal += invoiceBalanceDue(inv, c);
+    count++;
+  }
+  for (const o of chOpenOrders(customerId)) {
+    orderTotal += (o.parts || []).reduce((s, p) => s + num(p.extended), 0);
+    count++;
+  }
+  for (const qd of chDraftOrSentQuotes(customerId, null)) {
+    quoteTotal += quoteTotalAt(qd, 0);
+    count++;
+  }
+  return { invoices: invoiceTotal, orders: orderTotal, quotes: quoteTotal, count };
+}
+
 // =================================================================
 // UNIT CONVERSION (stock dimensions)
 // =================================================================
@@ -3755,7 +3882,11 @@ function applyQuoteFilters(quotes) {
   const f = state.ui.quoteFilters;
   const q = (f.search || '').toLowerCase().trim();
   let out = quotes;
-  if (f.status !== 'all') out = out.filter(x => x.status === f.status);
+  // v7.40: multi-select statuses
+  const statuses = Array.isArray(f.statuses) ? f.statuses : [];
+  if (statuses.length > 0) out = out.filter(x => statuses.includes(x.status));
+  // v7.40: imported toggle — hide historical when off
+  if (f.showImported === false) out = out.filter(x => !x.imported);
   if (f.customerId !== 'all') out = out.filter(x => x.customerId === f.customerId);
   if (f.dateRange !== 'all') {
     const now = new Date();
@@ -3809,18 +3940,20 @@ function renderQuotesList() {
       </div>
     </div>
     <div class="card no-print" style="padding:14px 16px; margin-bottom:16px;">
-      <div style="display:grid; grid-template-columns: 2fr 1fr 1.5fr 1fr auto; gap:10px; align-items:end;">
+      <div class="chip-row">
+        <span class="chip-row-label">Status:</span>
+        ${['draft','sent','accepted','declined'].map(s => {
+          const active = (f.statuses||[]).includes(s);
+          return `<span class="chip status-${s} ${active?'active':''}" onclick="App.toggleQuoteStatusFilter('${s}')"><span class="chip-check">✓</span>${esc(s.charAt(0).toUpperCase()+s.slice(1))}</span>`;
+        }).join('')}
+        <span style="flex:1;"></span>
+        <span class="chip chip-imported ${f.showImported===false?'':'active'}" onclick="App.toggleQuoteShowImported()" title="Toggle historical imported records on or off">
+          <span class="chip-check">✓</span>📜 Show imported${(state.quotes||[]).some(q=>q.imported)?` (${(state.quotes||[]).filter(q=>q.imported).length})`:''}
+        </span>
+      </div>
+      <div style="display:grid; grid-template-columns: 2fr 1.5fr 1fr auto; gap:10px; align-items:end;">
         <div class="field"><label>Search</label>
           <input type="search" placeholder="Quote #, RFQ #, customer, part…" value="${esc(f.search)}" oninput="App.setQuoteFilter('search', this.value)">
-        </div>
-        <div class="field"><label>Status</label>
-          <select onchange="App.setQuoteFilter('status', this.value)">
-            <option value="all"   ${f.status==='all'?'selected':''}>All</option>
-            <option value="draft"     ${f.status==='draft'?'selected':''}>Draft</option>
-            <option value="sent"      ${f.status==='sent'?'selected':''}>Sent</option>
-            <option value="accepted"  ${f.status==='accepted'?'selected':''}>Accepted</option>
-            <option value="declined"  ${f.status==='declined'?'selected':''}>Declined</option>
-          </select>
         </div>
         <div class="field"><label>Customer</label>
           <select onchange="App.setQuoteFilter('customerId', this.value)">
@@ -4994,7 +5127,11 @@ function applyOrderFilters(orders) {
   const f = state.ui.orderFilters;
   const q = (f.search || '').toLowerCase().trim();
   let out = orders;
-  if (f.status !== 'all') out = out.filter(o => o.status === f.status);
+  // v7.40: multi-select statuses
+  const statuses = Array.isArray(f.statuses) ? f.statuses : [];
+  if (statuses.length > 0) out = out.filter(o => statuses.includes(o.status));
+  // v7.40: imported toggle
+  if (f.showImported === false) out = out.filter(o => !o.imported);
   if (q) out = out.filter(o => {
     const cust = getCustomer(o.customerId);
     const hay = [o.orderNum, o.poNum, o.fromQuoteNum, cust?.name, ...o.parts.map(p => (p.partNum||'')+' '+(p.description||''))].join(' ').toLowerCase();
@@ -5018,15 +5155,20 @@ function renderOrders() {
       </div>
     </div>
     <div class="card no-print" style="padding:14px 16px; margin-bottom:16px;">
-      <div style="display:grid; grid-template-columns: 2fr 1fr auto; gap:10px; align-items:end;">
+      <div class="chip-row">
+        <span class="chip-row-label">Status:</span>
+        ${ORDER_STATUSES.map(s => {
+          const active = (f.statuses||[]).includes(s);
+          return `<span class="chip status-${s} ${active?'active':''}" onclick="App.toggleOrderStatusFilter('${s}')"><span class="chip-check">✓</span>${esc(ORDER_STATUS_LABELS[s]||s)}</span>`;
+        }).join('')}
+        <span style="flex:1;"></span>
+        <span class="chip chip-imported ${f.showImported===false?'':'active'}" onclick="App.toggleOrderShowImported()" title="Toggle historical imported records on or off">
+          <span class="chip-check">✓</span>📜 Show imported${(state.orders||[]).some(o=>o.imported)?` (${(state.orders||[]).filter(o=>o.imported).length})`:''}
+        </span>
+      </div>
+      <div style="display:grid; grid-template-columns: 2fr auto; gap:10px; align-items:end;">
         <div class="field"><label>Search</label>
           <input type="search" placeholder="Order #, PO #, quote #, customer, part…" value="${esc(f.search)}" oninput="App.setOrderFilter('search', this.value)">
-        </div>
-        <div class="field"><label>Status</label>
-          <select onchange="App.setOrderFilter('status', this.value)">
-            <option value="all" ${f.status==='all'?'selected':''}>All</option>
-            ${ORDER_STATUSES.map(s => `<option value="${esc(s)}" ${f.status===s?'selected':''}>${esc(ORDER_STATUS_LABELS[s])}</option>`).join('')}
-          </select>
         </div>
         <div class="field"><label>&nbsp;</label>
           <button class="btn" onclick="App.clearOrderFilters()">Clear</button>
@@ -5042,8 +5184,8 @@ function renderOrders() {
       <div class="empty-state"><h3>No matches</h3><p>Adjust your filters.</p></div>
     ` : filtered.map(o => {
       const c = getCustomer(o.customerId);
-      const partCount = o.parts.length;
-      const totalQty = o.parts.reduce((s,p) => s + num(p.qty), 0);
+      const partCount = (o.parts || []).length;
+      const totalQty = (o.parts || []).reduce((s,p) => s + num(p.qty), 0);
       return `
         <div class="list-card" onclick="App.openOrder('${o.id}')">
           <div>
@@ -5115,7 +5257,7 @@ function renderOrder() {
             `).join('')}
             <tr class="total">
               <td colspan="5"><strong>Parts subtotal</strong></td>
-              <td class="num"><strong>${fmtMoney(o.parts.reduce((s,p) => s + num(p.extended), 0))}</strong></td>
+              <td class="num"><strong>${fmtMoney((o.parts || []).reduce((s,p) => s + num(p.extended), 0))}</strong></td>
             </tr>
             <tr class="nre"><td colspan="5">+ NRE (one-time)</td><td class="num">${fmtMoney(o.nre)}</td></tr>
             <tr class="unit"><td colspan="5"><strong>ORDER TOTAL</strong></td><td class="num"><strong>${fmtMoney(o.total)}</strong></td></tr>
@@ -9174,6 +9316,302 @@ function renderQuoteInfo(q) {
         </div>
       </div>
     </div>
+    ${renderCustomerHistoryPanel(q)}
+  `;
+}
+
+// ============================================================================
+// CUSTOMER HISTORY PANEL (v7.37) — stacks under the quote-info form once a
+// customer is picked. Three sections: in-flight (open invoices + open orders +
+// draft/sent quotes), all past quotes for this customer (with Clone + Append
+// reuse buttons), and paid invoices. Each has a free-text search and a
+// show-first-N-with-show-all toggle.
+// ============================================================================
+const CH_DEFAULT_LIMIT = 8;
+
+function renderCustomerHistoryPanel(q) {
+  if (!q || !q.customerId) {
+    return `
+      <div class="card" style="margin-top:16px; opacity:0.6;">
+        <div class="card-header"><span>Customer History</span></div>
+        <div class="card-body" style="padding:24px; text-align:center;">
+          <span class="text-mute small">Pick a customer above to see their quote history, open invoices, and paid invoices.</span>
+        </div>
+      </div>
+    `;
+  }
+  const c = getCustomer(q.customerId);
+  const ch = state.ui.custHist;
+  const inFlight = chInFlightTotal(q.customerId);
+  const totalInFlight = inFlight.invoices + inFlight.orders + inFlight.quotes;
+
+  const headSummary = inFlight.count === 0
+    ? `<span class="text-mute small">no open work</span>`
+    : `<span class="text-mute small">
+        ${inFlight.count} item${inFlight.count!==1?'s':''} in flight
+        ${totalInFlight > 0 ? ` · ${fmtMoney(totalInFlight)}` : ''}
+      </span>`;
+
+  return `
+    <div class="card" style="margin-top:16px;">
+      <div class="card-header" style="cursor:pointer;" onclick="App.toggleCustHist()">
+        <span>${ch.open ? '▾' : '▸'} Customer History · <strong>${esc(c?.name || 'Unknown')}</strong></span>
+        ${headSummary}
+      </div>
+      ${ch.open ? `
+        <div class="card-body" style="padding:14px 16px; display:flex; flex-direction:column; gap:14px;">
+          ${renderCustHistInFlight(q, inFlight)}
+          ${renderCustHistPastQuotes(q)}
+          ${renderCustHistPaidInvoices(q)}
+        </div>
+      ` : ''}
+    </div>
+  `;
+}
+
+function renderCustHistInFlight(q, inFlight) {
+  const ch = state.ui.custHist;
+  const c = getCustomer(q.customerId);
+  const today = new Date().toISOString().slice(0,10);
+  const search = (ch.flightSearch || '').toLowerCase();
+
+  // Build a unified list with type tags so we can sort/filter together
+  const rows = [];
+  for (const inv of chOpenInvoices(q.customerId)) {
+    const balance = invoiceBalanceDue(inv, c);
+    const overdue = inv.dueDate && inv.dueDate < today;
+    rows.push({
+      type: 'invoice',
+      icon: '💸',
+      typeLabel: 'Invoice',
+      num: inv.invoiceNum || '(no #)',
+      date: inv.invoiceDate || '',
+      amount: balance,
+      meta: `${overdue ? '<span style="color:var(--orange);">⚠ past due</span> · ' : ''}${esc(inv.terms || '')}${inv.dueDate ? ` · due ${esc(inv.dueDate)}` : ''}`,
+      action: `App.openInvoice('${inv.id}')`,
+      searchBlob: [inv.invoiceNum, inv.poRef, inv.terms].filter(Boolean).join(' ').toLowerCase(),
+    });
+  }
+  for (const o of chOpenOrders(q.customerId)) {
+    const total = (o.parts || []).reduce((s, p) => s + num(p.extended), 0);
+    rows.push({
+      type: 'order',
+      icon: '🏭',
+      typeLabel: 'Order',
+      num: o.orderNum || '(no #)',
+      date: o.orderDate || '',
+      amount: total,
+      meta: `${esc(ORDER_STATUS_LABELS[o.status] || o.status)}${o.fromQuoteNum ? ` · from quote ${esc(o.fromQuoteNum)}` : ''}`,
+      action: `App.openOrder('${o.id}')`,
+      searchBlob: [o.orderNum, o.fromQuoteNum, o.poNum].filter(Boolean).join(' ').toLowerCase(),
+    });
+  }
+  for (const qd of chDraftOrSentQuotes(q.customerId, q.id)) {
+    rows.push({
+      type: 'quote',
+      icon: '📋',
+      typeLabel: 'Quote',
+      num: qd.quoteNum || '(no #)',
+      date: qd.date || '',
+      amount: quoteTotalAt(qd, 0),
+      meta: `${esc(qd.status)}${(qd.parts || []).length ? ` · ${qd.parts.length} part${qd.parts.length!==1?'s':''}` : ''}`,
+      action: `App.openQuote('${qd.id}')`,
+      searchBlob: [qd.quoteNum, qd.rfqNum].filter(Boolean).join(' ').toLowerCase(),
+    });
+  }
+  rows.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+  const filtered = !search ? rows : rows.filter(r => r.searchBlob.includes(search));
+  const limit = ch.flightShowAll ? filtered.length : CH_DEFAULT_LIMIT;
+  const visible = filtered.slice(0, limit);
+
+  return `
+    <div>
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:6px;">
+        <strong style="font-size:13px;">⏳ IN FLIGHT</strong>
+        <span class="text-mute small">
+          ${inFlight.count > 0 ? `
+            ${chOpenInvoices(q.customerId).length > 0 ? `${fmtMoney(inFlight.invoices)} unpaid` : ''}
+            ${chOpenOrders(q.customerId).length > 0 ? ` · ${fmtMoney(inFlight.orders)} in production` : ''}
+            ${chDraftOrSentQuotes(q.customerId, q.id).length > 0 ? ` · ${fmtMoney(inFlight.quotes)} quoted` : ''}
+          ` : 'nothing open right now'}
+        </span>
+      </div>
+      ${rows.length === 0 ? `
+        <div class="text-mute small" style="padding:8px 0; font-style:italic;">No open invoices, orders, or pending quotes for this customer.</div>
+      ` : `
+        <div class="row" style="gap:8px; margin-bottom:6px; align-items:end;">
+          <input type="search" placeholder="Search in-flight…" value="${esc(ch.flightSearch)}"
+            oninput="App.setCustHistFilter('flightSearch', this.value)"
+            style="max-width:280px; font-size:12px; padding:4px 8px;">
+          ${filtered.length > CH_DEFAULT_LIMIT ? `
+            <button class="btn btn-sm" onclick="App.toggleCustHistShowAll('flightShowAll')">
+              ${ch.flightShowAll ? `Show first ${CH_DEFAULT_LIMIT}` : `Show all ${filtered.length}`}
+            </button>
+          ` : ''}
+        </div>
+        ${filtered.length === 0 ? `
+          <div class="text-mute small" style="padding:8px 0; font-style:italic;">No matches for "${esc(ch.flightSearch)}".</div>
+        ` : `
+          <table class="tbl" style="font-size:12px; margin:0;">
+            <tbody>
+              ${visible.map(r => `
+                <tr style="cursor:pointer;" onclick="${r.action}">
+                  <td style="width:24px; text-align:center;">${r.icon}</td>
+                  <td style="width:90px;"><strong>${esc(r.num)}</strong></td>
+                  <td style="width:90px;" class="text-mute small">${esc(r.date)}</td>
+                  <td>${r.meta}</td>
+                  <td class="num" style="width:90px;"><strong>${fmtMoney(r.amount)}</strong></td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        `}
+      `}
+    </div>
+  `;
+}
+
+function renderCustHistPastQuotes(q) {
+  const ch = state.ui.custHist;
+  const all = chHistoryQuotes(q.customerId, q.id);
+  const search = (ch.qSearch || '').toLowerCase();
+  const filtered = !search ? all : all.filter(qd => {
+    const blob = [
+      qd.quoteNum, qd.rfqNum,
+      ...(qd.parts || []).map(p => `${p.partNum||''} ${p.description||''}`)
+    ].join(' ').toLowerCase();
+    return blob.includes(search);
+  });
+  const limit = ch.qShowAll ? filtered.length : CH_DEFAULT_LIMIT;
+  const visible = filtered.slice(0, limit);
+
+  return `
+    <div>
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:6px;">
+        <strong style="font-size:13px;">📋 PAST QUOTES (${all.length})</strong>
+        <span class="text-mute small">click <em>Clone</em> to start a new quote from one, or <em>Append parts</em> to add its parts onto this one</span>
+      </div>
+      ${all.length === 0 ? `
+        <div class="text-mute small" style="padding:8px 0; font-style:italic;">No prior quotes for this customer.</div>
+      ` : `
+        <div class="row" style="gap:8px; margin-bottom:6px; align-items:end;">
+          <input type="search" placeholder="Search by quote #, RFQ #, part #, description…" value="${esc(ch.qSearch)}"
+            oninput="App.setCustHistFilter('qSearch', this.value)"
+            style="max-width:380px; font-size:12px; padding:4px 8px;">
+          ${filtered.length > CH_DEFAULT_LIMIT ? `
+            <button class="btn btn-sm" onclick="App.toggleCustHistShowAll('qShowAll')">
+              ${ch.qShowAll ? `Show first ${CH_DEFAULT_LIMIT}` : `Show all ${filtered.length}`}
+            </button>
+          ` : ''}
+        </div>
+        ${filtered.length === 0 ? `
+          <div class="text-mute small" style="padding:8px 0; font-style:italic;">No matches for "${esc(ch.qSearch)}".</div>
+        ` : `
+          <table class="tbl" style="font-size:12px; margin:0;">
+            <thead>
+              <tr>
+                <th style="width:90px;">Quote #</th>
+                <th style="width:90px;">Date</th>
+                <th style="width:80px;">Status</th>
+                <th>Parts</th>
+                <th class="num" style="width:90px;">Total (qty 1)</th>
+                <th style="width:200px; text-align:right;">Reuse</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${visible.map(qd => {
+                const total = quoteTotalAt(qd, 0);
+                const partSummary = (qd.parts || []).slice(0, 3).map(p => esc(p.partNum || p.description || '?')).join(', ')
+                  + ((qd.parts || []).length > 3 ? ` +${(qd.parts || []).length - 3} more` : '');
+                return `
+                  <tr>
+                    <td><strong style="cursor:pointer; color:var(--blue);" onclick="App.openQuote('${qd.id}')" title="Open this quote">${esc(qd.quoteNum || '(no #)')}</strong></td>
+                    <td class="text-mute small">${esc(qd.date || '')}</td>
+                    <td><span class="pill ${esc(qd.status)}" style="font-size:10px;">${esc(qd.status)}</span></td>
+                    <td class="text-mute small">${partSummary || '<em>no parts</em>'}</td>
+                    <td class="num"><strong>${fmtMoney(total)}</strong></td>
+                    <td style="text-align:right;">
+                      <button class="btn btn-sm" title="Replace this quote's parts/notes with a copy of ${esc(qd.quoteNum || 'this quote')}" onclick="App.cloneQuoteFromHistory('${q.id}','${qd.id}')">Clone</button>
+                      <button class="btn btn-sm" title="Add this quote's parts onto your current quote" onclick="App.appendPartsFromQuote('${q.id}','${qd.id}')">Append parts</button>
+                    </td>
+                  </tr>
+                `;
+              }).join('')}
+            </tbody>
+          </table>
+        `}
+      `}
+    </div>
+  `;
+}
+
+function renderCustHistPaidInvoices(q) {
+  const ch = state.ui.custHist;
+  const c = getCustomer(q.customerId);
+  const all = chClosedInvoices(q.customerId);
+  const search = (ch.paidSearch || '').toLowerCase();
+  const filtered = !search ? all : all.filter(inv => {
+    const blob = [
+      inv.invoiceNum, inv.poRef,
+      ...(inv.lines || []).map(l => `${l.partNum||''} ${l.description||''}`)
+    ].join(' ').toLowerCase();
+    return blob.includes(search);
+  });
+  const totalPaid = all.reduce((s, inv) => s + docTotal(inv, c), 0);
+  const limit = ch.paidShowAll ? filtered.length : CH_DEFAULT_LIMIT;
+  const visible = filtered.slice(0, limit);
+
+  return `
+    <div>
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:6px;">
+        <strong style="font-size:13px;">✓ PAID INVOICES (${all.length})</strong>
+        <span class="text-mute small">${all.length > 0 ? `lifetime paid: ${fmtMoney(totalPaid)}` : ''}</span>
+      </div>
+      ${all.length === 0 ? `
+        <div class="text-mute small" style="padding:8px 0; font-style:italic;">No paid invoices for this customer yet.</div>
+      ` : `
+        <div class="row" style="gap:8px; margin-bottom:6px; align-items:end;">
+          <input type="search" placeholder="Search by invoice #, PO ref, line item…" value="${esc(ch.paidSearch)}"
+            oninput="App.setCustHistFilter('paidSearch', this.value)"
+            style="max-width:380px; font-size:12px; padding:4px 8px;">
+          ${filtered.length > CH_DEFAULT_LIMIT ? `
+            <button class="btn btn-sm" onclick="App.toggleCustHistShowAll('paidShowAll')">
+              ${ch.paidShowAll ? `Show first ${CH_DEFAULT_LIMIT}` : `Show all ${filtered.length}`}
+            </button>
+          ` : ''}
+        </div>
+        ${filtered.length === 0 ? `
+          <div class="text-mute small" style="padding:8px 0; font-style:italic;">No matches for "${esc(ch.paidSearch)}".</div>
+        ` : `
+          <table class="tbl" style="font-size:12px; margin:0;">
+            <thead>
+              <tr>
+                <th style="width:100px;">Invoice #</th>
+                <th style="width:100px;">Invoice Date</th>
+                <th style="width:100px;">Paid On</th>
+                <th>Notes</th>
+                <th class="num" style="width:100px;">Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${visible.map(inv => {
+                const total = docTotal(inv, c);
+                const lastPayment = (inv.payments || []).slice().sort((a,b) => (b.date||'').localeCompare(a.date||''))[0];
+                return `
+                  <tr style="cursor:pointer;" onclick="App.openInvoice('${inv.id}')">
+                    <td><strong>${esc(inv.invoiceNum || '(no #)')}</strong></td>
+                    <td class="text-mute small">${esc(inv.invoiceDate || '')}</td>
+                    <td class="text-mute small">${esc(lastPayment?.date || '—')}</td>
+                    <td class="text-mute small">${esc(inv.poRef ? `PO ${inv.poRef}` : '')}</td>
+                    <td class="num"><strong>${fmtMoney(total)}</strong></td>
+                  </tr>
+                `;
+              }).join('')}
+            </tbody>
+          </table>
+        `}
+      `}
+    </div>
   `;
 }
 
@@ -11322,8 +11760,8 @@ async function generateQuotePDF(quote) {
     if (y > PH - 200) { doc.addPage(); y = M; }
     // Build per-tier totals using the same `tiers` set the parts table used.
     const tierData = tiers.map(t => {
-      const partsSubtotal = quote.parts.reduce((s, p) => {
-        const idx = p.qtyTiers.indexOf(t);
+      const partsSubtotal = (quote.parts || []).reduce((s, p) => {
+        const idx = (p.qtyTiers || []).indexOf(t);
         if (idx === -1) return s;
         return s + extendedAt(p, idx);
       }, 0);
@@ -11477,6 +11915,71 @@ const App = {
       logActivity('Duplicated quote', orig.quoteNum, '→ ' + copy.quoteNum);
       s.ui.view = 'quote'; s.ui.activeQuoteId = copy.id; s.ui.activeQuoteTab = 'info';
     });
+  },
+  // ----- v7.37 Customer History panel handlers -----
+  toggleCustHist() {
+    update(s => { s.ui.custHist.open = !s.ui.custHist.open; });
+  },
+  setCustHistFilter(field, value) {
+    update(s => { s.ui.custHist[field] = value; });
+  },
+  toggleCustHistShowAll(field) {
+    update(s => { s.ui.custHist[field] = !s.ui.custHist[field]; });
+  },
+  // Replace the current draft quote's parts/notes/pricing with a deep copy
+  // from the source historical quote. Keeps the current quote's id, quoteNum,
+  // customer, date, and quotedBy. If the current quote already has parts, ask
+  // for confirmation first.
+  cloneQuoteFromHistory(currentId, sourceId) {
+    const current = state.quotes.find(q => q.id === currentId);
+    const source = state.quotes.find(q => q.id === sourceId);
+    if (!current || !source) { alert('Quote not found.'); return; }
+    if ((current.parts || []).length > 0) {
+      if (!confirm(`This will REPLACE all ${current.parts.length} part(s) on this quote with a copy of "${source.quoteNum || 'the selected quote'}". Continue?`)) return;
+    }
+    update(s => {
+      const cur = s.quotes.find(q => q.id === currentId);
+      const src = s.quotes.find(q => q.id === sourceId);
+      if (!cur || !src) return;
+      const cloned = JSON.parse(JSON.stringify(src));
+      // Preserve identity fields on the current quote
+      cur.parts = (cloned.parts || []).map(p => {
+        p.id = uid();
+        if (Array.isArray(p.machineOps)) p.machineOps.forEach(o => { o.id = uid(); });
+        return p;
+      });
+      cur.notes = cloned.notes || '';
+      cur.qtyTiers = cloned.qtyTiers;
+      cur.leadTime = cloned.leadTime || cur.leadTime;
+      cur.paymentTerms = cloned.paymentTerms || cur.paymentTerms;
+      cur.fob = cloned.fob || cur.fob;
+      cur.validFor = cloned.validFor || cur.validFor;
+      logActivity('Cloned quote from history', src.quoteNum || sourceId, '→ ' + (cur.quoteNum || currentId));
+    });
+    showToast(`Loaded ${(source.parts || []).length} part(s) from quote ${source.quoteNum || sourceId}.`);
+  },
+  // Append the source quote's parts onto the current quote's parts array
+  // (does NOT replace existing parts or any header info).
+  appendPartsFromQuote(currentId, sourceId) {
+    const current = state.quotes.find(q => q.id === currentId);
+    const source = state.quotes.find(q => q.id === sourceId);
+    if (!current || !source) { alert('Quote not found.'); return; }
+    const sourceParts = source.parts || [];
+    if (sourceParts.length === 0) { alert(`Quote ${source.quoteNum || sourceId} has no parts to append.`); return; }
+    update(s => {
+      const cur = s.quotes.find(q => q.id === currentId);
+      const src = s.quotes.find(q => q.id === sourceId);
+      if (!cur || !src) return;
+      if (!Array.isArray(cur.parts)) cur.parts = [];
+      const cloned = JSON.parse(JSON.stringify(src.parts || [])).map(p => {
+        p.id = uid();
+        if (Array.isArray(p.machineOps)) p.machineOps.forEach(o => { o.id = uid(); });
+        return p;
+      });
+      cur.parts.push(...cloned);
+      logActivity('Appended parts from quote', src.quoteNum || sourceId, `+${cloned.length} part(s) → ` + (cur.quoteNum || currentId));
+    });
+    showToast(`Appended ${sourceParts.length} part(s) from quote ${source.quoteNum || sourceId}.`);
   },
   openQuote(id) {
     update(s => { s.ui.view = 'quote'; s.ui.activeQuoteId = id; s.ui.activeQuoteTab = 'info'; });
@@ -12244,7 +12747,23 @@ const App = {
     }
   },
   clearQuoteFilters() {
-    update(s => { s.ui.quoteFilters = { search:'', status:'all', customerId:'all', dateRange:'all' }; });
+    update(s => { s.ui.quoteFilters = { search:'', statuses:[], customerId:'all', dateRange:'all', showImported:true }; });
+  },
+  // v7.40: chip toggles
+  toggleQuoteStatusFilter(status) {
+    update(s => {
+      const f = s.ui.quoteFilters;
+      if (!Array.isArray(f.statuses)) f.statuses = [];
+      const i = f.statuses.indexOf(status);
+      if (i >= 0) f.statuses.splice(i, 1);
+      else f.statuses.push(status);
+    });
+  },
+  toggleQuoteShowImported() {
+    update(s => {
+      const f = s.ui.quoteFilters;
+      f.showImported = (f.showImported === false) ? true : false;
+    });
   },
   // --- part template search ---
   openPartTemplates(partId) {
@@ -12731,7 +13250,23 @@ Trimble Tool`;
       }, 220);
     } else { saveState(); render(); }
   },
-  clearOrderFilters() { update(s => { s.ui.orderFilters = { search:'', status:'all' }; }); },
+  clearOrderFilters() { update(s => { s.ui.orderFilters = { search:'', statuses:[], showImported:true }; }); },
+  // v7.40: chip toggles
+  toggleOrderStatusFilter(status) {
+    update(s => {
+      const f = s.ui.orderFilters;
+      if (!Array.isArray(f.statuses)) f.statuses = [];
+      const i = f.statuses.indexOf(status);
+      if (i >= 0) f.statuses.splice(i, 1);
+      else f.statuses.push(status);
+    });
+  },
+  toggleOrderShowImported() {
+    update(s => {
+      const f = s.ui.orderFilters;
+      f.showImported = (f.showImported === false) ? true : false;
+    });
+  },
 
   setFollowUpDays(d) {
     state.ui.followUpDays = num(d) || 14;
@@ -14532,7 +15067,7 @@ Online Metals,Brass,Round,1.25 dia,per_lb,5.20`;
     }
   },
   cancelOutlookConnect() {
-    OutlookGraph.cancelDeviceCodeFlow();
+    OutlookGraph.cancelPkceFlow();
     render();
   },
   async refreshOutlookInbox() {
