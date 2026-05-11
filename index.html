@@ -531,7 +531,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.43.0';
+const APP_VERSION = '7.44.0';
 
 // v7.34.1: Pre-baked Firebase config for the Keystone shop's keystone-quoting
 // project. Users still need to enter their own email + password, but the
@@ -788,6 +788,10 @@ function migrateState() {
       if (p.materialCost && p.materialCost.vendorId === undefined) p.materialCost.vendorId = null;
       if (p.materialCost && p.materialCost.vendorPartNum === undefined) p.materialCost.vendorPartNum = '';
       if (p.materialCost && p.materialCost.vendorUrl === undefined) p.materialCost.vendorUrl = '';
+      // v7.44: off-the-shelf component fields
+      if (p.materialCost && p.materialCost.isComponent === undefined) p.materialCost.isComponent = false;
+      if (p.materialCost && p.materialCost.packSize === undefined) p.materialCost.packSize = null;
+      if (p.materialCost && p.materialCost.perPack === undefined) p.materialCost.perPack = null;
       // v7.25: Customer-supplied material defaults
       if (p.customerSuppliedMaterial === undefined) p.customerSuppliedMaterial = false;
       if (p.csmDeclaredValue === undefined) p.csmDeclaredValue = null;
@@ -825,6 +829,10 @@ function migrateState() {
     // get created at <root>\<oneDriveFolder>\<quote-folder>. Empty = unset
     // (the missing-folder prompt fires first time you try to open a folder).
     if (c.oneDriveFolder == null) c.oneDriveFolder = '';
+    // v7.43: customer-level OneDrive web share URL (separate from folder
+    // name). When set, the customer card shows an "↗ Open in OneDrive web"
+    // button. Optional — independent of the folder-name field.
+    if (c.oneDriveUrl == null) c.oneDriveUrl = '';
   });
   // v3 → v4: vendors + oneDriveUrl
   if (state.settings) {
@@ -856,6 +864,9 @@ function migrateState() {
   }
   state.quotes.forEach(q => {
     if (q.oneDriveUrl == null) q.oneDriveUrl = '';
+    // v7.43: short description used in OneDrive folder name. Falls back to
+    // first part description if blank when the folder name is generated.
+    if (q.folderDesc == null) q.folderDesc = '';
   });
   // v4 → v5: orders array
   if (!Array.isArray(state.orders)) state.orders = [];
@@ -1811,12 +1822,28 @@ function sanitizeFolderName(s) {
   return (s || '').replace(/[<>:"/\\|?*\x00-\x1F]/g, '').replace(/\s+/g, '_').trim();
 }
 function suggestedFolderName(q) {
-  const tpl = (state.settings.shopInfo && state.settings.shopInfo.oneDriveFolderTemplate) || 'Quote_{quoteNum}_{customer}';
+  // v7.43: default template changed to {date}_Q{quoteNum}_{desc}.
+  // {date} is YYMM (e.g. "2605"). {desc} is q.folderDesc or — when blank —
+  // the first part's description, sanitized to underscores. Existing user
+  // templates are honored as-is; only the DEFAULT changed.
+  const tpl = (state.settings.shopInfo && state.settings.shopInfo.oneDriveFolderTemplate) || '{date}_Q{quoteNum}_{desc}';
   const cust = getCustomer(q.customerId);
+  // YYMM date — "2605" for May 2026. Falls back to today if quote.date is missing.
+  let yymm = '';
+  const d = (q.date || new Date().toISOString().slice(0,10));
+  const m = d.match(/^(\d{4})-(\d{2})/);
+  if (m) yymm = m[1].slice(2) + m[2];
+  // Description: explicit q.folderDesc, else first part's description, else "quote"
+  const firstPartDesc = (q.parts && q.parts[0] && (q.parts[0].description || q.parts[0].partNum)) || '';
+  const descSrc = (q.folderDesc || firstPartDesc || 'quote').trim();
+  // For the {desc} token, replace internal whitespace with underscores
+  // BEFORE sanitizeFolderName (which would otherwise also collapse them).
+  const desc = descSrc.replace(/\s+/g, '_').slice(0, 60);
   const tokens = {
     '{quoteNum}': sanitizeFolderName(q.quoteNum || 'draft'),
     '{customer}': sanitizeFolderName(cust?.name || 'no_customer'),
-    '{date}': (q.date || '').replace(/-/g, ''),
+    '{date}': yymm || (q.date || '').replace(/-/g, ''),       // YYMM new default; legacy YYYYMMDD honored if user kept the old token form
+    '{desc}': sanitizeFolderName(desc),
   };
   let name = tpl;
   Object.entries(tokens).forEach(([k, v]) => {
@@ -1952,7 +1979,7 @@ function newPart() {
     outsideServices: DEFAULT_OUTSIDE_OPS.map(n => ({ name:n, cost:0 })),
     dxfFiles: [],  // outside cut-service routing: laser/waterjet/EDM/etc per file
     specialtyTooling: [],  // itemized one-time tooling purchases — rolls into NRE
-    materialCost: { perPiece: [null], perBar: null, perSheet: null, vendorId: null, vendorPartNum: '', vendorUrl: '' },
+    materialCost: { perPiece: [null], perBar: null, perSheet: null, vendorId: null, vendorPartNum: '', vendorUrl: '', isComponent: false, packSize: null, perPack: null }, // v7.44: isComponent/packSize/perPack for off-the-shelf components (McMaster, Grainger, etc.)
     // v7.25: Customer-supplied material (CSM)
     customerSuppliedMaterial: false,    // toggle — when true, shop charges handling fee instead of supplier cost
     csmDeclaredValue: null,              // $ — customer-declared per-piece value of the supplied material
@@ -3280,9 +3307,18 @@ function effectiveMaterialPerPiece(part, qtyIdx) {
   const qty = num(tiers[qtyIdx]);
   if (qty <= 0) return 0;
   // v7.25: Customer-supplied material — return handling fee instead of supplier cost.
-  // Per-piece handling fee = declared per-piece value × markup %.
   if (part.customerSuppliedMaterial) {
     return num(part.csmDeclaredValue) * (num(part.csmHandlingFeePct) / 100);
+  }
+  // v7.44: Off-the-shelf component (McMaster, Grainger, etc.) — sold by pack,
+  // no cutting from raw stock. Per-piece = $ per pack ÷ pack size.
+  if (part.materialCost.isComponent) {
+    const ps = num(part.materialCost.packSize);
+    const pp = num(part.materialCost.perPack);
+    if (ps > 0 && pp > 0) return pp / ps;
+    // Fall back to perPiece[qtyIdx] if pack fields not set yet
+    const perPiece = Array.isArray(part.materialCost.perPiece) ? part.materialCost.perPiece : [];
+    return num(perPiece[qtyIdx]);
   }
   const stock = part.stock || {};
   if (stock.form === 'Sheet' && part.materialCost.perSheet != null) {
@@ -3886,7 +3922,6 @@ function render() {
   renderQuoteArchiveImportModal();
   renderMsgImportModal();
   renderMissingCustFolderModal();
-  renderCustFolderWizardModal();
   // v7.34: user management dialogs
   const inviteHost = document.getElementById('invite-modal-host');
   if (inviteHost) {
@@ -4654,7 +4689,7 @@ function extractMcMasterData(text) {
 
   const out = {
     source: 'text',
-    partNum: null, price: null, priceUnit: null,
+    partNum: null, price: null, priceUnit: null, packSize: null,
     availability: null, url: null, description: null, drawingUrl: null,
   };
 
@@ -4675,6 +4710,7 @@ function extractMcMasterData(text) {
 
   // Price — McMaster shows "$X.XX Each", "$XX.XX per pack of N", or
   // "$X.XX / 100". Capture the dollar amount and the unit hint.
+  // Also extract pack size from "per pack of N" so per-piece price = price / N.
   // Skip price candidates < $0.10 (likely irrelevant) and > $1M (parse error).
   const priceCandidates = [];
   const priceRegex = /\$\s*([0-9]{1,3}(?:,\d{3})*(?:\.\d{1,4})?|\d+\.\d{1,4})\s*(?:\b(each|ea\.?|per\s*pack(?:\s*of\s*\d+)?|per\s*100|\/\s*100|per\s*foot|\/\s*ft|per\s*lb|\/\s*lb|pkg)\.?)?/gi;
@@ -4683,15 +4719,21 @@ function extractMcMasterData(text) {
     const num = parseFloat(m[1].replace(/,/g, ''));
     if (!isFinite(num) || num < 0.10 || num > 1_000_000) continue;
     let unit = null;
+    let packSize = null;
     if (m[2]) {
       const u = m[2].toLowerCase();
       if (u.startsWith('each') || u.startsWith('ea')) unit = 'each';
-      else if (u.includes('100')) unit = 'per100';
+      else if (u.includes('pack') || u === 'pkg') {
+        unit = 'pack';
+        // "per pack of 100" → pull out the 100
+        const packMatch = u.match(/pack\s*of\s*(\d+)/);
+        if (packMatch) packSize = parseInt(packMatch[1], 10);
+      }
+      else if (u.includes('100')) { unit = 'pack'; packSize = 100; }
       else if (u.includes('ft') || u.includes('foot')) unit = 'perFoot';
       else if (u.includes('lb')) unit = 'perLb';
-      else if (u.includes('pack') || u === 'pkg') unit = 'pack';
     }
-    priceCandidates.push({ value: num, unit, idx: m.index });
+    priceCandidates.push({ value: num, unit, packSize, idx: m.index });
   }
   // Prefer a price candidate with a unit hint; otherwise take the first.
   if (priceCandidates.length > 0) {
@@ -4699,6 +4741,7 @@ function extractMcMasterData(text) {
     const pick = withUnit || priceCandidates[0];
     out.price = pick.value;
     out.priceUnit = pick.unit;
+    out.packSize = pick.packSize;
   }
 
   // Availability — common McMaster phrases
@@ -4719,18 +4762,47 @@ function extractMcMasterData(text) {
     }
   }
 
-  // Description — McMaster pages typically have a product title line near the top.
-  // Take the longest line that contains the part # (if found) OR the first non-trivial line.
-  const lines = raw.split(/\r?\n/).map(l => l.trim()).filter(l => l.length >= 8 && l.length <= 200);
-  if (lines.length > 0 && out.partNum) {
-    const partLine = lines.find(l => l.includes(out.partNum));
+  // Description — When McMaster's "Formatted for copying and pasting" setting
+  // is enabled (Account → Settings), product info pastes as 3 clean lines:
+  //   Line 1: part #
+  //   Line 2: description
+  //   Line 3: price
+  // So we look at the line right AFTER the part #, then fall back to the line
+  // BEFORE for unformatted text. Skip price/URL lines.
+  const allLines = raw.split(/\r?\n/).map(l => l.trim());
+  const goodLines = allLines.filter(l => l.length >= 8 && l.length <= 240 && !/^https?:\/\//i.test(l) && !/^\s*\$/.test(l));
+  if (out.partNum) {
+    const partLine = allLines.find(l => l.includes(out.partNum));
     if (partLine) {
-      // Use the line BEFORE the part line as the description, if it looks descriptive
-      const idx = lines.indexOf(partLine);
-      if (idx > 0 && !/^\$|^http/i.test(lines[idx-1])) {
-        out.description = lines[idx-1].slice(0, 140);
+      const idx = allLines.indexOf(partLine);
+      // Try line AFTER first (formatted-paste mode)
+      for (let i = idx + 1; i < Math.min(idx + 3, allLines.length); i++) {
+        const candidate = allLines[i];
+        if (candidate.length >= 8 && candidate.length <= 240
+            && !/^https?:\/\//i.test(candidate)
+            && !/^\s*\$/.test(candidate)
+            && !/^(in stock|backorder|ships?|usually)/i.test(candidate)) {
+          out.description = candidate.slice(0, 200);
+          break;
+        }
+      }
+      // Fall back to line BEFORE
+      if (!out.description) {
+        for (let i = idx - 1; i >= Math.max(0, idx - 3); i--) {
+          const candidate = allLines[i];
+          if (candidate && candidate.length >= 8 && candidate.length <= 240
+              && !/^https?:\/\//i.test(candidate)
+              && !/^\s*\$/.test(candidate)) {
+            out.description = candidate.slice(0, 200);
+            break;
+          }
+        }
       }
     }
+  }
+  // Final fallback: first non-trivial line that isn't a URL/price/availability
+  if (!out.description && goodLines.length > 0) {
+    out.description = goodLines[0].slice(0, 200);
   }
 
   // Anything found?
@@ -8466,22 +8538,6 @@ function renderCustomers() {
     <div style="margin-bottom:16px;">
       <input type="search" placeholder="Search customers (name, code, city, sales rep)…" value="${esc(state.ui.customerSearch)}" oninput="App.setCustomerSearch(this.value)" style="max-width:520px;">
     </div>
-    ${(() => {
-      // v7.41 — one-time wizard banner. Shown until every customer has a folder.
-      const missing = state.customers.filter(c => !((c.oneDriveFolder || '').trim()));
-      if (missing.length === 0 || state.customers.length === 0) return '';
-      return `
-        <div class="card no-print" style="margin-bottom:16px; padding:12px 16px; border-left:3px solid var(--orange);">
-          <div style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
-            <div>
-              <strong>📁 ${missing.length} of ${state.customers.length} customers don't have a OneDrive folder yet.</strong>
-              <div class="hint" style="margin-top:2px;">Map them now in one batch — quote folders will auto-organize under each customer's folder. One-time setup.</div>
-            </div>
-            <button class="btn btn-primary" style="flex:0 0 auto;" onclick="App.openCustFolderWizard()">⚡ Map Folders</button>
-          </div>
-        </div>
-      `;
-    })()}
     ${state.customers.length === 0 ? `
       <div class="empty-state">
         <h3>No customers yet</h3>
@@ -8555,13 +8611,13 @@ function renderCustomersCards(list) {
               <div class="field"><label>Sales Rep</label>${bind({label:'Sales Rep',value:c.salesRep, onChange:v=>{c.salesRep=v;}, placeholder:'HOUSE / MJ / JMJ / MM'})}</div>
             </div>
             <hr>
-            <div style="font-family:var(--font-display); font-size:11px; letter-spacing:0.12em; color:var(--steel); margin-bottom:8px;">ONEDRIVE FOLDER</div>
+            <div style="font-family:var(--font-display); font-size:11px; letter-spacing:0.12em; color:var(--steel); margin-bottom:8px;">ONEDRIVE</div>
             <div class="row" style="gap:8px; align-items:end;">
               <div class="field grow">
-                <label>Folder name (under OneDrive root)</label>
+                <label>Folder name or subpath (under OneDrive root, used to build local quote folder paths)</label>
                 <input type="text" value="${esc(c.oneDriveFolder||'')}"
                   oninput="App.setCustomerOneDriveFolder('${c.id}', this.value)"
-                  placeholder="e.g. ACME-MFG or Acme Manufacturing"
+                  placeholder="e.g. Acme Manufacturing  or  IPS Group\\IPS Akron"
                   style="font-family:var(--font-mono);">
               </div>
               <button class="btn" style="flex:0 0 auto;" onclick="App.openCustomerFolder('${c.id}')"
@@ -8569,10 +8625,29 @@ function renderCustomersCards(list) {
                 📁 Open Folder
               </button>
             </div>
+            <div class="row" style="gap:8px; align-items:end; margin-top:8px;">
+              <div class="field grow">
+                <label>OneDrive web share link (optional, paste from "Share → Copy link")</label>
+                <input type="text" value="${esc(c.oneDriveUrl||'')}"
+                  oninput="App.setCustomerOneDriveUrl('${c.id}', this.value)"
+                  placeholder="https://keymf-my.sharepoint.com/…"
+                  style="font-family:var(--font-mono);">
+              </div>
+              ${c.oneDriveUrl ? `
+                <a class="btn" style="flex:0 0 auto;" href="${esc(c.oneDriveUrl)}" target="_blank" rel="noopener"
+                  title="Opens this customer's folder in the OneDrive web app">
+                  ↗ Open in Web
+                </a>
+              ` : `
+                <button class="btn" style="flex:0 0 auto; opacity:0.5;" disabled title="Paste a OneDrive share URL above to enable">
+                  ↗ Open in Web
+                </button>
+              `}
+            </div>
             <div class="hint" style="margin-top:4px;">
               ${c.oneDriveFolder
-                ? `Quotes for this customer will save under <span class="mono">${esc(sanitizeFolderName(c.oneDriveFolder))}\\Quote_…</span>`
-                : `Not set yet — you'll be prompted to pick a folder name the first time you open a quote folder for this customer.`}
+                ? `Quotes for this customer save under <span class="mono">${esc(sanitizeFolderSubpath(c.oneDriveFolder))}\\${esc(suggestedFolderName({customerId:c.id, quoteNum:'NNNN', date:new Date().toISOString().slice(0,10), parts:[]}))}</span>`
+                : `Folder name not set yet — you'll be prompted the first time you open a quote folder for this customer.`}
             </div>
             <hr>
             <div style="font-family:var(--font-display); font-size:11px; letter-spacing:0.12em; color:var(--steel); margin-bottom:8px;">BILL-TO ADDRESS</div>
@@ -8758,21 +8833,27 @@ function renderSettings() {
           </div>
           <div class="field" style="grid-column:span 2;">
             <label>Folder Name Template (synced — same on every PC)</label>
-            ${bind({label:'Folder template', value:s.shopInfo.oneDriveFolderTemplate||'Quote_{quoteNum}_{customer}', onChange:v=>{s.shopInfo.oneDriveFolderTemplate=v;}, placeholder:'Quote_{quoteNum}_{customer}'})}
-            <div class="hint">Tokens: <code>{quoteNum}</code>, <code>{customer}</code>, <code>{date}</code>. Result is sanitized — no slashes or special chars.</div>
+            ${bind({label:'Folder template', value:s.shopInfo.oneDriveFolderTemplate||'{date}_Q{quoteNum}_{desc}', onChange:v=>{s.shopInfo.oneDriveFolderTemplate=v;}, placeholder:'{date}_Q{quoteNum}_{desc}'})}
+            <div class="hint">
+              Tokens: <code>{date}</code> (YYMM, e.g. <span class="mono">2605</span>), <code>{quoteNum}</code>, <code>{customer}</code>, <code>{desc}</code> (from the quote's "Folder description" field, falls back to first part description).<br>
+              Default: <code>{date}_Q{quoteNum}_{desc}</code> → <span class="mono">2605_Q4296_bracket_assembly</span>. Result is sanitized — no slashes or special chars.
+            </div>
           </div>
         </div>
         <hr>
         <div class="row" style="gap:10px; align-items:center; justify-content:space-between; margin-top:8px;">
           <div>
-            <strong style="font-size:13px;">Per-customer subfolder mapping (v7.41)</strong>
-            <div class="hint" style="margin-top:2px;">Map each customer to their own folder, so quote folders nest under <code>&lt;root&gt;\\&lt;customer&gt;\\&lt;quote&gt;</code>. ${(() => {
-              const missing = state.customers.filter(c => !((c.oneDriveFolder || '').trim())).length;
-              const total = state.customers.length;
-              return total === 0 ? '' : `<strong>${total - missing} of ${total} customers mapped.</strong>`;
-            })()}</div>
+            <strong style="font-size:13px;">Per-customer subfolder mapping</strong>
+            <div class="hint" style="margin-top:2px;">
+              Each customer has its own OneDrive folder field on the customer card. Quotes nest under <code>&lt;root&gt;\\&lt;customer&gt;\\&lt;quote&gt;</code>. ${(() => {
+                const missing = state.customers.filter(c => !((c.oneDriveFolder || '').trim())).length;
+                const total = state.customers.length;
+                return total === 0 ? '' : `<strong>${total - missing} of ${total} customers mapped.</strong>`;
+              })()}
+              <br>Use the auto-detect button to scan a OneDrive folder and bulk-fill matches across all customers in one shot.
+            </div>
           </div>
-          <button class="btn" style="flex:0 0 auto;" onclick="App.openCustFolderWizard()">⚡ Open Mapping Wizard</button>
+          <button class="btn btn-primary" style="flex:0 0 auto;" onclick="App.autoDetectCustFolders()" title="Folder picker opens → navigate to your customers folder in OneDrive → app reads subfolder names and fuzzy-matches them against your customer list. Saves through Cloud Sync so all PCs get the mapping.">🔍 Auto-detect from OneDrive folder</button>
         </div>
       </div>
     </div>
@@ -9587,6 +9668,17 @@ function renderQuoteInfo(q) {
           <div class="field"><label>Payment terms</label>${bind({label:'Payment terms',value:q.paymentTerms, onChange:v=>{q.paymentTerms=v;}})}</div>
           <div class="field" style="grid-column:span 2;"><label>FOB</label>${bind({label:'FOB',value:q.fob, onChange:v=>{q.fob=v;}})}</div>
           <div class="field" style="grid-column:span 3;">
+            <label>Folder description (used in folder name — short, no need to retype the customer)</label>
+            ${bind({
+              label:'Folder description',
+              value:q.folderDesc,
+              onChange:v=>{q.folderDesc=v;},
+              placeholder: (q.parts && q.parts[0] && (q.parts[0].description || q.parts[0].partNum)) || 'e.g. bracket assembly',
+              attrs:'maxlength="60"'
+            })}
+            <div class="hint">Falls back to the first part's description if you leave this blank. Folder will be: <span class="mono">${esc(suggestedFolderName(q))}</span></div>
+          </div>
+          <div class="field" style="grid-column:span 3;">
             <label>OneDrive Folder for this Quote</label>
             ${(() => {
               const localRoot = localStorage.getItem('keystone-onedrive-root') || '';
@@ -10363,12 +10455,60 @@ function renderPartEditor(q, p) {
     <div class="card">
       <div class="card-header">
         <span>Material Stock Estimate</span>
-        <div class="unit-toggle no-print">
-          <button class="${u==='in'?'active':''}" onclick="App.setStockUnits('${p.id}','in')">in</button>
-          <button class="${u==='mm'?'active':''}" onclick="App.setStockUnits('${p.id}','mm')">mm</button>
+        <div class="header-actions" style="display:flex; gap:8px; align-items:center;">
+          ${(() => {
+            // v7.44: Source-type toggle. Raw stock = cut to size from a bar/sheet/round.
+            // Component = off-the-shelf packaged product from McMaster/Grainger/etc.
+            const isComp = !!(p.materialCost && p.materialCost.isComponent);
+            return `
+              <div class="unit-toggle no-print" title="Switch between raw stock to cut versus off-the-shelf component (e.g., McMaster pack)">
+                <button class="${!isComp?'active':''}" onclick="App.setMaterialIsComponent('${p.id}', false)">Raw stock</button>
+                <button class="${isComp?'active':''}" onclick="App.setMaterialIsComponent('${p.id}', true)">Component</button>
+              </div>
+              ${!isComp ? `
+                <div class="unit-toggle no-print">
+                  <button class="${u==='in'?'active':''}" onclick="App.setStockUnits('${p.id}','in')">in</button>
+                  <button class="${u==='mm'?'active':''}" onclick="App.setStockUnits('${p.id}','mm')">mm</button>
+                </div>
+              ` : ''}
+            `;
+          })()}
         </div>
       </div>
       <div class="card-body">
+        ${p.materialCost && p.materialCost.isComponent ? (() => {
+          // v7.44: Off-the-shelf component layout — pack size + $/pack, derived per-piece.
+          const ps = num(p.materialCost.packSize);
+          const pp = num(p.materialCost.perPack);
+          const perPiece = (ps > 0 && pp > 0) ? (pp / ps) : null;
+          return `
+            <div class="form-grid cols-4">
+              <div class="field"><label>Pack size (pieces per pack)</label>${bind({label:'Pack size',value:p.materialCost.packSize, type:'number', onChange:v=>{p.materialCost.packSize=v;}, attrs:'step="1" min="1"'})}<div class="hint">McMaster, Grainger, etc. ship packs of N items</div></div>
+              <div class="field"><label>$ per pack</label>${bind({label:'Price per pack',value:p.materialCost.perPack, type:'number', onChange:v=>{p.materialCost.perPack=v;}, attrs:'step="any" min="0"'})}<div class="hint">total cost for one pack</div></div>
+              <div class="field"><label>Per-piece cost (calc)</label><input type="text" disabled value="${perPiece != null ? '$' + perPiece.toFixed(4) : '—'}"><div class="hint">${perPiece != null ? `$${pp} ÷ ${ps} pcs` : 'enter pack size + price'}</div></div>
+              <div class="field"><label>Material (description)</label><input type="text" disabled value="${esc(p.material || '—')}"><div class="hint">from Part Information above</div></div>
+            </div>
+            <table class="tbl mt-2">
+              <thead><tr>
+                <th>Quantity needed</th>
+                ${p.qtyTiers.map(qt => `<th class="num">${fmtInt(qt)}</th>`).join('')}
+              </tr></thead>
+              <tbody>
+                <tr>
+                  <td>Packs needed</td>
+                  ${p.qtyTiers.map(qt => `<td class="num">${(ps > 0) ? fmtInt(Math.ceil(num(qt) / ps)) : '—'}</td>`).join('')}
+                </tr>
+                <tr class="total">
+                  <td><strong>Material $/piece</strong></td>
+                  ${p.qtyTiers.map((qt,i) => `<td class="num"><strong>${fmtMoney(effectiveMaterialPerPiece(p,i))}</strong></td>`).join('')}
+                </tr>
+              </tbody>
+            </table>
+            <div class="hint" style="margin-top:6px;">
+              Component mode skips stock-cutting calculations. Per-piece cost is just <code>$/pack ÷ pack size</code>. Switch back to "Raw stock" if you'll be cutting from a bar/sheet.
+            </div>
+          `;
+        })() : `
         <div class="form-grid cols-4">
           <div class="field"><label>Stock Form</label>${bind({value:p.stock.form, type:'select', options:STOCK_FORMS, onChange:v=>{p.stock.form=v||'Bar/Block';}})}</div>
           <div class="field"><label>Part Length (${ul})</label>${bind({label:'Part length',value:dispLen, type:'number', format:fmt2, onChange:v=>{p.stock.partLength=toIn(v,u);}, attrs:'step="any" min="0"'})}</div>
@@ -10419,6 +10559,7 @@ function renderPartEditor(q, p) {
             ${stockRows}
           </tr></tbody>
         </table>
+        `}
       </div>
     </div>
 
@@ -10815,7 +10956,7 @@ function renderSupplierCostBody(q, p) {
                   <strong style="font-size:11px; text-transform:uppercase; letter-spacing:0.06em; color:#065F46;">${extracted.source === 'bookmarklet' ? '✓ Bookmarklet JSON detected' : '✓ Extracted from pasted text'}</strong>
                   <div style="display:grid; grid-template-columns:auto 1fr; gap:4px 12px; margin-top:4px;">
                     ${extracted.partNum ? `<div style="color:var(--text-mute);">Part #</div><div><strong>${esc(extracted.partNum)}</strong></div>` : ''}
-                    ${extracted.price != null ? `<div style="color:var(--text-mute);">Price</div><div><strong>${fmtMoney(extracted.price)}</strong>${extracted.priceUnit ? ` <span class="text-mute">(${esc(extracted.priceUnit)})</span>` : ''}</div>` : ''}
+                    ${extracted.price != null ? `<div style="color:var(--text-mute);">Price</div><div><strong>${fmtMoney(extracted.price)}</strong>${extracted.priceUnit === 'pack' && extracted.packSize ? ` <span class="text-mute">(pack of ${extracted.packSize} → ${fmtMoney(extracted.price/extracted.packSize)}/pc)</span>` : extracted.priceUnit ? ` <span class="text-mute">(${esc(extracted.priceUnit)})</span>` : ''}</div>` : ''}
                     ${extracted.availability ? `<div style="color:var(--text-mute);">Availability</div><div>${esc(extracted.availability)}</div>` : ''}
                     ${extracted.url ? `<div style="color:var(--text-mute);">URL</div><div><a href="${esc(extracted.url)}" target="_blank" rel="noopener" class="mono" style="font-size:10px;">${esc(extracted.url.length > 60 ? extracted.url.slice(0,60)+'…' : extracted.url)}</a></div>` : ''}
                     ${extracted.description ? `<div style="color:var(--text-mute);">Description</div><div>${esc(extracted.description)}</div>` : ''}
@@ -10826,7 +10967,9 @@ function renderSupplierCostBody(q, p) {
                   ⚠ Couldn't extract anything from that text. Make sure you're logged in to McMaster when you copy (so prices are visible on the page), and copy a section that includes the price + part # together.
                 </div>
               ` : `
-                <div class="hint" style="margin-top:6px;">Tip: while logged into McMaster, select the product title + price + part # area on the page (Ctrl+A then Ctrl+C works too), paste here. Or click the McMaster button above and use the bookmarklet for one-click capture.</div>
+                <div class="hint" style="margin-top:6px;">
+                <strong>Tip:</strong> in your McMaster account → Settings → Copy and paste settings, pick <strong>"Formatted for copying and pasting"</strong> — then copying a product gives clean 3-line output (part #, description, price per pack of N) that this parser handles perfectly.
+              </div>
               `}
             `}
           </div>
@@ -11179,99 +11322,13 @@ function renderMissingCustFolderModal() {
   setTimeout(() => { const inp = document.getElementById('mcf-input'); if (inp) inp.focus(); inp && inp.select && inp.select(); }, 30);
 }
 
-function renderCustFolderWizardModal() {
-  const host = document.getElementById('cust-folder-host');
-  if (!host) return;
-  const wiz = state.ui.custFolderWizard;
-  if (!wiz || !wiz.open) { return _maybeClearCustFolderHost(); }
-  const search = (wiz.search || '').toLowerCase();
-  let list = state.customers.slice().sort((a,b) => (a.name||'').localeCompare(b.name||''));
-  if (wiz.onlyMissing) list = list.filter(c => !((wiz.drafts[c.id] || '').trim()));
-  if (search) list = list.filter(c =>
-    (c.name||'').toLowerCase().includes(search) ||
-    (c.code||'').toLowerCase().includes(search)
-  );
-  const totalMissing = state.customers.filter(c => !((wiz.drafts[c.id] || '').trim())).length;
-  const totalCustomers = state.customers.length;
-  const setCount = totalCustomers - totalMissing;
-  host.innerHTML = `
-    <div class="modal-backdrop" onclick="App.closeCustFolderWizard()">
-      <div class="modal" style="width:820px; max-width:96vw; max-height:90vh; display:flex; flex-direction:column;" onclick="event.stopPropagation()">
-        <div class="modal-header">Map Customers to OneDrive Folders</div>
-        <div class="modal-body" style="padding:16px 20px; overflow-y:auto; flex:1; min-height:300px;">
-          <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom:12px;">
-            <div>
-              <div style="font-size:13px;">${setCount} of ${totalCustomers} customers have folders set</div>
-              <div class="hint" style="margin-top:2px;">Each folder will live under your OneDrive root. Empty rows stay empty (you'll be prompted later).</div>
-            </div>
-            <div style="display:flex; flex-direction:column; gap:6px; flex:0 0 auto;">
-              <button class="btn btn-primary btn-sm" onclick="App.autoDetectCustFolders()" title="Open a folder picker, navigate to your customers folder in OneDrive, app reads the subfolder names and matches them to your 57 customers automatically">🔍 Auto-detect from OneDrive folder</button>
-              <button class="btn btn-sm" onclick="App.bulkFillCustFolderWizard()" title="Fallback: fills every empty row with a sanitized version of the customer name (use this if auto-detect didn't match enough)">⚡ Fill empty rows from customer name</button>
-            </div>
-          </div>
-          <div class="hint" style="background:var(--bg); border-left:3px solid var(--blue); padding:8px 12px; margin-bottom:10px; font-size:11px;">
-            <strong>🔍 Auto-detect:</strong> click the blue button → folder picker opens → navigate to <span class="mono">KMF Documents\\___Customers</span> (or wherever your customer folders live) → click Select. The app reads every subfolder name (and one level deeper to catch nested groups like IPS Group) and fuzzy-matches them against your customer list. Only fills empty rows, never overwrites your entries.
-          </div>
-          <div class="row" style="gap:8px; margin-bottom:10px; align-items:center;">
-            <input type="search" placeholder="Search by customer name or code…"
-              value="${esc(wiz.search)}" oninput="App.setCustFolderWizardSearch(this.value)"
-              style="flex:1; font-size:13px; padding:6px 10px;">
-            <label style="display:inline-flex; gap:4px; align-items:center; font-size:12px; cursor:pointer;">
-              <input type="checkbox" ${wiz.onlyMissing?'checked':''} onchange="App.toggleCustFolderWizardOnlyMissing()" style="width:auto; padding:0; margin:0;">
-              Only show missing
-            </label>
-          </div>
-          ${list.length === 0 ? `
-            <div class="empty-state" style="padding:28px;">
-              <p style="margin:0;">${wiz.onlyMissing && totalMissing === 0 ? '🎉 All customers have OneDrive folders set.' : 'No matches.'}</p>
-            </div>
-          ` : `
-            <table class="tbl" style="font-size:12px;">
-              <thead>
-                <tr>
-                  <th style="width:30%;">Customer</th>
-                  <th style="width:80px;">Code</th>
-                  <th>Folder name (under OneDrive root)</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${list.map(c => {
-                  const draft = wiz.drafts[c.id] || '';
-                  return `
-                    <tr>
-                      <td><strong>${esc(c.name || '(unnamed)')}</strong></td>
-                      <td class="text-mute small">${esc(c.code || '')}</td>
-                      <td>
-                        <input type="text" value="${esc(draft)}"
-                          data-cust-folder-input="${c.id}"
-                          oninput="App.setCustFolderWizardField('${c.id}', this.value)"
-                          placeholder="(leave empty to skip)"
-                          style="width:100%; font-family:var(--font-mono); padding:4px 8px; font-size:12px;">
-                      </td>
-                    </tr>
-                  `;
-                }).join('')}
-              </tbody>
-            </table>
-          `}
-        </div>
-        <div class="modal-footer" style="display:flex; gap:8px; justify-content:space-between; padding:12px 20px; border-top:1px solid var(--line);">
-          <span class="text-mute small">${totalMissing} still missing</span>
-          <div style="display:flex; gap:8px;">
-            <button class="btn" onclick="App.closeCustFolderWizard()">Cancel</button>
-            <button class="btn btn-primary" onclick="App.saveCustFolderWizard()">Save All</button>
-          </div>
-        </div>
-      </div>
-    </div>
-  `;
-}
+// Wizard removed in v7.43 — auto-detect lives in Settings → OneDrive instead.
 
 function _maybeClearCustFolderHost() {
   const host = document.getElementById('cust-folder-host');
   if (!host) return;
-  const m = state.ui.missingCustFolder, w = state.ui.custFolderWizard;
-  if (!(m && m.open) && !(w && w.open)) host.innerHTML = '';
+  const m = state.ui.missingCustFolder;
+  if (!(m && m.open)) host.innerHTML = '';
 }
 
 function renderPartTemplateModal() {
@@ -12941,6 +12998,17 @@ const App = {
     showToast('Vendor added and linked to this material');
   },
 
+  // v7.44: Toggle a part between "raw stock to cut" and "off-the-shelf component".
+  setMaterialIsComponent(partId, isComponent) {
+    update(s => {
+      const q = getActiveQuote(); if (!q) return;
+      const p = q.parts.find(x => x.id === partId); if (!p) return;
+      if (!p.materialCost) p.materialCost = { perPiece: [null], perBar: null, perSheet: null, vendorId: null, vendorPartNum: '', vendorUrl: '' };
+      p.materialCost.isComponent = !!isComponent;
+      if (isComponent && p.materialCost.packSize == null) p.materialCost.packSize = 1;
+    });
+  },
+
   // v7.43: McMaster Smart Paste — extract part #, price, availability from
   // whatever the user copied off the McMaster product page.
   openMcMasterPaste(partId) {
@@ -12984,17 +13052,30 @@ const App = {
         applied.push('URL');
       }
       if (ex.price != null && isFinite(ex.price) && ex.price > 0) {
-        // Price routing: 'each' or no unit → perPiece[0]; 'per100' → perPiece / 100;
-        // 'pack' → perPiece (caller can adjust); rest → perPiece as fallback
         if (!Array.isArray(p.materialCost.perPiece)) p.materialCost.perPiece = [];
         ensureMatPerPiece(p);
-        if (ex.priceUnit === 'per100') {
-          p.materialCost.perPiece[0] = ex.price / 100;
-          applied.push('price (÷100)');
-        } else {
+        // v7.44: Pack pricing → automatically flip to Component mode and store
+        // pack size + $/pack. The part stops being treated as "cut from stock".
+        if (ex.priceUnit === 'pack' && ex.packSize && ex.packSize > 0) {
+          p.materialCost.isComponent = true;
+          p.materialCost.packSize = ex.packSize;
+          p.materialCost.perPack = ex.price;
+          applied.push(`component mode, $${ex.price}/pack of ${ex.packSize} → $${(ex.price/ex.packSize).toFixed(4)}/pc`);
+        } else if (ex.priceUnit === 'each' || !ex.priceUnit) {
+          // Per-each pricing — could still be a component (single-unit pack)
+          // OR raw stock. Don't auto-flip; just fill the per-piece field.
           p.materialCost.perPiece[0] = ex.price;
-          applied.push('price');
+          applied.push(`price ($${ex.price} each)`);
+        } else {
+          // Other unit hints (per-foot, per-lb) — go to perPiece for now
+          p.materialCost.perPiece[0] = ex.price;
+          applied.push(`price (${ex.priceUnit})`);
         }
+      }
+      // Description — fill if part description is empty
+      if (ex.description && !p.description) {
+        p.description = ex.description;
+        applied.push('description');
       }
       // Availability + drawing URL go into notes if we don't have dedicated fields
       const noteAdditions = [];
@@ -13741,6 +13822,15 @@ Trimble Tool`;
     clearTimeout(window._custFolderT);
     window._custFolderT = setTimeout(() => render(), 600);
   },
+  // v7.43: customer-level OneDrive web share URL
+  setCustomerOneDriveUrl(customerId, value) {
+    update(s => {
+      const c = s.customers.find(x => x.id === customerId);
+      if (c) c.oneDriveUrl = value || '';
+    });
+    clearTimeout(window._custUrlT);
+    window._custUrlT = setTimeout(() => render(), 600);
+  },
   openCustomerFolder(customerId) {
     const c = getCustomer(customerId); if (!c) return;
     if (!localStorage.getItem('keystone-onedrive-root')) {
@@ -13796,68 +13886,30 @@ Trimble Tool`;
     });
     if (typeof cb === 'function') cb();
   },
-  // ----- One-time wizard to map all existing customers to OneDrive folders -----
-  openCustFolderWizard() {
-    const drafts = {};
-    state.customers.forEach(c => {
-      drafts[c.id] = c.oneDriveFolder || '';
-    });
-    state.ui.custFolderWizard = {
-      open: true,
-      drafts,
-      search: '',
-      onlyMissing: true,
-    };
-    render();
-  },
-  closeCustFolderWizard() {
-    if (state.ui.custFolderWizard) state.ui.custFolderWizard.open = false;
-    render();
-  },
-  setCustFolderWizardField(customerId, value) {
-    if (!state.ui.custFolderWizard) return;
-    state.ui.custFolderWizard.drafts[customerId] = value;
-    // Don't re-render on every keystroke
-  },
-  setCustFolderWizardSearch(value) {
-    if (!state.ui.custFolderWizard) return;
-    state.ui.custFolderWizard.search = value || '';
-    render();
-  },
-  toggleCustFolderWizardOnlyMissing() {
-    if (!state.ui.custFolderWizard) return;
-    state.ui.custFolderWizard.onlyMissing = !state.ui.custFolderWizard.onlyMissing;
-    render();
-  },
-  // v7.42 — Auto-detect from a OneDrive folder via showDirectoryPicker.
-  // Recursively scans the picked folder + 1 level down (handles "IPS Group"
-  // style nests), runs the matcher, fills empty drafts. Browsers without
-  // File System Access API (Firefox, older Edge) fall back to a notice.
+  // v7.43 — Auto-detect from a OneDrive folder via showDirectoryPicker.
+  // Writes directly to state.customers via update() so changes flow through
+  // SyncEngine to Firebase (visible to all PCs). Only fills customers whose
+  // oneDriveFolder is currently EMPTY — never overwrites your edits.
+  // Scans the picked folder + 1 level down to handle "IPS Group" style nests.
   async autoDetectCustFolders() {
-    if (!state.ui.custFolderWizard) return;
     if (typeof window.showDirectoryPicker !== 'function') {
-      alert('Auto-detect requires Chrome or Edge (the File System Access API). On other browsers, you\'ll need to fill the wizard manually.');
+      alert('Auto-detect requires Chrome or Edge (the File System Access API). On other browsers, set folders one customer at a time on the customer card.');
       return;
     }
     let dirHandle;
     try {
       dirHandle = await window.showDirectoryPicker({ mode: 'read' });
     } catch (e) {
-      // User cancelled or denied
       if (e && e.name === 'AbortError') return;
       alert('Could not open folder picker: ' + e.message);
       return;
     }
-    // Collect folders 2 levels deep: top-level entries + 1 level into each
-    // top-level folder. The IPS Group case → "IPS Group/IPS Akron" gets
-    // both "IPS Group" (top level) and "IPS Akron" (one level down) as
-    // candidates, with paths "IPS Group" and "IPS Group\IPS Akron".
+    // Scan 2 levels deep
     const folders = [];
     try {
       for await (const entry of dirHandle.values()) {
         if (entry.kind !== 'directory') continue;
         folders.push({ name: entry.name, path: entry.name });
-        // One level deeper
         try {
           for await (const sub of entry.values()) {
             if (sub.kind === 'directory') {
@@ -13874,66 +13926,47 @@ Trimble Tool`;
       alert('Picked folder appears to be empty (no subfolders).');
       return;
     }
-    // Match — but only fill rows that are currently EMPTY in the wizard,
-    // so we never overwrite user-entered values.
-    const wiz = state.ui.custFolderWizard;
-    const customersWithEmptyDrafts = state.customers.filter(c =>
-      !((wiz.drafts[c.id] || '').trim())
+    // Match only customers with empty oneDriveFolder
+    const customersWithEmptyFolders = state.customers.filter(c =>
+      !((c.oneDriveFolder || '').trim())
     );
-    const result = matchCustomersToFolders(customersWithEmptyDrafts, folders);
-    let filled = 0;
-    Object.entries(result.matches).forEach(([custId, folderPath]) => {
-      wiz.drafts[custId] = folderPath;
-      filled++;
-    });
-    render();
-    const stillEmpty = state.customers.filter(c => !((wiz.drafts[c.id] || '').trim())).length;
-    const unmatchedFolderCount = result.unmatchedFolders.length;
-    const summary = [
-      `Auto-matched ${filled} customer${filled!==1?'s':''} to folders.`,
-      stillEmpty > 0 ? `${stillEmpty} customer${stillEmpty!==1?'s':''} still need folders (no clear match found).` : '',
-      unmatchedFolderCount > 0 ? `${unmatchedFolderCount} folder${unmatchedFolderCount!==1?'s':''} in OneDrive have no matching customer (probably old/unused).` : '',
-    ].filter(Boolean).join(' ');
-    showToast(summary, 7000);
-  },
-
-  // Quick-fill empty fields with sanitized customer name
-  bulkFillCustFolderWizard() {
-    if (!state.ui.custFolderWizard) return;
-    const wiz = state.ui.custFolderWizard;
-    state.customers.forEach(c => {
-      if (!wiz.drafts[c.id] || !wiz.drafts[c.id].trim()) {
-        // Sanitize: strip illegal chars, leave spaces alone
-        const clean = (c.name || '').replace(/[<>:"/\\|?*\x00-\x1F]/g, '').trim();
-        if (clean) wiz.drafts[c.id] = clean;
-      }
-    });
-    // Capture the input DOM values too in case user has unsaved keystrokes —
-    // but easier path: re-render so all inputs reflect the new drafts.
-    render();
-  },
-  saveCustFolderWizard() {
-    const wiz = state.ui.custFolderWizard;
-    if (!wiz) return;
-    // Capture any in-flight DOM input values (since we don't re-render on
-    // every keystroke). Find each row input by data attribute.
-    document.querySelectorAll('[data-cust-folder-input]').forEach(input => {
-      const id = input.getAttribute('data-cust-folder-input');
-      if (id) wiz.drafts[id] = input.value;
-    });
-    let changed = 0;
+    const result = matchCustomersToFolders(customersWithEmptyFolders, folders);
+    const matchEntries = Object.entries(result.matches);
+    if (matchEntries.length === 0) {
+      const stillEmpty = customersWithEmptyFolders.length;
+      alert(`No matches found. ${folders.length} folders scanned, ${stillEmpty} customers still need folders. Either the names are too different from your customer records, or you may need to map them manually on the customer cards.`);
+      return;
+    }
+    // Confirm before bulk-writing through Cloud Sync
+    const totalCust = state.customers.length;
+    const stillEmptyAfter = totalCust - (totalCust - customersWithEmptyFolders.length) - matchEntries.length;
+    const confirmMsg = `Apply ${matchEntries.length} auto-matched folder${matchEntries.length!==1?'s':''} to your customer records? This saves through Cloud Sync to all PCs.\n\n` +
+      `• Auto-matched: ${matchEntries.length}\n` +
+      `• Still empty after: ${stillEmptyAfter}\n` +
+      `• Folders in OneDrive with no matching customer: ${result.unmatchedFolders.length}`;
+    if (!confirm(confirmMsg)) return;
+    let saved = 0;
     update(s => {
-      s.customers.forEach(c => {
-        const v = (wiz.drafts[c.id] || '').trim();
-        if (v !== (c.oneDriveFolder || '')) {
-          c.oneDriveFolder = v;
-          changed++;
+      matchEntries.forEach(([custId, folderPath]) => {
+        const c = s.customers.find(x => x.id === custId);
+        if (c && !((c.oneDriveFolder || '').trim())) {
+          c.oneDriveFolder = folderPath;
+          saved++;
         }
       });
-      s.ui.custFolderWizard.open = false;
     });
-    showToast(`Saved OneDrive folder names — updated ${changed} customer${changed!==1?'s':''}.`);
+    showToast(`Auto-detect complete — ${saved} customer${saved!==1?'s':''} mapped. Synced to Firebase.`, 6000);
   },
+
+  // Stub keepers for unused wizard methods so anything still referencing
+  // them (e.g., old localStorage UI state) doesn't crash. No-ops as of v7.43.
+  openCustFolderWizard() { App.autoDetectCustFolders(); },
+  closeCustFolderWizard() { /* no-op */ },
+  setCustFolderWizardField() { /* no-op */ },
+  setCustFolderWizardSearch() { /* no-op */ },
+  toggleCustFolderWizardOnlyMissing() { /* no-op */ },
+  bulkFillCustFolderWizard() { /* no-op */ },
+  saveCustFolderWizard() { /* no-op: wizard removed in v7.43 */ },
 
   // --- Cloud Sync ---
   async connectSync() {

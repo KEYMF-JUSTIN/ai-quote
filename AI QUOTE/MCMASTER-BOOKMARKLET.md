@@ -2,6 +2,8 @@
 
 One-time install. While on any McMaster product page, click the bookmarklet → it grabs part #, price, availability, description, and drawing URL from the page and copies a JSON blob to your clipboard. Switch to AI Quote → open Smart Paste → paste → Apply.
 
+> **The simpler way first:** McMaster has a built-in option that does most of this without a bookmarklet. Go to your McMaster account → **Settings** → **Copy and paste settings** → pick **"Formatted for copying and pasting"** → Save. Then when you select + copy a Product Detail box on any product page, it pastes as a clean 3-line block: `part #` / `description` / `price per pack of N`. AI Quote's Smart Paste parser handles that format directly — no bookmarklet needed. The bookmarklet below is still useful when you want a one-click capture that also includes the drawing URL.
+
 ## Install (one-time)
 
 1. Show your Chrome bookmarks bar if it's hidden: `Ctrl+Shift+B`
