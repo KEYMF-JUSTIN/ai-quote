@@ -1,48 +1,49 @@
-# Bootstrap Historical Data — v7.38.0
+# Bootstrap Historical Records — v7.39.0
 
-Two paths to load 648 orders + 238 quotes into the live AI Quote app:
+This version puts the 2024–2026 history into the **live** Quotes + Orders workspaces (not the Archive). Records show up as `📜 imported` pill badges in the lists. Quote totals are frozen (immune to markup changes); order totals are stored snapshots.
 
-## Option A — In-app (visual, 5 clicks per file)
+## How to load
 
-1. Deploy v7.38.0 via GitHub Desktop. Wait 60s for Pages rebuild. Hard refresh (Ctrl+Shift+R) the live URL.
-2. In AI Quote → left nav → **Invoice Archive** → click "📥 Import from JobBOSS".
-3. Click "📁 Browse for invoice file" → pick **ORDERS.xlsx**.
-4. Confirm "11 of 11 columns auto-detected" → click **Import**.
-5. Left nav → **Quote Archive** → "📥 Import from JobBOSS" → pick **QUOTES.xlsx** → confirm "10 of 10 columns auto-detected" → **Import**.
+1. Commit + push: `index.html` (v7.39.0) and `historical-bootstrap.json` together.
+2. Wait ~60s for the GitHub Pages rebuild. Hard refresh (Ctrl+Shift+R) the live URL — header pill should read **v7.39.0**.
+3. Sign in. Cloud Sync pill should be green.
+4. Open **Quotes** (or **Orders**) → top-right **🗃 Import History** button → confirm dialog → done.
 
-Each import fuzzy-matches customer names to your existing customer list. The modal shows you how many will auto-link before you commit. SyncEngine pushes both archives to Firebase as soon as you click Import.
+The button calls `App.bootstrapLiveHistoricalRecords()` which:
 
-## Option B — One-paste console (no clicks after deploy)
+- Fetches `historical-bootstrap.json` from the same Pages origin
+- Builds 238 quote records (status=sent, frozen total)
+- Builds 648 order records (status mapped from JobBOSS Open/Closed, total stored)
+- Skips any record whose Quote # / Order # already exists in your data
+- Fuzzy-matches every record's customer to your customer list (by code, then by name)
+- Fuzzy-links each order back to its originating quote: same customer, quote ≤90 days before order, scored by date + amount distance
+- Pushes everything via SyncEngine → Firebase → all signed-in browsers see it
 
-1. Deploy v7.38.0. Open the live app. Sign in (Cloud Sync connected, green pill in header).
-2. Open browser DevTools → Console tab.
-3. Paste the snippet below and press Enter.
+Toast at the end reports counts: `Imported N quotes + M orders · X customer links · Y quote→order links`.
 
-```js
-(async () => {
-  const data = await fetch('historical-bootstrap.json').then(r => r.json());
-  const invMap = detectInvoiceColumns(data.archivedInvoices.headers);
-  const qMap   = detectQuoteColumns(data.archivedQuotes.headers);
-  const batch  = 'bootstrap-' + Date.now().toString(36);
-  const invRecs = buildInvoicesFromCsv(data.archivedInvoices.rows, invMap, batch).records;
-  const qRecs   = buildQuotesFromCsv(data.archivedQuotes.rows, qMap, batch).records;
-  update(s => {
-    if (!Array.isArray(s.archivedQuotes)) s.archivedQuotes = [];
-    s.archivedInvoices.push(...invRecs);
-    s.archivedQuotes.push(...qRecs);
-  });
-  const invMatched = invRecs.filter(r => r.customerId).length;
-  const qMatched   = qRecs.filter(r => r.customerId).length;
-  const invTotal   = invRecs.reduce((s,r) => s + (num(r.amount)||0), 0);
-  const qTotal     = qRecs.reduce((s,r) => s + (num(r.amount)||0), 0);
-  console.log(`OK: ${invRecs.length} invoices (${invMatched} customers linked, ${fmtMoney(invTotal)}) + ${qRecs.length} quotes (${qMatched} customers linked, ${fmtMoney(qTotal)})`);
-})();
-```
+## What changed in v7.39.0
 
-The snippet fetches `historical-bootstrap.json` from the same Pages origin, runs your existing fuzzy customer matcher, and pushes everything in one transaction. SyncEngine then propagates to Firebase.
+- `APP_VERSION` → `'7.39.0'`
+- `quoteTotalAt()` now honors `quote.importedTotal` when `quote.imported === true` — frozen totals
+- New helpers in module body: `buildLiveQuoteFromRow`, `buildLiveOrderFromRow`, `fuzzyLinkLiveOrdersToQuotes`
+- New App method: `bootstrapLiveHistoricalRecords()`
+- New buttons on Quotes + Orders page headers
+- List renderers show `📜 imported` pill and "historical (no line items)" subtitle on imported records
 
-## File checklist (must be committed together)
+## Imported record flags
 
-- `index.html` (v7.38.0 with Quote Archive feature)
-- `historical-bootstrap.json` (886 rows of header data)
-- `BOOTSTRAP-HISTORICAL-DATA.md` (this file — optional)
+Imported quotes carry: `imported: true`, `importedTotal`, `importedSalesman`, `importedCustomerName`, `importedCustomerCode`, `importBatch`, `importedAt`.
+
+Imported orders carry: `imported: true`, `importedSalesman`, `importedRawStatus`, `importedCustomerName`, `importedCustomerCode`, `importBatch`, `importedAt`, plus the normal `total`, `status`, `fromQuoteId/Num` (if linkage matched).
+
+`parts: []` on both. Detail pages render gracefully — the existing renderers handle empty parts arrays. UX polish on the detail view for historical records is a follow-up.
+
+## Re-running
+
+The button is **idempotent** — the dedup-by-number check means clicking twice won't double-load. Safe to re-run if the first attempt errored.
+
+## Files to commit
+
+- `index.html` (v7.39.0)
+- `historical-bootstrap.json` (886 rows, ~155 KB)
+- `AI QUOTE/BOOTSTRAP-HISTORICAL-DATA.md` (this file — optional)

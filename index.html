@@ -497,7 +497,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.38.0';
+const APP_VERSION = '7.39.0';
 
 // v7.34.1: Pre-baked Firebase config for the Keystone shop's keystone-quoting
 // project. Users still need to enter their own email + password, but the
@@ -2560,6 +2560,149 @@ function detectQuoteColumns(headers) {
   return map;
 }
 
+// =================================================================
+// v7.39 — LIVE-WORKSPACE HISTORICAL IMPORT
+// Build state.quotes / state.orders records from JobBOSS header rows.
+// Each record gets parts=[] plus a frozen total (quote.importedTotal /
+// order.total) so the live workspaces show authentic dates, customers,
+// and amounts without faking line-item data.
+// =================================================================
+function buildLiveQuoteFromRow(row, colMap, batchId) {
+  const quoteNum = String(row[colMap.quoteNum] || '').trim();
+  if (!quoteNum) return null;
+  const customerCode = colMap.customerCode >= 0 ? String(row[colMap.customerCode] || '').trim() : '';
+  const customerName = colMap.customerName >= 0 ? String(row[colMap.customerName] || '').trim() : '';
+  const quoteDate = colMap.quoteDate >= 0 ? parseArchiveDate(row[colMap.quoteDate]) : '';
+  const amount = colMap.amount >= 0 ? parseArchiveMoney(row[colMap.amount]) : null;
+  const quotedBy = colMap.quotedBy >= 0 ? String(row[colMap.quotedBy] || '').trim() : '';
+  const salesman = colMap.salesman >= 0 ? String(row[colMap.salesman] || '').trim() : '';
+  const inquiryNum = colMap.inquiryNum >= 0 ? String(row[colMap.inquiryNum] || '').trim() : '';
+  const rawNotes = colMap.notes >= 0 ? String(row[colMap.notes] || '').trim() : '';
+  const clean = (s) => (s.toLowerCase() === 'null') ? '' : s;
+  const matched = findCustomerByName(customerName, customerCode);
+  return {
+    id: uid(),
+    quoteNum,
+    rfqNum: clean(inquiryNum),
+    date: quoteDate,
+    customerId: matched ? matched.id : null,
+    contact: '', email: '', phone: '',
+    quotedBy: clean(quotedBy),
+    leadTime: '', validFor: 30,
+    paymentTerms: 'Net 30', fob: 'Origin — Keystone shop',
+    oneDriveUrl: '',
+    status: 'sent',                     // historical quotes were sent at the time
+    notes: clean(rawNotes),
+    showTotalOnPDF: true,
+    parts: [],                          // header-only — line items not migrated
+    // v7.39 historical-import flags
+    imported: true,
+    importedTotal: amount,
+    importedSalesman: clean(salesman),
+    importedCustomerName: customerName,
+    importedCustomerCode: customerCode,
+    importBatch: batchId,
+    importedAt: new Date().toISOString(),
+  };
+}
+
+function buildLiveOrderFromRow(row, colMap, batchId) {
+  const orderNum = String(row[colMap.invoiceNum] || '').trim();
+  if (!orderNum) return null;
+  const customerCode = colMap.customerCode >= 0 ? String(row[colMap.customerCode] || '').trim() : '';
+  const customerName = colMap.customerName >= 0 ? String(row[colMap.customerName] || '').trim() : '';
+  const orderDate = colMap.invoiceDate >= 0 ? parseArchiveDate(row[colMap.invoiceDate]) : '';
+  const dueDate = colMap.dueDate >= 0 ? parseArchiveDate(row[colMap.dueDate]) : '';
+  const amount = colMap.amount >= 0 ? parseArchiveMoney(row[colMap.amount]) : 0;
+  const status = (colMap.status >= 0 ? String(row[colMap.status] || '').trim() : '').toLowerCase();
+  const poRef = colMap.poRef >= 0 ? String(row[colMap.poRef] || '').trim() : '';
+  const salesman = colMap.salesman >= 0 ? String(row[colMap.salesman] || '').trim() : '';
+  const rawNotes = colMap.notes >= 0 ? String(row[colMap.notes] || '').trim() : '';
+  const clean = (s) => (s.toLowerCase() === 'null') ? '' : s;
+  // Map JobBOSS status → state.orders enum (open | in_progress | shipped | closed | cancelled)
+  let mappedStatus = 'open';
+  if (status === 'closed' || status === 'shipped' || status === 'invoiced' || status === 'complete') mappedStatus = 'closed';
+  else if (status === 'cancelled' || status === 'canceled' || status === 'void') mappedStatus = 'cancelled';
+  else if (status === 'in process' || status === 'in_process' || status === 'wip') mappedStatus = 'in_progress';
+  const matched = findCustomerByName(customerName, customerCode);
+  return {
+    id: uid(),
+    orderNum,
+    poNum: clean(poRef),
+    fromQuoteId: null,             // filled in by fuzzyLinkLiveOrdersToQuotes
+    fromQuoteNum: '',
+    customerId: matched ? matched.id : null,
+    qtyIdx: 0,
+    orderDate,
+    targetShip: dueDate,
+    status: mappedStatus,
+    notes: clean(rawNotes),
+    parts: [],                     // header-only — line items not migrated
+    nre: 0,
+    total: (amount != null && isFinite(amount)) ? num(amount) : 0,
+    // v7.39 historical-import flags
+    imported: true,
+    importedSalesman: clean(salesman),
+    importedRawStatus: status,
+    importedCustomerName: customerName,
+    importedCustomerCode: customerCode,
+    importBatch: batchId,
+    importedAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * After both quotes and orders are imported, fuzzy-link each order back to
+ * its originating quote: same customer, quote dated within 90 days BEFORE
+ * the order, prefer closest amount then closest date. Mutates orders in place.
+ * Returns the count of linked orders.
+ */
+function fuzzyLinkLiveOrdersToQuotes(orders, quotes) {
+  let linked = 0;
+  // Index quotes by customerId for O(n+m) scan
+  const byCust = new Map();
+  quotes.forEach(q => {
+    if (!q.customerId || !q.date || !q.imported) return;
+    if (!byCust.has(q.customerId)) byCust.set(q.customerId, []);
+    byCust.get(q.customerId).push(q);
+  });
+  byCust.forEach(arr => arr.sort((a,b) => (a.date || '').localeCompare(b.date || '')));
+  orders.forEach(o => {
+    if (!o.imported || !o.customerId || !o.orderDate || o.fromQuoteId) return;
+    const candidates = byCust.get(o.customerId) || [];
+    if (candidates.length === 0) return;
+    const oDate = Date.parse(o.orderDate);
+    if (!isFinite(oDate)) return;
+    const maxBackDays = 90;
+    const minDate = oDate - maxBackDays * 86400000;
+    const oTotal = num(o.total) || 0;
+    const scored = [];
+    candidates.forEach(q => {
+      const qDate = Date.parse(q.date);
+      if (!isFinite(qDate)) return;
+      if (qDate > oDate) return;          // quote must precede order
+      if (qDate < minDate) return;        // and within 90 days
+      const dayDiff = (oDate - qDate) / 86400000;
+      const qTotal = num(q.importedTotal) || 0;
+      let amtScore = 1.0;
+      if (qTotal > 0 && oTotal > 0) {
+        const ratio = Math.abs(qTotal - oTotal) / Math.max(qTotal, oTotal);
+        amtScore = ratio;                 // 0 = same, 1 = 100% off
+      }
+      // Lower is better: weighted day distance + amount distance
+      const score = (dayDiff / maxBackDays) + amtScore * 1.5;
+      scored.push({ q, dayDiff, amtScore, score });
+    });
+    if (scored.length === 0) return;
+    scored.sort((a,b) => a.score - b.score);
+    const best = scored[0];
+    o.fromQuoteId = best.q.id;
+    o.fromQuoteNum = best.q.quoteNum;
+    linked++;
+  });
+  return linked;
+}
+
 function buildQuotesFromCsv(rows, colMap, batchId) {
   const records = [];
   rows.forEach((row) => {
@@ -2942,7 +3085,14 @@ function quoteNREtotal(quote) {
   if (!quote || !Array.isArray(quote.parts)) return 0;
   return quote.parts.reduce((s,p) => s + totalNRE(p), 0);
 }
-function quoteTotalAt(quote, qtyIdx) { return quoteSubtotalAt(quote, qtyIdx) + quoteNREtotal(quote); }
+function quoteTotalAt(quote, qtyIdx) {
+  // v7.39: historical imports carry a frozen total from JobBOSS — return it
+  // directly so totals don't drift when settings.markups change.
+  if (quote && quote.imported && quote.importedTotal != null && isFinite(quote.importedTotal)) {
+    return num(quote.importedTotal);
+  }
+  return quoteSubtotalAt(quote, qtyIdx) + quoteNREtotal(quote);
+}
 
 // ----- Pricing memory -----
 // Record a price point for a (customer, material) combo.  Called when user
@@ -3653,7 +3803,10 @@ function renderQuotesList() {
         <div class="page-title">Quotes</div>
         <div class="page-subtitle">${filtered.length} of ${all.length}</div>
       </div>
-      <button class="btn btn-primary" onclick="App.newQuote()">+ New Quote</button>
+      <div style="display:flex; gap:6px;">
+        <button class="btn" onclick="App.bootstrapLiveHistoricalRecords()" title="One-time load of 2024–2026 quote + order history from JobBOSS">🗃 Import History</button>
+        <button class="btn btn-primary" onclick="App.newQuote()">+ New Quote</button>
+      </div>
     </div>
     <div class="card no-print" style="padding:14px 16px; margin-bottom:16px;">
       <div style="display:grid; grid-template-columns: 2fr 1fr 1.5fr 1fr auto; gap:10px; align-items:end;">
@@ -3701,9 +3854,9 @@ function renderQuotesList() {
       return `
         <div class="list-card" onclick="App.openQuote('${q.id}')">
           <div>
-            <div class="list-card-title">${esc(q.quoteNum || '(no quote #)')} <span class="pill ${esc(q.status)}">${esc(q.status)}</span></div>
+            <div class="list-card-title">${esc(q.quoteNum || '(no quote #)')} <span class="pill ${esc(q.status)}">${esc(q.status)}</span>${q.imported ? ' <span class="pill" style="background:#E5E7EB; color:#374151;">📜 imported</span>' : ''}</div>
             <div class="list-card-meta">
-              ${esc(c?.name || '(no customer)')} · ${esc(q.date)} · ${q.parts.length} part${q.parts.length!==1?'s':''}
+              ${esc(c?.name || (q.imported ? q.importedCustomerName || '(no customer)' : '(no customer)'))} · ${esc(q.date)} · ${q.imported ? 'historical (no line items)' : `${q.parts.length} part${q.parts.length!==1?'s':''}`}
               ${q.oneDriveUrl ? ' · <span style="color:var(--navy);">📁 OneDrive</span>' : ''}
             </div>
           </div>
@@ -4860,6 +5013,9 @@ function renderOrders() {
         <div class="page-title">Orders</div>
         <div class="page-subtitle">${filtered.length} of ${all.length} · accepted quotes converted to jobs</div>
       </div>
+      <div style="display:flex; gap:6px;">
+        <button class="btn" onclick="App.bootstrapLiveHistoricalRecords()" title="One-time load of 2024–2026 quote + order history from JobBOSS">🗃 Import History</button>
+      </div>
     </div>
     <div class="card no-print" style="padding:14px 16px; margin-bottom:16px;">
       <div style="display:grid; grid-template-columns: 2fr 1fr auto; gap:10px; align-items:end;">
@@ -4894,9 +5050,10 @@ function renderOrders() {
             <div class="list-card-title">
               ${esc(o.orderNum || '(no order #)')}
               <span class="pill ${o.status==='shipped'||o.status==='closed'?'accepted':o.status==='cancelled'?'declined':o.status==='in_progress'?'sent':'draft'}">${esc(ORDER_STATUS_LABELS[o.status]||o.status)}</span>
+              ${o.imported ? ' <span class="pill" style="background:#E5E7EB; color:#374151;">📜 imported</span>' : ''}
             </div>
             <div class="list-card-meta">
-              ${esc(c?.name || '(no customer)')} · From quote ${esc(o.fromQuoteNum||'?')} · ${partCount} part${partCount!==1?'s':''} · ${fmtInt(totalQty)} pcs
+              ${esc(c?.name || (o.imported ? o.importedCustomerName || '(no customer)' : '(no customer)'))} · ${o.fromQuoteNum ? `From quote ${esc(o.fromQuoteNum)}` : (o.imported ? 'No matching quote' : 'From quote ?')} · ${o.imported ? 'historical (no line items)' : `${partCount} part${partCount!==1?'s':''} · ${fmtInt(totalQty)} pcs`}
               ${o.poNum ? ` · PO: ${esc(o.poNum)}` : ''}
               ${o.targetShip ? ` · Target ship: ${esc(o.targetShip)}` : ''}
             </div>
@@ -13908,6 +14065,85 @@ Online Metals,Brass,Round,1.25 dia,per_lb,5.20`;
     state.ui.quoteArchiveImport = { open: false, rowsText: '', rows: null, headers: null, map: null, filename: '', sheetName: '', loading: false, error: '' };
     saveState(); render();
     showToast(`Imported ${imported} quote${imported===1?'':'s'} (${customerMatched} customer${customerMatched===1?'':'s'} auto-linked) · ${fmtMoney(totalValue)} total quoted`, 6000);
+  },
+
+  // ============================================================================
+  // BULK HISTORICAL IMPORT (v7.39) — populate state.quotes + state.orders
+  // directly from historical-bootstrap.json (or any uploaded file). Fuzzy
+  // matches customer for every record and fuzzy links each order back to its
+  // originating quote.
+  // ============================================================================
+  async bootstrapLiveHistoricalRecords(opts) {
+    opts = opts || {};
+    const confirmMsg =
+      'Import historical 2024–2026 records from JobBOSS into your live Quotes + Orders?\n\n' +
+      '• Adds 238 quotes (status="sent", frozen totals)\n' +
+      '• Adds 648 orders (status mapped from JobBOSS Open/Closed)\n' +
+      '• Duplicates by Quote # / Order # are skipped\n' +
+      '• Customer names are fuzzy-matched to your customer list\n' +
+      '• Each order is fuzzy-linked to a matching quote (same customer, ±90 days)\n\n' +
+      'Continue?';
+    if (!opts.skipConfirm && !confirm(confirmMsg)) return;
+    let payload;
+    try {
+      const res = await fetch('historical-bootstrap.json', { cache: 'no-store' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      payload = await res.json();
+    } catch (err) {
+      alert('Could not load historical-bootstrap.json from the app folder.\n\n' +
+            'Make sure it was committed alongside index.html in your repo.\n\nError: ' + (err.message || err));
+      return;
+    }
+    const qSrc = payload.archivedQuotes || {};
+    const oSrc = payload.archivedInvoices || {};
+    const qHeaders = qSrc.headers || [];
+    const qRows = qSrc.rows || [];
+    const oHeaders = oSrc.headers || [];
+    const oRows = oSrc.rows || [];
+    if (qRows.length === 0 && oRows.length === 0) {
+      alert('Bootstrap file has no rows. Aborting.');
+      return;
+    }
+    const qMap = detectQuoteColumns(qHeaders);
+    const oMap = detectInvoiceColumns(oHeaders);
+    const batch = 'bootstrap-' + Date.now().toString(36);
+    // Build candidate records
+    const builtQuotes = qRows.map(r => buildLiveQuoteFromRow(r, qMap, batch)).filter(Boolean);
+    const builtOrders = oRows.map(r => buildLiveOrderFromRow(r, oMap, batch)).filter(Boolean);
+    let qAdded = 0, oAdded = 0, qSkipped = 0, oSkipped = 0;
+    let qCustMatched = 0, oCustMatched = 0;
+    let linked = 0;
+    update(s => {
+      const existingQuoteNums = new Set(s.quotes.map(q => String(q.quoteNum || '').trim()).filter(Boolean));
+      const existingOrderNums = new Set(s.orders.map(o => String(o.orderNum || '').trim()).filter(Boolean));
+      const newQuotes = [];
+      const newOrders = [];
+      builtQuotes.forEach(q => {
+        if (existingQuoteNums.has(q.quoteNum)) { qSkipped++; return; }
+        existingQuoteNums.add(q.quoteNum);
+        if (q.customerId) qCustMatched++;
+        newQuotes.push(q);
+      });
+      builtOrders.forEach(o => {
+        if (existingOrderNums.has(o.orderNum)) { oSkipped++; return; }
+        existingOrderNums.add(o.orderNum);
+        if (o.customerId) oCustMatched++;
+        newOrders.push(o);
+      });
+      // Fuzzy-link orders → quotes within the new batch
+      linked = fuzzyLinkLiveOrdersToQuotes(newOrders, newQuotes);
+      s.quotes.push(...newQuotes);
+      s.orders.push(...newOrders);
+      qAdded = newQuotes.length;
+      oAdded = newOrders.length;
+      logActivity('Historical bootstrap', '', `${qAdded} quotes + ${oAdded} orders, ${qCustMatched+oCustMatched} customer links, ${linked} quote→order links`);
+    });
+    saveState(); render();
+    const skipMsg = (qSkipped || oSkipped) ? ` · ${qSkipped+oSkipped} skipped (already existed)` : '';
+    showToast(
+      `Imported ${qAdded} quotes + ${oAdded} orders · ${qCustMatched+oCustMatched} customer links · ${linked} quote→order links${skipMsg}`,
+      9000
+    );
   },
 
   // --- Email quote ---
