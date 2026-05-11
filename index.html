@@ -497,7 +497,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.36.1';
+const APP_VERSION = '7.38.0';
 
 // v7.34.1: Pre-baked Firebase config for the Keystone shop's keystone-quoting
 // project. Users still need to enter their own email + password, but the
@@ -577,6 +577,7 @@ const state = {
   archivedPos: [],      // v7.22: historical POs imported from JobBOSS2 (vendor spend history)
   archivedPoLines: [],  // v7.22: line items linked to archived POs by po_num
   archivedInvoices: [], // v7.24: historical invoices imported from JobBOSS2 (customer revenue history)
+  archivedQuotes: [],   // v7.38: historical quotes imported from JobBOSS2 (estimating/win-rate history)
   rfqInbox: [],         // v7.33: RFQ daily-review queue — parsed .msg files awaiting action
   activity: [],
   priceBook: [],
@@ -624,6 +625,9 @@ const state = {
     activeArchivedInvoiceId: null,                                                              // v7.24
     invoiceArchiveFilters: { search:'', customerId:'all', salesman:'all', status:'all', dateFrom:'', dateTo:'' }, // v7.24
     invoiceArchiveImport: { open:false, rowsText:'', rows:null, headers:null, map:null, filename:'', sheetName:'', loading:false, error:'' }, // v7.24
+    activeArchivedQuoteId: null,                                                                // v7.38
+    quoteArchiveFilters: { search:'', customerId:'all', salesman:'all', quotedBy:'all', dateFrom:'', dateTo:'' }, // v7.38
+    quoteArchiveImport: { open:false, rowsText:'', rows:null, headers:null, map:null, filename:'', sheetName:'', loading:false, error:'' }, // v7.38
     followUpDays: 14,
   },
 };
@@ -669,6 +673,8 @@ function migrateState() {
   if (!Array.isArray(state.archivedPoLines)) state.archivedPoLines = [];
   // v7.24: Invoice history archive
   if (!Array.isArray(state.archivedInvoices)) state.archivedInvoices = [];
+  // v7.38: Quote history archive
+  if (!Array.isArray(state.archivedQuotes)) state.archivedQuotes = [];
   if (state.settings) {
     if (state.settings.nextPoNum == null) state.settings.nextPoNum = 1001;
     if (state.settings.nextPackingSlipNum == null) state.settings.nextPackingSlipNum = 1001;
@@ -853,6 +859,7 @@ const SyncEngine = {
     'archivedPos',
     'archivedPoLines',
     'archivedInvoices',
+    'archivedQuotes',
     'rfqInbox',
     'activity',
     'priceBook',
@@ -2507,6 +2514,92 @@ function buildInvoicesFromCsv(rows, colMap, batchId) {
   return { records };
 }
 
+// =================================================================
+// v7.38 — QUOTE ARCHIVE (historical quotes from JobBOSS2)
+// =================================================================
+// Mirrors the Invoice Archive: header-only records of quotes we sent in
+// the past. Useful for win-rate analytics, last-quoted-price lookups,
+// and customer pipeline rollups on Reports.
+function newArchivedQuote() {
+  return {
+    id: uid(),
+    quoteNum: '',       // "Quote" number from JobBOSS — primary key
+    customerId: null,   // matched against state.customers via fuzzy lookup
+    customerCode: '',   // free-text from CSV (short code like "SWIGER COIL")
+    customerName: '',   // free-text from CSV (full name like "Swiger Coil Systems")
+    quoteDate: '',
+    quotedBy: '',       // estimator code/initials from JobBOSS
+    salesman: '',
+    inquiryNum: '',     // customer's RFQ / inquiry number
+    notes: '',
+    amount: null,       // "Quote Total" — header total
+    currency: 'USD',
+    importedAt: new Date().toISOString(),
+    importBatch: '',
+  };
+}
+
+const JOBBOSS_QUOTE_COLUMNS = {
+  quoteNum:     ['quote','quote_number','quotenumber','quote#','quote no','quoteno','quote_num','quotenum','quote_id','quoteid'],
+  quoteDate:    ['quote_date','quotedate','date','rfq_date','rfqdate','inquiry_date','inquirydate','estimate_date','estimatedate'],
+  customerCode: ['customer','customer_code','customercode','customer_id','customerid','cust_code','custcode','cust_id','custid','client_code','clientcode'],
+  customerName: ['name','customer_name','customername','cust_name','custname','client_name','clientname','sold_to','soldto','company_name','companyname'],
+  quotedBy:     ['quoted_by','quotedby','quoted by','estimator','estimated_by','estimatedby','quoter','prepared_by','preparedby'],
+  salesman:     ['salesman','sales_rep','salesrep','sales rep','sales_person','salesperson','sold_by','soldby','rep'],
+  inquiryNum:   ['inquiry no','inquiry_no','inquiryno','inquiry','inquiry_number','inquirynumber','inquiry#','rfq_ref','rfqref','customer_inquiry','customerinquiry','customer_rfq','customerrfq'],
+  notes:        ['notes','memo','comment','comments','description','remark','remarks'],
+  currency:     ['currency','currency_code','currencycode','curr','currencyid'],
+  amount:       ['quote total','quote_total','quotetotal','total','amount','quote_amount','quoteamount','grand_total','grandtotal','total_amount','totalamount','value','estimate_total','estimatetotal'],
+};
+
+function detectQuoteColumns(headers) {
+  const map = {};
+  for (const [field, candidates] of Object.entries(JOBBOSS_QUOTE_COLUMNS)) {
+    map[field] = detectColumn(headers, candidates);
+  }
+  return map;
+}
+
+function buildQuotesFromCsv(rows, colMap, batchId) {
+  const records = [];
+  rows.forEach((row) => {
+    if (colMap.quoteNum < 0 || !row[colMap.quoteNum]) return;
+    const q = newArchivedQuote();
+    q.importBatch = batchId;
+    q.quoteNum = String(row[colMap.quoteNum] || '').trim();
+    if (!q.quoteNum) return;
+    if (colMap.customerCode >= 0) q.customerCode = String(row[colMap.customerCode] || '').trim();
+    if (colMap.customerName >= 0) q.customerName = String(row[colMap.customerName] || '').trim();
+    if (colMap.quoteDate >= 0) q.quoteDate = parseArchiveDate(row[colMap.quoteDate]);
+    if (colMap.amount >= 0) q.amount = parseArchiveMoney(row[colMap.amount]);
+    if (colMap.quotedBy >= 0) {
+      const qb = String(row[colMap.quotedBy] || '').trim();
+      q.quotedBy = (qb.toLowerCase() === 'null') ? '' : qb;
+    }
+    if (colMap.salesman >= 0) {
+      const sm = String(row[colMap.salesman] || '').trim();
+      q.salesman = (sm.toLowerCase() === 'null') ? '' : sm;
+    }
+    if (colMap.inquiryNum >= 0) {
+      const inq = String(row[colMap.inquiryNum] || '').trim();
+      q.inquiryNum = (inq.toLowerCase() === 'null') ? '' : inq;
+    }
+    if (colMap.notes >= 0) {
+      const nt = String(row[colMap.notes] || '').trim();
+      q.notes = (nt.toLowerCase() === 'null') ? '' : nt;
+    }
+    if (colMap.currency >= 0) {
+      const cur = String(row[colMap.currency] || '').trim();
+      if (cur) q.currency = cur;
+    }
+    // Try to fuzzy-match customer
+    const matched = findCustomerByName(q.customerName, q.customerCode);
+    if (matched) q.customerId = matched.id;
+    records.push(q);
+  });
+  return { records };
+}
+
 
 function nextQuoteNumber() {
   let max = QUOTE_NUM_BASE - 1;
@@ -3398,6 +3491,8 @@ function render() {
     case 'archivedPo': main.innerHTML = renderArchivedPo(); break;
     case 'invoiceArchive': main.innerHTML = renderInvoiceArchive(); break;
     case 'archivedInvoice': main.innerHTML = renderArchivedInvoice(); break;
+    case 'quoteArchive': main.innerHTML = renderQuoteArchive(); break;
+    case 'archivedQuote': main.innerHTML = renderArchivedQuote(); break;
     case 'settings': main.innerHTML = renderSettings(); break;
     default: main.innerHTML = '<p>Unknown view.</p>';
   }
@@ -3408,6 +3503,7 @@ function render() {
   renderArchiveImportModal();
   renderPoArchiveImportModal();
   renderInvoiceArchiveImportModal();
+  renderQuoteArchiveImportModal();
   renderMsgImportModal();
   // v7.34: user management dialogs
   const inviteHost = document.getElementById('invite-modal-host');
@@ -3455,6 +3551,9 @@ function renderNav() {
       </div>
       <div class="nav-item ${v==='invoiceArchive'||v==='archivedInvoice'?'active':''}" onclick="App.go('invoiceArchive')">
         <span>Invoice Archive</span><span class="badge">${(state.archivedInvoices||[]).length}</span>
+      </div>
+      <div class="nav-item ${v==='quoteArchive'||v==='archivedQuote'?'active':''}" onclick="App.go('quoteArchive')">
+        <span>Quote Archive</span><span class="badge">${(state.archivedQuotes||[]).length}</span>
       </div>
     </div>
 
@@ -6595,6 +6694,416 @@ function renderInvoiceArchiveImportModal() {
             <div style="display:flex; justify-content:flex-end; gap:6px;">
               <button class="btn" onclick="App.closeInvoiceArchiveImport()">Cancel</button>
               <button class="btn btn-primary" onclick="App.commitInvoiceArchiveImport()" ${canImport ? '' : 'style="opacity:0.5; cursor:not-allowed;"'}>Import</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// =================================================================
+// v7.38 — QUOTE ARCHIVE PAGE RENDERERS
+// =================================================================
+function renderQuoteArchive() {
+  const all = (state.archivedQuotes || []).slice();
+  // Sort newest quote date first
+  all.sort((a, b) => (b.quoteDate || '').localeCompare(a.quoteDate || ''));
+  const f = state.ui.quoteArchiveFilters || { search:'', customerId:'all', salesman:'all', quotedBy:'all', dateFrom:'', dateTo:'' };
+  const search = (f.search || '').toLowerCase();
+  const filtered = all.filter(q => {
+    if (f.customerId !== 'all') {
+      if (f.customerId === 'unlinked') {
+        if (q.customerId) return false;
+      } else {
+        if (q.customerId !== f.customerId) return false;
+      }
+    }
+    if (f.salesman !== 'all' && (q.salesman || '') !== f.salesman) return false;
+    if (f.quotedBy !== 'all' && (q.quotedBy || '') !== f.quotedBy) return false;
+    if (f.dateFrom && q.quoteDate && q.quoteDate < f.dateFrom) return false;
+    if (f.dateTo && q.quoteDate && q.quoteDate > f.dateTo) return false;
+    if (search) {
+      const blob = [q.quoteNum, q.customerCode, q.customerName, q.inquiryNum, q.salesman, q.quotedBy, q.notes].join(' ').toLowerCase();
+      if (!blob.includes(search)) return false;
+    }
+    return true;
+  });
+  const totalValue = all.reduce((s, q) => s + (num(q.amount) || 0), 0);
+  const filteredValue = filtered.reduce((s, q) => s + (num(q.amount) || 0), 0);
+  const linkedCount = all.filter(q => q.customerId).length;
+  const unlinkedCount = all.length - linkedCount;
+  // Win-rate teaser: how many quotes have a matching archivedInvoice by customer (rough proxy)
+  const customersById = new Map(state.customers.map(c => [c.id, c]));
+  const linkedCustomers = state.customers.slice().sort((a,b) => {
+    const aActive = isActiveCustomer(a) ? 0 : 1;
+    const bActive = isActiveCustomer(b) ? 0 : 1;
+    if (aActive !== bActive) return aActive - bActive;
+    return (a.name||'').localeCompare(b.name||'');
+  });
+  const uniqueSalesmen = Array.from(new Set(all.map(q => q.salesman).filter(Boolean))).sort();
+  const uniqueQuotedBy = Array.from(new Set(all.map(q => q.quotedBy).filter(Boolean))).sort();
+  return `
+    <div class="page-header">
+      <div>
+        <div class="page-title">Quote Archive</div>
+        <div class="page-subtitle">${filtered.length} of ${all.length} quotes · ${fmtMoney(filteredValue)} ${filtered.length !== all.length ? `(of ${fmtMoney(totalValue)} total)` : 'historical quoted value'}${unlinkedCount > 0 ? ` · <span style="color:var(--orange);">${unlinkedCount} unlinked customer${unlinkedCount===1?'':'s'}</span>` : ''}</div>
+      </div>
+      <div style="display:flex; gap:6px;">
+        <button class="btn btn-primary" onclick="App.openQuoteArchiveImport()">📥 Import from JobBOSS</button>
+        ${all.length > 0 ? `<button class="btn btn-danger" onclick="App.clearQuoteArchive()">Clear All</button>` : ''}
+      </div>
+    </div>
+    ${all.length === 0 ? `
+      <div class="empty-state">
+        <h3>No archived quotes yet</h3>
+        <p style="max-width:580px; margin:8px auto;">
+          Import historical quotes from JobBOSS2 — typically a <strong>Quote History</strong> grid export. Read-only header records useful for "what did we last quote this customer?" lookups, estimator workload review, and (paired with Invoice Archive) win-rate analytics.
+        </p>
+        <button class="btn btn-primary" onclick="App.openQuoteArchiveImport()">📥 Import from JobBOSS</button>
+      </div>
+    ` : `
+      <div class="card no-print" style="padding:14px 16px; margin-bottom:16px;">
+        <div style="display:grid; grid-template-columns: 2fr 1fr 1fr 1fr 1fr 1fr auto; gap:10px; align-items:end;">
+          <div class="field"><label>Search</label>
+            <input type="search" placeholder="Quote #, customer, inquiry, notes…" value="${esc(f.search)}" oninput="App.setQuoteArchiveFilter('search', this.value)">
+          </div>
+          <div class="field"><label>Customer</label>
+            <select onchange="App.setQuoteArchiveFilter('customerId', this.value)">
+              <option value="all" ${f.customerId==='all'?'selected':''}>All</option>
+              ${unlinkedCount > 0 ? `<option value="unlinked" ${f.customerId==='unlinked'?'selected':''}>— Unlinked (${unlinkedCount}) —</option>` : ''}
+              ${linkedCustomers.map(c => `<option value="${c.id}" ${f.customerId===c.id?'selected':''}>${esc(customerLabel(c))}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field"><label>Salesman</label>
+            <select onchange="App.setQuoteArchiveFilter('salesman', this.value)">
+              <option value="all" ${f.salesman==='all'?'selected':''}>All</option>
+              ${uniqueSalesmen.map(s => `<option value="${esc(s)}" ${f.salesman===s?'selected':''}>${esc(s)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field"><label>Quoted By</label>
+            <select onchange="App.setQuoteArchiveFilter('quotedBy', this.value)">
+              <option value="all" ${f.quotedBy==='all'?'selected':''}>All</option>
+              ${uniqueQuotedBy.map(s => `<option value="${esc(s)}" ${f.quotedBy===s?'selected':''}>${esc(s)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field"><label>Date From</label>
+            <input type="date" value="${esc(f.dateFrom||'')}" oninput="App.setQuoteArchiveFilter('dateFrom', this.value)">
+          </div>
+          <div class="field"><label>Date To</label>
+            <input type="date" value="${esc(f.dateTo||'')}" oninput="App.setQuoteArchiveFilter('dateTo', this.value)">
+          </div>
+          <div class="field"><label>&nbsp;</label>
+            <button class="btn" onclick="App.clearQuoteArchiveFilters()">Clear</button>
+          </div>
+        </div>
+      </div>
+      ${filtered.length === 0 ? `
+        <div class="empty-state"><h3>No matches</h3><p>Adjust your filters.</p></div>
+      ` : `
+        <div class="card">
+          <div class="card-body" style="padding:0;">
+            <table class="tbl" style="margin:0;">
+              <thead><tr>
+                <th>Quote #</th>
+                <th>Customer</th>
+                <th>Date</th>
+                <th>Inquiry No</th>
+                <th>Quoted By</th>
+                <th>Salesman</th>
+                <th class="num">Quote Total</th>
+              </tr></thead>
+              <tbody>
+                ${filtered.slice(0, 500).map(q => {
+                  const linked = q.customerId ? customersById.get(q.customerId) : null;
+                  const customerDisplay = linked
+                    ? esc(linked.name)
+                    : `<span style="color:var(--orange);">${esc(q.customerName || q.customerCode || '(no customer)')}</span>`;
+                  return `
+                    <tr style="cursor:pointer;" onclick="App.openArchivedQuote('${q.id}')">
+                      <td><strong>${esc(q.quoteNum)}</strong></td>
+                      <td>${customerDisplay}</td>
+                      <td>${esc(q.quoteDate||'')}</td>
+                      <td class="small">${esc(q.inquiryNum||'')}</td>
+                      <td class="small">${esc(q.quotedBy||'')}</td>
+                      <td class="small">${esc(q.salesman||'')}</td>
+                      <td class="num"><strong>${fmtMoney(num(q.amount))}</strong></td>
+                    </tr>
+                  `;
+                }).join('')}
+              </tbody>
+            </table>
+            ${filtered.length > 500 ? `<div class="text-mute small" style="padding:10px 16px;">Showing first 500 of ${filtered.length}. Narrow your search to see more.</div>` : ''}
+          </div>
+        </div>
+      `}
+    `}
+  `;
+}
+
+function renderArchivedQuote() {
+  const q = (state.archivedQuotes || []).find(x => x.id === state.ui.activeArchivedQuoteId);
+  if (!q) {
+    return `<div class="empty-state"><h3>Quote not found</h3><button class="btn" onclick="App.go('quoteArchive')">← Back</button></div>`;
+  }
+  const linkedCustomer = q.customerId ? state.customers.find(c => c.id === q.customerId) : null;
+  // Find other quotes from this customer (matched OR same name)
+  const otherQuotes = (state.archivedQuotes || []).filter(x => {
+    if (x.id === q.id) return false;
+    if (q.customerId && x.customerId === q.customerId) return true;
+    if (!q.customerId && q.customerName && x.customerName === q.customerName) return true;
+    return false;
+  }).sort((a,b) => (b.quoteDate||'').localeCompare(a.quoteDate||'')).slice(0, 15);
+  const otherTotal = otherQuotes.reduce((s, x) => s + (num(x.amount) || 0), 0);
+  // Related archivedInvoices for the same customer — rough win-rate context
+  const relatedInvoices = q.customerId
+    ? (state.archivedInvoices || []).filter(inv => inv.customerId === q.customerId).slice(0, 8)
+    : [];
+  return `
+    <div class="page-header">
+      <div>
+        <div class="page-title">Quote ${esc(q.quoteNum)}</div>
+        <div class="page-subtitle">${esc(q.customerName || '(unknown customer)')}${linkedCustomer ? ` · linked to ${esc(linkedCustomer.name)}` : q.customerName ? ` · <span style="color:var(--orange);">unlinked customer</span>` : ''} · imported from JobBOSS</div>
+      </div>
+      <div><button class="btn" onclick="App.go('quoteArchive')">← Back to Quote Archive</button></div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span>Quote Details</span>
+        ${!linkedCustomer && q.customerName ? `
+          <div class="header-actions">
+            <button class="btn btn-sm" onclick="App.linkArchivedQuoteCustomer('${q.id}')" title="Try fuzzy-matching this customer name to your customer list">↻ Re-try customer match</button>
+          </div>
+        ` : ''}
+      </div>
+      <div class="card-body">
+        <div class="form-grid cols-3">
+          <div class="field"><label>Quote Number</label><div style="padding:6px 0;"><strong>${esc(q.quoteNum)}</strong></div></div>
+          <div class="field"><label>Customer</label><div style="padding:6px 0;">${linkedCustomer ? esc(linkedCustomer.name) : `<span style="color:var(--orange);">${esc(q.customerName||'—')}</span> <span class="small text-mute">(unlinked)</span>`}</div></div>
+          <div class="field"><label>Customer Code</label><div style="padding:6px 0;">${esc(q.customerCode||'—')}</div></div>
+          <div class="field"><label>Quote Date</label><div style="padding:6px 0;">${esc(q.quoteDate||'—')}</div></div>
+          <div class="field"><label>Inquiry No</label><div style="padding:6px 0;">${esc(q.inquiryNum||'—')}</div></div>
+          <div class="field"><label>Quoted By</label><div style="padding:6px 0;">${esc(q.quotedBy||'—')}</div></div>
+          <div class="field"><label>Salesman</label><div style="padding:6px 0;">${esc(q.salesman||'—')}</div></div>
+          <div class="field"><label>Currency</label><div style="padding:6px 0;">${esc(q.currency||'USD')}</div></div>
+          <div class="field"><label>Quote Total</label><div style="padding:6px 0;"><strong>${fmtMoney(num(q.amount))}</strong></div></div>
+          ${q.notes ? `<div class="field" style="grid-column:span 3;"><label>Notes</label><div style="padding:6px 0;">${esc(q.notes)}</div></div>` : ''}
+        </div>
+      </div>
+    </div>
+
+    ${otherQuotes.length > 0 ? `
+      <div class="card">
+        <div class="card-header"><span>Other Quotes to ${esc(linkedCustomer?.name || q.customerName || 'this customer')} — ${otherQuotes.length} shown · ${fmtMoney(otherTotal)} total quoted</span></div>
+        <div class="card-body" style="padding:0;">
+          <table class="tbl" style="margin:0;">
+            <thead><tr>
+              <th>Quote #</th>
+              <th>Date</th>
+              <th>Inquiry No</th>
+              <th>Quoted By</th>
+              <th class="num">Quote Total</th>
+            </tr></thead>
+            <tbody>
+              ${otherQuotes.map(o => `
+                <tr style="cursor:pointer;" onclick="App.openArchivedQuote('${o.id}')">
+                  <td><strong>${esc(o.quoteNum)}</strong></td>
+                  <td>${esc(o.quoteDate||'')}</td>
+                  <td class="small">${esc(o.inquiryNum||'')}</td>
+                  <td class="small">${esc(o.quotedBy||'')}</td>
+                  <td class="num">${fmtMoney(num(o.amount))}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    ` : ''}
+
+    ${relatedInvoices.length > 0 ? `
+      <div class="card">
+        <div class="card-header"><span>Related Invoices to ${esc(linkedCustomer?.name || q.customerName)} — pipeline context</span></div>
+        <div class="card-body" style="padding:0;">
+          <table class="tbl" style="margin:0;">
+            <thead><tr>
+              <th>Invoice #</th>
+              <th>Date</th>
+              <th>Status</th>
+              <th>Customer PO</th>
+              <th class="num">Amount</th>
+            </tr></thead>
+            <tbody>
+              ${relatedInvoices.map(inv => `
+                <tr style="cursor:pointer;" onclick="App.openArchivedInvoice('${inv.id}')">
+                  <td><strong>${esc(inv.invoiceNum)}</strong></td>
+                  <td>${esc(inv.invoiceDate||'')}</td>
+                  <td class="small">${esc(inv.status||'')}</td>
+                  <td class="small">${esc(inv.poRef||'')}</td>
+                  <td class="num">${fmtMoney(num(inv.amount))}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    ` : ''}
+  `;
+}
+
+function renderQuoteArchiveImportModal() {
+  const host = document.getElementById('quote-parser-host');
+  if (!host) return;
+  if (state.ui.quoteParser && state.ui.quoteParser.open) return;
+  if (state.ui.archiveImport && state.ui.archiveImport.open) return;
+  if (state.ui.poArchiveImport && state.ui.poArchiveImport.open) return;
+  if (state.ui.invoiceArchiveImport && state.ui.invoiceArchiveImport.open) return;
+  const ai = state.ui.quoteArchiveImport;
+  if (!ai || !ai.open) {
+    if (host.dataset.modalOwner === 'quoteArchive') {
+      host.innerHTML = '';
+      host.dataset.modalOwner = '';
+    }
+    return;
+  }
+  host.dataset.modalOwner = 'quoteArchive';
+
+  const headers = ai.headers || [];
+  const rows = ai.rows;
+  const map = ai.map;
+  const filename = ai.filename || '';
+  const sheetName = ai.sheetName || '';
+  const loading = ai.loading;
+  const required = ['quoteNum'];
+  const fieldLabels = {
+    quoteNum:     'Quote #',
+    quoteDate:    'Quote Date',
+    customerCode: 'Customer Code',
+    customerName: 'Customer Name',
+    quotedBy:     'Quoted By',
+    salesman:     'Salesman',
+    inquiryNum:   'Inquiry No',
+    notes:        'Notes',
+    currency:     'Currency',
+    amount:       'Quote Total',
+  };
+  const missingRequired = required.filter(f => !map || map[f] == null || map[f] < 0);
+  const hasGap = headers.length > 0 && missingRequired.length > 0;
+
+  // Predict customer match rate
+  let custMatchPreview = null;
+  if (rows && rows.length > 0 && map) {
+    const codeIdx = (map.customerCode != null && map.customerCode >= 0) ? map.customerCode : -1;
+    const nameIdx = (map.customerName != null && map.customerName >= 0) ? map.customerName : -1;
+    if (codeIdx >= 0 || nameIdx >= 0) {
+      const uniqueKeys = new Map();
+      rows.forEach(row => {
+        const code = codeIdx >= 0 ? String(row[codeIdx] || '').trim() : '';
+        const name = nameIdx >= 0 ? String(row[nameIdx] || '').trim() : '';
+        const key = (code + '||' + name).toLowerCase();
+        if (key !== '||') uniqueKeys.set(key, { code, name });
+      });
+      let matched = 0;
+      uniqueKeys.forEach(({ code, name }) => {
+        if (findCustomerByName(name, code)) matched++;
+      });
+      custMatchPreview = { total: uniqueKeys.size, matched };
+    }
+  }
+
+  const reasons = App.quoteArchiveImportReadiness();
+  const canImport = reasons === null;
+  const willImport = (rows && map && map.quoteNum != null && map.quoteNum >= 0) ? rows.length : 0;
+
+  host.innerHTML = `
+    <div class="modal-backdrop" onclick="App.closeQuoteArchiveImport()">
+      <div class="modal" style="width:1000px; max-width:96vw; max-height:90vh; display:flex; flex-direction:column;" onclick="event.stopPropagation()">
+        <div class="modal-header" style="display:flex; align-items:center; justify-content:space-between;">
+          <span>📥 Import Quote History from JobBOSS2</span>
+          <button class="btn btn-sm" onclick="App.closeQuoteArchiveImport()" style="background:rgba(255,255,255,0.18); color:white;">✕ Close</button>
+        </div>
+        <div class="modal-body" style="flex:1; overflow-y:auto; padding:18px;">
+          <p style="margin:0 0 16px; color:var(--text-mute);">
+            Run a <strong>Quote History</strong> grid export in JobBOSS2 — one row per quote header. Drop or pick the file below. Customer names auto-link to your existing customer list when there's a match (by code first, then by name).
+          </p>
+          ${ai.error ? `<div style="background:#FEE2E2; border:1px solid #DC2626; padding:10px; color:#7F1D1D; margin-bottom:14px;">${esc(ai.error)}</div>` : ''}
+
+          <div style="background:var(--paper); border:1px solid ${hasGap ? 'var(--orange)' : 'var(--line)'}; padding:14px; margin-bottom:12px;">
+            <h4 style="margin:0 0 8px;">Quote Data ${filename ? `<span style="font-weight:normal; color:var(--text-mute); font-size:12px;">· ${esc(filename)}${sheetName ? ` (sheet: ${esc(sheetName)})` : ''}</span>` : ''}</h4>
+            ${loading ? `
+              <div style="text-align:center; padding:20px;">
+                <div style="font-size:24px;">⏳</div>
+                <div class="text-mute small" style="margin-top:6px;">Reading ${esc(filename||'file')}…</div>
+              </div>
+            ` : !rows || rows.length === 0 ? `
+              <p class="text-mute small" style="margin:0 0 10px;">
+                Drop or pick an <strong>Excel</strong> (.xlsx) or <strong>CSV</strong> file.
+              </p>
+              <div style="display:flex; gap:6px; align-items:center;">
+                <button class="btn" onclick="App.pickQuoteArchiveFile()">📁 Browse for quote file</button>
+                <span class="small text-mute">or paste CSV text below</span>
+              </div>
+              <textarea
+                placeholder="Paste CSV text here (optional — file picker handles Excel)"
+                oninput="App.setQuoteArchiveImportText(this.value)"
+                style="width:100%; height:60px; font-family:var(--font-mono); font-size:11px; margin-top:8px;"></textarea>
+            ` : `
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                <div class="small" style="color:${hasGap ? 'var(--orange)' : 'var(--text-mute)'};">
+                  ${rows.length} data row${rows.length===1?'':'s'} · ${Object.values(map||{}).filter(v=>v!=null&&v>=0).length} of ${Object.keys(JOBBOSS_QUOTE_COLUMNS).length} columns auto-detected
+                  ${hasGap ? ` · <strong>${missingRequired.length} required column${missingRequired.length===1?'':'s'} not detected — pick below</strong>` : ''}
+                </div>
+                <button class="btn btn-sm" onclick="App.clearQuoteArchiveImportText()">Clear &amp; reload</button>
+              </div>
+              <div style="max-height:140px; overflow:auto; border:1px solid var(--line); padding:6px; background:white; font-family:var(--font-mono); font-size:10px; margin-bottom:8px;">
+                <table class="tbl" style="font-size:10px;"><thead><tr>${headers.map(h => `<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.slice(0,3).map(r => `<tr>${(r||[]).map(c => `<td>${esc(String(c||'').slice(0,40))}</td>`).join('')}</tr>`).join('')}</tbody></table>
+                ${rows.length > 3 ? `<div class="text-mute" style="padding:4px;">… and ${rows.length - 3} more rows</div>` : ''}
+              </div>
+              <details ${hasGap ? 'open' : ''}>
+                <summary class="small" style="cursor:pointer; color:${hasGap ? 'var(--orange)' : 'var(--text-mute)'}; font-weight:${hasGap ? '600' : 'normal'}; margin-bottom:6px;">
+                  Column mapping ${hasGap ? '— required field needs picking ↓' : '(override if auto-detect was wrong)'}
+                </summary>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px; padding-top:6px;">
+                  ${Object.entries(JOBBOSS_QUOTE_COLUMNS).map(([field, _]) => {
+                    const mapped = (map && map[field] != null) ? map[field] : -1;
+                    const isRequired = required.includes(field);
+                    const needsAttention = isRequired && mapped < 0;
+                    return `
+                      <div style="display:flex; align-items:center; gap:6px;">
+                        <label style="flex:1; font-size:11px; ${needsAttention?'color:var(--orange); font-weight:600;':''}">${esc(fieldLabels[field]||field)}${isRequired?' <span style="color:var(--orange);">*</span>':''}</label>
+                        <select onchange="App.setQuoteArchiveColumnMap('${field}', this.value)" style="flex:1.4; font-size:11px; ${needsAttention?'border-color:var(--orange); border-width:2px;':''}">
+                          <option value="-1">— skip —</option>
+                          ${headers.map((h, i) => `<option value="${i}" ${mapped===i?'selected':''}>${esc(h||'(blank header)')}</option>`).join('')}
+                        </select>
+                      </div>
+                    `;
+                  }).join('')}
+                </div>
+              </details>
+            `}
+          </div>
+
+          ${custMatchPreview ? `
+            <div style="background:${custMatchPreview.matched === custMatchPreview.total ? '#DCFCE7' : '#FEF3C7'}; border:1px solid ${custMatchPreview.matched === custMatchPreview.total ? '#86EFAC' : '#F59E0B'}; padding:10px 12px; margin-bottom:10px; font-size:12px;">
+              <strong>Customer matching:</strong> ${custMatchPreview.matched} of ${custMatchPreview.total} unique customer${custMatchPreview.total===1?'':'s'} will auto-link to your existing customer list. ${custMatchPreview.total - custMatchPreview.matched > 0 ? `Unlinked customers stay as free text — you can match them later individually.` : ''}
+            </div>
+          ` : ''}
+          <div style="margin-top:18px; padding-top:14px; border-top:1px solid var(--line);">
+            ${reasons ? `
+              <div style="background:#FEF3C7; border:1px solid #F59E0B; padding:10px 12px; margin-bottom:10px; font-size:12px; color:#78350F;">
+                <strong>Cannot import yet:</strong>
+                <ul style="margin:4px 0 0; padding-left:20px;">
+                  ${reasons.map(r => `<li>${esc(r)}</li>`).join('')}
+                </ul>
+              </div>
+            ` : `
+              <div class="small text-mute" style="margin-bottom:10px;">
+                Ready to import <strong>${willImport}</strong> quote${willImport===1?'':'s'}.
+              </div>
+            `}
+            <div style="display:flex; justify-content:flex-end; gap:6px;">
+              <button class="btn" onclick="App.closeQuoteArchiveImport()">Cancel</button>
+              <button class="btn btn-primary" onclick="App.commitQuoteArchiveImport()" ${canImport ? '' : 'style="opacity:0.5; cursor:not-allowed;"'}>Import</button>
             </div>
           </div>
         </div>
@@ -13213,6 +13722,192 @@ Online Metals,Brass,Round,1.25 dia,per_lb,5.20`;
     state.ui.invoiceArchiveImport = { open: false, rowsText: '', rows: null, headers: null, map: null, filename: '', sheetName: '', loading: false, error: '' };
     saveState(); render();
     showToast(`Imported ${imported} invoice${imported===1?'':'s'} (${customerMatched} customer${customerMatched===1?'':'s'} auto-linked) · ${fmtMoney(totalRevenue)} revenue`, 6000);
+  },
+
+  // ============================================================================
+  // QUOTE ARCHIVE (v7.38) — JobBOSS2 quote history import
+  // ============================================================================
+
+  setQuoteArchiveFilter(field, value) {
+    if (!state.ui.quoteArchiveFilters) {
+      state.ui.quoteArchiveFilters = { search:'', customerId:'all', salesman:'all', quotedBy:'all', dateFrom:'', dateTo:'' };
+    }
+    state.ui.quoteArchiveFilters[field] = value;
+    if (field === 'search') {
+      // Debounce search input to keep focus
+      clearTimeout(window._qArchSearchT);
+      window._qArchSearchT = setTimeout(() => {
+        saveState(); render();
+        const inp = document.querySelector("input[type=search][oninput*='setQuoteArchiveFilter']");
+        if (inp) { inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); }
+      }, 220);
+      return;
+    }
+    saveState(); render();
+  },
+  clearQuoteArchiveFilters() {
+    state.ui.quoteArchiveFilters = { search:'', customerId:'all', salesman:'all', quotedBy:'all', dateFrom:'', dateTo:'' };
+    saveState(); render();
+  },
+  openArchivedQuote(qId) {
+    state.ui.view = 'archivedQuote';
+    state.ui.activeArchivedQuoteId = qId;
+    saveState(); render();
+  },
+  linkArchivedQuoteCustomer(qId) {
+    update(s => {
+      const q = (s.archivedQuotes||[]).find(x => x.id === qId); if (!q) return;
+      if (!q.customerName && !q.customerCode) { showToast('No customer name/code to match'); return; }
+      const c = findCustomerByName(q.customerName, q.customerCode);
+      if (c) {
+        q.customerId = c.id;
+        showToast(`Linked to ${c.name}`);
+      } else {
+        showToast(`No matching customer for "${q.customerName || q.customerCode}"`);
+      }
+    });
+  },
+  clearQuoteArchive() {
+    if (!confirm('Delete ALL archived quotes? This cannot be undone.')) return;
+    update(s => { s.archivedQuotes = []; });
+    showToast('Quote archive cleared');
+  },
+  openQuoteArchiveImport() {
+    state.ui.quoteArchiveImport = {
+      open: true,
+      rowsText: '', rows: null, headers: null, map: null,
+      filename: '', sheetName: '', loading: false, error: '',
+    };
+    saveState(); render();
+  },
+  closeQuoteArchiveImport() {
+    state.ui.quoteArchiveImport = { open: false, rowsText: '', rows: null, headers: null, map: null, filename: '', sheetName: '', loading: false, error: '' };
+    saveState(); render();
+  },
+  setQuoteArchiveImportText(text) {
+    const ai = state.ui.quoteArchiveImport;
+    if (!ai) return;
+    ai.rowsText = text;
+    if (text && text.trim()) {
+      try {
+        const parsed = parseCsvForArchive(text);
+        ai.headers = parsed.headers;
+        ai.rows = parsed.rows;
+        ai.map = detectQuoteColumns(parsed.headers);
+        ai.error = '';
+      } catch (e) {
+        ai.error = 'Could not parse CSV: ' + (e.message || e);
+      }
+    } else {
+      ai.rows = null;
+      ai.headers = null;
+      ai.map = null;
+    }
+    saveState(); render();
+  },
+  clearQuoteArchiveImportText() {
+    const ai = state.ui.quoteArchiveImport;
+    if (!ai) return;
+    ai.rowsText = '';
+    ai.rows = null;
+    ai.headers = null;
+    ai.map = null;
+    ai.filename = '';
+    ai.sheetName = '';
+    saveState(); render();
+  },
+  setQuoteArchiveColumnMap(field, idxStr) {
+    const ai = state.ui.quoteArchiveImport;
+    if (!ai) return;
+    const idx = parseInt(idxStr, 10);
+    if (!ai.map) ai.map = {};
+    ai.map[field] = isFinite(idx) ? idx : -1;
+    saveState(); render();
+  },
+  pickQuoteArchiveFile() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.xlsx,.xls,.csv,.tsv,.txt,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv,text/plain';
+    input.style.display = 'none';
+    input.onchange = async (e) => {
+      const file = e.target.files[0]; if (!file) return;
+      await App.loadQuoteArchiveFile(file);
+    };
+    document.body.appendChild(input);
+    input.click();
+    setTimeout(() => input.remove(), 1000);
+  },
+  async loadQuoteArchiveFile(file) {
+    const ai = state.ui.quoteArchiveImport;
+    if (!ai) return;
+    const name = (file.name || '').toLowerCase();
+    const isExcel = /\.(xlsx|xlsm|xls)$/.test(name) ||
+      /spreadsheet|excel/.test(file.type || '');
+    try {
+      let parsed;
+      if (isExcel) {
+        ai.error = '';
+        ai.loading = true;
+        ai.filename = file.name;
+        saveState(); render();
+        parsed = await parseExcelForArchive(file);
+      } else {
+        const text = await file.text();
+        parsed = parseCsvForArchive(text);
+        ai.rowsText = text;
+        ai.filename = file.name;
+      }
+      ai.loading = false;
+      ai.headers = parsed.headers;
+      ai.rows = parsed.rows;
+      ai.sheetName = parsed.sheetName || '';
+      ai.map = detectQuoteColumns(parsed.headers);
+      ai.error = '';
+      saveState(); render();
+    } catch (err) {
+      console.error('quote archive import error', err);
+      ai.loading = false;
+      ai.error = 'Could not read ' + (file.name || 'file') + ': ' + (err.message || err);
+      saveState(); render();
+    }
+  },
+  quoteArchiveImportReadiness() {
+    const ai = state.ui.quoteArchiveImport;
+    if (!ai) return ['Import dialog not open'];
+    const reasons = [];
+    const haveRows = ai.rows && ai.rows.length > 0;
+    if (!haveRows) {
+      reasons.push('Load a quote file (Excel or CSV).');
+      return reasons;
+    }
+    const m = ai.map || {};
+    if (m.quoteNum == null || m.quoteNum < 0) {
+      reasons.push('Pick the Quote # column under "Column mapping".');
+    }
+    return reasons.length === 0 ? null : reasons;
+  },
+  commitQuoteArchiveImport() {
+    const ai = state.ui.quoteArchiveImport;
+    if (!ai) return;
+    const reasons = this.quoteArchiveImportReadiness();
+    if (reasons) {
+      alert('Cannot import yet:\n\n• ' + reasons.join('\n• '));
+      return;
+    }
+    const batchId = 'qimp-' + Date.now().toString(36);
+    let imported = 0, customerMatched = 0, totalValue = 0;
+    update(s => {
+      if (!Array.isArray(s.archivedQuotes)) s.archivedQuotes = [];
+      const { records } = buildQuotesFromCsv(ai.rows, ai.map, batchId);
+      s.archivedQuotes.push(...records);
+      imported = records.length;
+      customerMatched = records.filter(r => r.customerId).length;
+      totalValue = records.reduce((sum, r) => sum + (num(r.amount) || 0), 0);
+      logActivity('Quote archive imported', '', `${imported} quotes, ${customerMatched} customers auto-linked, ${fmtMoney(totalValue)} total quoted`);
+    });
+    state.ui.quoteArchiveImport = { open: false, rowsText: '', rows: null, headers: null, map: null, filename: '', sheetName: '', loading: false, error: '' };
+    saveState(); render();
+    showToast(`Imported ${imported} quote${imported===1?'':'s'} (${customerMatched} customer${customerMatched===1?'':'s'} auto-linked) · ${fmtMoney(totalValue)} total quoted`, 6000);
   },
 
   // --- Email quote ---
