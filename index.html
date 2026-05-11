@@ -531,7 +531,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.42.0';
+const APP_VERSION = '7.43.0';
 
 // v7.34.1: Pre-baked Firebase config for the Keystone shop's keystone-quoting
 // project. Users still need to enter their own email + password, but the
@@ -664,6 +664,7 @@ const state = {
     activeArchivedQuoteId: null,                                                                // v7.38
     quoteArchiveFilters: { search:'', customerId:'all', salesman:'all', quotedBy:'all', dateFrom:'', dateTo:'' }, // v7.38
     quoteArchiveImport: { open:false, rowsText:'', rows:null, headers:null, map:null, filename:'', sheetName:'', loading:false, error:'' }, // v7.38
+    mcMasterPaste: null, // v7.43: { partId, text, extracted } — transient smart-paste state
     followUpDays: 14,
     // v7.37 Customer History panel — per-section search + show-all toggles
     custHist: {
@@ -4580,6 +4581,161 @@ function recognizeSupplierUrl(url) {
     defaultTypes: match.types,
     hostname: host,
   };
+}
+
+// ============================================================================
+// v7.42 — VENDOR SEARCH URLS
+// Build pre-filled search URLs for the part editor's "Find at vendors" row.
+// Phase 1 stepping stone before the real McMaster API integration ships
+// (see AI QUOTE/VENDOR-API-INTEGRATION-PLAN.md for the roadmap).
+// ============================================================================
+function vendorSearchQuery(p) {
+  if (!p) return '';
+  const parts = [];
+  if (p.material) parts.push(p.material);
+  const u = p.stock?.units || 'in';
+  if (p.stock?.form) {
+    const formMap = { 'Bar/Block':'bar', 'Round':'round bar', 'Sheet':'sheet', 'Tube':'tube' };
+    parts.push(formMap[p.stock.form] || p.stock.form.toLowerCase());
+  }
+  // Primary dimension (diameter for Round, width otherwise)
+  if (p.stock && p.stock.partWidth != null && isFinite(p.stock.partWidth)) {
+    const w = (u === 'mm') ? p.stock.partWidth * MM_PER_IN : p.stock.partWidth;
+    parts.push(`${(+w).toFixed(3).replace(/\.?0+$/,'')}${u}`);
+  }
+  if (p.stock && p.stock.form !== 'Round' && p.stock.partHeight != null && isFinite(p.stock.partHeight)) {
+    const h = (u === 'mm') ? p.stock.partHeight * MM_PER_IN : p.stock.partHeight;
+    parts.push(`x ${(+h).toFixed(3).replace(/\.?0+$/,'')}${u}`);
+  }
+  return parts.filter(Boolean).join(' ').trim();
+}
+
+function vendorSearchUrls(p) {
+  const q = vendorSearchQuery(p);
+  if (!q) return null;
+  const eq = encodeURIComponent(q);
+  return {
+    query: q,
+    mcmaster: `https://www.mcmaster.com/products?searchText=${eq}`,
+    alro: `https://www.google.com/search?q=${encodeURIComponent('site:alro.com ' + q)}`,
+    onlinemetals: `https://www.onlinemetals.com/en/search?q=${eq}`,
+    grainger: `https://www.grainger.com/search?searchQuery=${eq}`,
+  };
+}
+
+// ============================================================================
+// v7.43 — McMASTER SMART PASTE
+// Parse anything copied from a McMaster product page (URL, page snippet, or
+// bookmarklet JSON) into structured fields. The user pastes whatever they
+// have; the app extracts what it can find. This is the manual-workflow
+// stepping stone until the real API integration ships.
+// ============================================================================
+function extractMcMasterData(text) {
+  if (!text) return null;
+  const raw = String(text).trim();
+  if (raw.length === 0) return null;
+
+  // First: try parsing as JSON (bookmarklet output)
+  try {
+    const obj = JSON.parse(raw);
+    if (obj && obj.__source === 'mcmaster-bookmarklet') {
+      return {
+        source: 'bookmarklet',
+        partNum: obj.partNum || null,
+        price: obj.price != null ? +obj.price : null,
+        priceUnit: obj.priceUnit || null,         // 'each' | 'per100' | 'pack' etc.
+        availability: obj.availability || null,
+        url: obj.url || null,
+        description: obj.description || null,
+        drawingUrl: obj.drawingUrl || null,
+      };
+    }
+  } catch (_) { /* not JSON — fall through to text parsing */ }
+
+  const out = {
+    source: 'text',
+    partNum: null, price: null, priceUnit: null,
+    availability: null, url: null, description: null, drawingUrl: null,
+  };
+
+  // URL detection (anywhere in the text)
+  const urlMatch = raw.match(/https?:\/\/(?:www\.)?mcmaster\.com\/[^\s\)\]\"\'<]+/i);
+  if (urlMatch) {
+    out.url = urlMatch[0];
+    const detected = recognizeSupplierUrl(out.url);
+    if (detected && detected.partNum) out.partNum = detected.partNum;
+  }
+
+  // Part number — McMaster's K-format: digits + letter + digits, e.g. 1388K11,
+  // 90234A235, 8910K11. Match conservatively to avoid false positives.
+  if (!out.partNum) {
+    const pnMatch = raw.match(/\b(\d{4,6}[A-Z]\d{1,4})\b/);
+    if (pnMatch) out.partNum = pnMatch[1].toUpperCase();
+  }
+
+  // Price — McMaster shows "$X.XX Each", "$XX.XX per pack of N", or
+  // "$X.XX / 100". Capture the dollar amount and the unit hint.
+  // Skip price candidates < $0.10 (likely irrelevant) and > $1M (parse error).
+  const priceCandidates = [];
+  const priceRegex = /\$\s*([0-9]{1,3}(?:,\d{3})*(?:\.\d{1,4})?|\d+\.\d{1,4})\s*(?:\b(each|ea\.?|per\s*pack(?:\s*of\s*\d+)?|per\s*100|\/\s*100|per\s*foot|\/\s*ft|per\s*lb|\/\s*lb|pkg)\.?)?/gi;
+  let m;
+  while ((m = priceRegex.exec(raw)) !== null) {
+    const num = parseFloat(m[1].replace(/,/g, ''));
+    if (!isFinite(num) || num < 0.10 || num > 1_000_000) continue;
+    let unit = null;
+    if (m[2]) {
+      const u = m[2].toLowerCase();
+      if (u.startsWith('each') || u.startsWith('ea')) unit = 'each';
+      else if (u.includes('100')) unit = 'per100';
+      else if (u.includes('ft') || u.includes('foot')) unit = 'perFoot';
+      else if (u.includes('lb')) unit = 'perLb';
+      else if (u.includes('pack') || u === 'pkg') unit = 'pack';
+    }
+    priceCandidates.push({ value: num, unit, idx: m.index });
+  }
+  // Prefer a price candidate with a unit hint; otherwise take the first.
+  if (priceCandidates.length > 0) {
+    const withUnit = priceCandidates.find(p => p.unit);
+    const pick = withUnit || priceCandidates[0];
+    out.price = pick.value;
+    out.priceUnit = pick.unit;
+  }
+
+  // Availability — common McMaster phrases
+  const availPatterns = [
+    { re: /usually\s+ships?\s+(?:in\s+)?today/i,                 label: 'Ships today' },
+    { re: /ships?\s+today/i,                                       label: 'Ships today' },
+    { re: /usually\s+ships?\s+in\s+(\d+)\s+(business\s+)?days?/i, label: (m) => `Ships in ${m[1]} day${m[1]==='1'?'':'s'}` },
+    { re: /in\s+stock/i,                                           label: 'In stock' },
+    { re: /backordered/i,                                          label: 'Backordered' },
+    { re: /(?:currently\s+)?out\s+of\s+stock/i,                   label: 'Out of stock' },
+    { re: /no\s+longer\s+available/i,                              label: 'Discontinued' },
+  ];
+  for (const ap of availPatterns) {
+    const am = raw.match(ap.re);
+    if (am) {
+      out.availability = (typeof ap.label === 'function') ? ap.label(am) : ap.label;
+      break;
+    }
+  }
+
+  // Description — McMaster pages typically have a product title line near the top.
+  // Take the longest line that contains the part # (if found) OR the first non-trivial line.
+  const lines = raw.split(/\r?\n/).map(l => l.trim()).filter(l => l.length >= 8 && l.length <= 200);
+  if (lines.length > 0 && out.partNum) {
+    const partLine = lines.find(l => l.includes(out.partNum));
+    if (partLine) {
+      // Use the line BEFORE the part line as the description, if it looks descriptive
+      const idx = lines.indexOf(partLine);
+      if (idx > 0 && !/^\$|^http/i.test(lines[idx-1])) {
+        out.description = lines[idx-1].slice(0, 140);
+      }
+    }
+  }
+
+  // Anything found?
+  const hasAnything = out.partNum || out.price || out.availability || out.url;
+  return hasAnything ? out : null;
 }
 
 /**
@@ -10605,6 +10761,77 @@ function renderSupplierCostBody(q, p) {
         ` : '<div class="hint">Tags this price for memory by vendor</div>');
       })()}</div>
       <div class="field"><label>Vendor Part # (optional)</label>${bind({label:'Vendor part number',value:p.materialCost.vendorPartNum||'', onChange:v=>{p.materialCost.vendorPartNum=v;}, placeholder:'e.g. 1388K11'})}<div class="hint">McMaster #, Alro item, etc.</div></div>
+      ${(() => {
+        // v7.42: Pre-filled vendor search buttons. Real McMaster API
+        // integration is coming (see VENDOR-API-INTEGRATION-PLAN.md). Until
+        // it lands, these one-click searches save typing the query each time.
+        const urls = vendorSearchUrls(p);
+        if (!urls) {
+          return `<div class="field" style="grid-column:span 2;"><label>🔍 Find at vendors</label><div class="hint" style="padding:6px 0; color:var(--text-mute);">Add a material + form + dimension above to enable vendor search</div></div>`;
+        }
+        return `
+          <div class="field" style="grid-column:span 2;">
+            <label>🔍 Find at vendors</label>
+            <div style="display:flex; flex-wrap:wrap; gap:6px; align-items:center;">
+              <a class="btn btn-sm" href="${esc(urls.mcmaster)}" target="_blank" rel="noopener" title="Open McMaster search in new tab">McMaster ↗</a>
+              <a class="btn btn-sm" href="${esc(urls.alro)}" target="_blank" rel="noopener" title="Open Alro site search via Google (Alro has no direct search URL)">Alro ↗</a>
+              <a class="btn btn-sm" href="${esc(urls.onlinemetals)}" target="_blank" rel="noopener" title="Open Online Metals search">Online Metals ↗</a>
+              <a class="btn btn-sm" href="${esc(urls.grainger)}" target="_blank" rel="noopener" title="Open Grainger search">Grainger ↗</a>
+              <span class="hint" style="margin-left:6px;">Search: <strong>${esc(urls.query)}</strong></span>
+            </div>
+            <div class="hint">Find the product → use Smart Paste below to pull part #, price, availability in one shot</div>
+          </div>
+        `;
+      })()}
+      ${(() => {
+        // v7.43: Smart Paste from McMaster — accepts URL + page text + bookmarklet JSON.
+        // Live parses as user types; "Apply" commits to the part.
+        const pasteState = state.ui.mcMasterPaste && state.ui.mcMasterPaste.partId === p.id ? state.ui.mcMasterPaste : null;
+        const text = pasteState ? pasteState.text : '';
+        const extracted = pasteState ? pasteState.extracted : null;
+        const isOpen = !!pasteState;
+        return `
+          <div class="field" style="grid-column:span 2;">
+            <label>🪄 Smart Paste from McMaster</label>
+            ${!isOpen ? `
+              <div style="display:flex; gap:6px; align-items:center;">
+                <button class="btn btn-sm" onclick="App.openMcMasterPaste('${p.id}')">📋 Open Smart Paste</button>
+                <span class="hint">Click here, then paste anything you copied from a McMaster product page (URL alone, page snippet, or bookmarklet JSON)</span>
+              </div>
+            ` : `
+              <div style="display:flex; gap:6px; align-items:flex-start;">
+                <textarea
+                  placeholder="Paste from McMaster here — URL alone, a page snippet with price visible, or JSON from the bookmarklet. Parses as you type."
+                  oninput="App.setMcMasterPasteText(this.value)"
+                  style="flex:1; min-height:70px; font-family:var(--font-mono); font-size:11px;"
+                  autofocus>${esc(text)}</textarea>
+                <div style="display:flex; flex-direction:column; gap:4px;">
+                  <button class="btn btn-sm" onclick="App.closeMcMasterPaste()" title="Cancel without applying">✕</button>
+                  ${extracted ? `<button class="btn btn-sm btn-primary" onclick="App.applyMcMasterPaste()" title="Fill the part fields below with what was extracted">Apply →</button>` : ''}
+                </div>
+              </div>
+              ${extracted ? `
+                <div style="margin-top:6px; padding:8px 10px; background:#ECFDF5; border:1px solid #6EE7B7; border-radius:4px; font-size:11px;">
+                  <strong style="font-size:11px; text-transform:uppercase; letter-spacing:0.06em; color:#065F46;">${extracted.source === 'bookmarklet' ? '✓ Bookmarklet JSON detected' : '✓ Extracted from pasted text'}</strong>
+                  <div style="display:grid; grid-template-columns:auto 1fr; gap:4px 12px; margin-top:4px;">
+                    ${extracted.partNum ? `<div style="color:var(--text-mute);">Part #</div><div><strong>${esc(extracted.partNum)}</strong></div>` : ''}
+                    ${extracted.price != null ? `<div style="color:var(--text-mute);">Price</div><div><strong>${fmtMoney(extracted.price)}</strong>${extracted.priceUnit ? ` <span class="text-mute">(${esc(extracted.priceUnit)})</span>` : ''}</div>` : ''}
+                    ${extracted.availability ? `<div style="color:var(--text-mute);">Availability</div><div>${esc(extracted.availability)}</div>` : ''}
+                    ${extracted.url ? `<div style="color:var(--text-mute);">URL</div><div><a href="${esc(extracted.url)}" target="_blank" rel="noopener" class="mono" style="font-size:10px;">${esc(extracted.url.length > 60 ? extracted.url.slice(0,60)+'…' : extracted.url)}</a></div>` : ''}
+                    ${extracted.description ? `<div style="color:var(--text-mute);">Description</div><div>${esc(extracted.description)}</div>` : ''}
+                  </div>
+                </div>
+              ` : text.trim() ? `
+                <div style="margin-top:6px; padding:8px 10px; background:#FEF3C7; border:1px solid #FCD34D; border-radius:4px; font-size:11px; color:#78350F;">
+                  ⚠ Couldn't extract anything from that text. Make sure you're logged in to McMaster when you copy (so prices are visible on the page), and copy a section that includes the price + part # together.
+                </div>
+              ` : `
+                <div class="hint" style="margin-top:6px;">Tip: while logged into McMaster, select the product title + price + part # area on the page (Ctrl+A then Ctrl+C works too), paste here. Or click the McMaster button above and use the bookmarklet for one-click capture.</div>
+              `}
+            `}
+          </div>
+        `;
+      })()}
       <div class="field"><label>Material Link (optional)</label>
         <div class="field-row">
           <div style="flex:1;">${bind({label:'Material URL',value:p.materialCost.vendorUrl||'', onChange:v=>{
@@ -12712,6 +12939,90 @@ const App = {
       delete mc._detectedTypes;
     });
     showToast('Vendor added and linked to this material');
+  },
+
+  // v7.43: McMaster Smart Paste — extract part #, price, availability from
+  // whatever the user copied off the McMaster product page.
+  openMcMasterPaste(partId) {
+    state.ui.mcMasterPaste = { partId, text: '', extracted: null };
+    saveState(); render();
+  },
+  closeMcMasterPaste() {
+    state.ui.mcMasterPaste = null;
+    saveState(); render();
+  },
+  setMcMasterPasteText(text) {
+    if (!state.ui.mcMasterPaste) return;
+    state.ui.mcMasterPaste.text = text;
+    state.ui.mcMasterPaste.extracted = extractMcMasterData(text);
+    saveState(); render();
+    // Restore focus + cursor to the textarea (which got re-rendered)
+    setTimeout(() => {
+      const ta = document.querySelector('textarea[oninput*="setMcMasterPasteText"]');
+      if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
+    }, 0);
+  },
+  applyMcMasterPaste() {
+    const ps = state.ui.mcMasterPaste;
+    if (!ps || !ps.extracted) return;
+    const ex = ps.extracted;
+    const partId = ps.partId;
+    let applied = [];
+    update(s => {
+      const q = getActiveQuote(); if (!q) return;
+      const p = q.parts.find(x => x.id === partId); if (!p) return;
+      if (!p.materialCost) p.materialCost = { perPiece: [null], perBar: null, perSheet: null, vendorId: null, vendorPartNum: '', vendorUrl: '' };
+      if (ex.partNum && !p.materialCost.vendorPartNum) {
+        p.materialCost.vendorPartNum = ex.partNum;
+        applied.push('part #');
+      } else if (ex.partNum) {
+        p.materialCost.vendorPartNum = ex.partNum;
+        applied.push('part # (overwrote)');
+      }
+      if (ex.url) {
+        p.materialCost.vendorUrl = ex.url;
+        applied.push('URL');
+      }
+      if (ex.price != null && isFinite(ex.price) && ex.price > 0) {
+        // Price routing: 'each' or no unit → perPiece[0]; 'per100' → perPiece / 100;
+        // 'pack' → perPiece (caller can adjust); rest → perPiece as fallback
+        if (!Array.isArray(p.materialCost.perPiece)) p.materialCost.perPiece = [];
+        ensureMatPerPiece(p);
+        if (ex.priceUnit === 'per100') {
+          p.materialCost.perPiece[0] = ex.price / 100;
+          applied.push('price (÷100)');
+        } else {
+          p.materialCost.perPiece[0] = ex.price;
+          applied.push('price');
+        }
+      }
+      // Availability + drawing URL go into notes if we don't have dedicated fields
+      const noteAdditions = [];
+      if (ex.availability) noteAdditions.push(`Avail: ${ex.availability}`);
+      if (ex.drawingUrl) noteAdditions.push(`Drawing: ${ex.drawingUrl}`);
+      if (noteAdditions.length > 0) {
+        const tag = `[McMaster ${new Date().toISOString().slice(0,10)}] ${noteAdditions.join(' · ')}`;
+        p.notes = p.notes ? `${p.notes}\n${tag}` : tag;
+        applied.push('availability note');
+      }
+      // Auto-link McMaster vendor if recognized
+      if (ex.url) {
+        const detected = recognizeSupplierUrl(ex.url);
+        if (detected) {
+          const existing = findVendorByName(detected.vendorName);
+          if (existing && !p.materialCost.vendorId && vendorTypes(existing).includes('material')) {
+            p.materialCost.vendorId = existing.id;
+            applied.push('vendor link');
+          } else if (!existing && detected.defaultTypes.includes('material') && !p.materialCost.vendorId) {
+            p.materialCost._detectedVendor = detected.vendorName;
+            p.materialCost._detectedTypes = detected.defaultTypes;
+          }
+        }
+      }
+    });
+    state.ui.mcMasterPaste = null;
+    saveState(); render();
+    showToast(applied.length > 0 ? `Applied: ${applied.join(', ')}` : 'Nothing new to apply', 4500);
   },
 
   addRate() { update(s => { s.settings.rates.push({ name:'New machine', setupRate:100, runRate:100 }); }); },
