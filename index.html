@@ -531,7 +531,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.41.0';
+const APP_VERSION = '7.42.0';
 
 // v7.34.1: Pre-baked Firebase config for the Keystone shop's keystone-quoting
 // project. Users still need to enter their own email + password, but the
@@ -1793,6 +1793,18 @@ function isSectionOpen(partId, sectionKey, hasContent) {
 }
 
 // === OneDrive folder path helpers ===
+// Sanitize a folder name (single segment — strips path separators).
+// Used for the auto-generated quote folder name.
+// Sanitize a folder SUBPATH (allows internal \ or / so a customer folder can
+// be nested under a parent like "IPS Group\IPS Akron"). v7.42.
+function sanitizeFolderSubpath(s) {
+  // Strip illegal chars, collapse mixed separators, but preserve the path.
+  return (s || '')
+    .replace(/[<>:"|?*\x00-\x1F]/g, '')      // illegal chars (NOT slash/backslash)
+    .replace(/[\\/]+/g, '\\')                 // normalize separators to backslash
+    .replace(/^\\+|\\+$/g, '')                // strip leading/trailing separators
+    .trim();
+}
 function sanitizeFolderName(s) {
   // Strip characters Windows doesn't allow: < > : " / \ | ? * and control chars
   return (s || '').replace(/[<>:"/\\|?*\x00-\x1F]/g, '').replace(/\s+/g, '_').trim();
@@ -1820,11 +1832,78 @@ function suggestedFolderPath(q) {
   const sep = root.includes('\\') ? '\\' : (root.includes('/') ? '/' : '\\');
   const cleanRoot = root.replace(/[\\/]+$/, '');
   // v7.41: insert customer folder layer if the customer has one set.
-  // If not, the path falls back to <root>\<quote-folder> (legacy behavior).
-  // The missing-folder prompt is fired separately by openLocalQuoteFolder.
-  const custFolder = (cust && cust.oneDriveFolder) ? sanitizeFolderName(cust.oneDriveFolder) : '';
+  // v7.42: customer folder may be a subpath ("IPS Group\IPS Akron") to
+  // support nested groupings — sanitizeFolderSubpath preserves separators.
+  const custFolder = (cust && cust.oneDriveFolder) ? sanitizeFolderSubpath(cust.oneDriveFolder) : '';
   if (custFolder) return `${cleanRoot}${sep}${custFolder}${sep}${name}`;
   return `${cleanRoot}${sep}${name}`;
+}
+
+// v7.42 — Fuzzy matcher for customer name → folder name.
+// Used by the wizard's auto-detect feature to match what the user has in
+// OneDrive against what's in state.customers. Bias toward conservative
+// matching — false positives (wrong auto-map) are worse than false negatives
+// (still empty, user fills manually).
+const _CUST_SUFFIXES = ['inc', 'incorporated', 'llc', 'ltd', 'co', 'corp', 'corporation', 'company', 'thecompany'];
+function normalizeCustName(s) {
+  let n = (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  // Strip trailing common business-form suffix once (so "Acme Inc" → "acme")
+  for (const suf of _CUST_SUFFIXES) {
+    if (n.length > suf.length + 2 && n.endsWith(suf)) {
+      n = n.slice(0, -suf.length);
+      break;
+    }
+  }
+  return n;
+}
+// Match each customer to a folder. folders is array of {name, path}.
+// Returns { matches: {custId: folderPath}, unmatchedCustomers: [c], unmatchedFolders: [f] }.
+function matchCustomersToFolders(customers, folders) {
+  const matches = {};
+  const usedFolderPaths = new Set();
+  // Build normalized index of folders for lookup
+  const foldersByNorm = new Map();
+  folders.forEach(f => {
+    const n = normalizeCustName(f.name);
+    if (n && !foldersByNorm.has(n)) foldersByNorm.set(n, f);
+  });
+  // Pass 1 — exact normalized match
+  customers.forEach(c => {
+    const n = normalizeCustName(c.name);
+    if (!n) return;
+    if (foldersByNorm.has(n)) {
+      const f = foldersByNorm.get(n);
+      if (!usedFolderPaths.has(f.path)) {
+        matches[c.id] = f.path;
+        usedFolderPaths.add(f.path);
+      }
+    }
+  });
+  // Pass 2 — substring containment, only if both ≥ 4 chars
+  customers.forEach(c => {
+    if (matches[c.id]) return;
+    const cn = normalizeCustName(c.name);
+    if (cn.length < 4) return;
+    let best = null;
+    for (const f of folders) {
+      if (usedFolderPaths.has(f.path)) continue;
+      const fn = normalizeCustName(f.name);
+      if (fn.length < 4) continue;
+      // Either contains the other (e.g., "acme" in "acmesteel" or "acmesteel" in "acmesteelinc")
+      if (cn.includes(fn) || fn.includes(cn)) {
+        // Score: longer overlap is better
+        const overlap = Math.min(cn.length, fn.length);
+        if (!best || overlap > best.overlap) best = { f, overlap };
+      }
+    }
+    if (best) {
+      matches[c.id] = best.f.path;
+      usedFolderPaths.add(best.f.path);
+    }
+  });
+  const unmatchedCustomers = customers.filter(c => !matches[c.id]);
+  const unmatchedFolders = folders.filter(f => !usedFolderPaths.has(f.path));
+  return { matches, unmatchedCustomers, unmatchedFolders };
 }
 
 // Per-customer folder path (no quote layer). Returns null if root not set
@@ -1834,7 +1913,7 @@ function customerFolderPath(c) {
   if (!root || !c || !c.oneDriveFolder) return null;
   const sep = root.includes('\\') ? '\\' : (root.includes('/') ? '/' : '\\');
   const cleanRoot = root.replace(/[\\/]+$/, '');
-  return `${cleanRoot}${sep}${sanitizeFolderName(c.oneDriveFolder)}`;
+  return `${cleanRoot}${sep}${sanitizeFolderSubpath(c.oneDriveFolder)}`;
 }
 
 // Lazy-load a script (used for jsPDF on demand)
@@ -10893,12 +10972,18 @@ function renderCustFolderWizardModal() {
       <div class="modal" style="width:820px; max-width:96vw; max-height:90vh; display:flex; flex-direction:column;" onclick="event.stopPropagation()">
         <div class="modal-header">Map Customers to OneDrive Folders</div>
         <div class="modal-body" style="padding:16px 20px; overflow-y:auto; flex:1; min-height:300px;">
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+          <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom:12px;">
             <div>
               <div style="font-size:13px;">${setCount} of ${totalCustomers} customers have folders set</div>
               <div class="hint" style="margin-top:2px;">Each folder will live under your OneDrive root. Empty rows stay empty (you'll be prompted later).</div>
             </div>
-            <button class="btn btn-sm" onclick="App.bulkFillCustFolderWizard()" title="Fills every empty row with a sanitized version of the customer name">⚡ Quick-fill empty rows from customer name</button>
+            <div style="display:flex; flex-direction:column; gap:6px; flex:0 0 auto;">
+              <button class="btn btn-primary btn-sm" onclick="App.autoDetectCustFolders()" title="Open a folder picker, navigate to your customers folder in OneDrive, app reads the subfolder names and matches them to your 57 customers automatically">🔍 Auto-detect from OneDrive folder</button>
+              <button class="btn btn-sm" onclick="App.bulkFillCustFolderWizard()" title="Fallback: fills every empty row with a sanitized version of the customer name (use this if auto-detect didn't match enough)">⚡ Fill empty rows from customer name</button>
+            </div>
+          </div>
+          <div class="hint" style="background:var(--bg); border-left:3px solid var(--blue); padding:8px 12px; margin-bottom:10px; font-size:11px;">
+            <strong>🔍 Auto-detect:</strong> click the blue button → folder picker opens → navigate to <span class="mono">KMF Documents\\___Customers</span> (or wherever your customer folders live) → click Select. The app reads every subfolder name (and one level deeper to catch nested groups like IPS Group) and fuzzy-matches them against your customer list. Only fills empty rows, never overwrites your entries.
           </div>
           <div class="row" style="gap:8px; margin-bottom:10px; align-items:center;">
             <input type="search" placeholder="Search by customer name or code…"
@@ -13433,6 +13518,74 @@ Trimble Tool`;
     state.ui.custFolderWizard.onlyMissing = !state.ui.custFolderWizard.onlyMissing;
     render();
   },
+  // v7.42 — Auto-detect from a OneDrive folder via showDirectoryPicker.
+  // Recursively scans the picked folder + 1 level down (handles "IPS Group"
+  // style nests), runs the matcher, fills empty drafts. Browsers without
+  // File System Access API (Firefox, older Edge) fall back to a notice.
+  async autoDetectCustFolders() {
+    if (!state.ui.custFolderWizard) return;
+    if (typeof window.showDirectoryPicker !== 'function') {
+      alert('Auto-detect requires Chrome or Edge (the File System Access API). On other browsers, you\'ll need to fill the wizard manually.');
+      return;
+    }
+    let dirHandle;
+    try {
+      dirHandle = await window.showDirectoryPicker({ mode: 'read' });
+    } catch (e) {
+      // User cancelled or denied
+      if (e && e.name === 'AbortError') return;
+      alert('Could not open folder picker: ' + e.message);
+      return;
+    }
+    // Collect folders 2 levels deep: top-level entries + 1 level into each
+    // top-level folder. The IPS Group case → "IPS Group/IPS Akron" gets
+    // both "IPS Group" (top level) and "IPS Akron" (one level down) as
+    // candidates, with paths "IPS Group" and "IPS Group\IPS Akron".
+    const folders = [];
+    try {
+      for await (const entry of dirHandle.values()) {
+        if (entry.kind !== 'directory') continue;
+        folders.push({ name: entry.name, path: entry.name });
+        // One level deeper
+        try {
+          for await (const sub of entry.values()) {
+            if (sub.kind === 'directory') {
+              folders.push({ name: sub.name, path: `${entry.name}\\${sub.name}` });
+            }
+          }
+        } catch (_) { /* skip unreadable */ }
+      }
+    } catch (e) {
+      alert('Error reading folder contents: ' + e.message);
+      return;
+    }
+    if (folders.length === 0) {
+      alert('Picked folder appears to be empty (no subfolders).');
+      return;
+    }
+    // Match — but only fill rows that are currently EMPTY in the wizard,
+    // so we never overwrite user-entered values.
+    const wiz = state.ui.custFolderWizard;
+    const customersWithEmptyDrafts = state.customers.filter(c =>
+      !((wiz.drafts[c.id] || '').trim())
+    );
+    const result = matchCustomersToFolders(customersWithEmptyDrafts, folders);
+    let filled = 0;
+    Object.entries(result.matches).forEach(([custId, folderPath]) => {
+      wiz.drafts[custId] = folderPath;
+      filled++;
+    });
+    render();
+    const stillEmpty = state.customers.filter(c => !((wiz.drafts[c.id] || '').trim())).length;
+    const unmatchedFolderCount = result.unmatchedFolders.length;
+    const summary = [
+      `Auto-matched ${filled} customer${filled!==1?'s':''} to folders.`,
+      stillEmpty > 0 ? `${stillEmpty} customer${stillEmpty!==1?'s':''} still need folders (no clear match found).` : '',
+      unmatchedFolderCount > 0 ? `${unmatchedFolderCount} folder${unmatchedFolderCount!==1?'s':''} in OneDrive have no matching customer (probably old/unused).` : '',
+    ].filter(Boolean).join(' ');
+    showToast(summary, 7000);
+  },
+
   // Quick-fill empty fields with sanitized customer name
   bulkFillCustFolderWizard() {
     if (!state.ui.custFolderWizard) return;
