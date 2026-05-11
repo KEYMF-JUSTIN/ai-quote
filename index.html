@@ -531,7 +531,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.44.0';
+const APP_VERSION = '7.45.0';
 
 // v7.34.1: Pre-baked Firebase config for the Keystone shop's keystone-quoting
 // project. Users still need to enter their own email + password, but the
@@ -553,8 +553,14 @@ const KEYSTONE_FIREBASE_CONFIG = {
 const AI_QUOTE_AZURE_CONFIG = {
   clientId: "1f3f666c-762f-4744-97fc-06d93d7b7d11",
   tenantId: "0cc812a1-488c-46c0-a155-da5951bafa8e",
-  // Scopes: Mail.Read for inbox access, offline_access for refresh tokens
-  scopes: "Mail.Read offline_access",
+  // Scopes:
+  //   Mail.Read               — for RFQ inbox auto-import (v7.36)
+  //   Files.ReadWrite.All     — to create job folders + upload attachments (v7.45)
+  //   offline_access          — for long-lived refresh tokens
+  // When this scope list changes, users must re-consent — disconnect Outlook
+  // in the app, then click Connect Outlook again. Microsoft shows a fresh
+  // consent screen including the new permissions.
+  scopes: "Mail.Read Files.ReadWrite.All offline_access",
 };
 
 // v7.32: Lead-time options for the Quote Info dropdown — progressive
@@ -583,6 +589,49 @@ const LEAD_TIME_OPTIONS = [
   { value: '12+ weeks',     label: '12+ weeks' },
 ];
 const QUOTE_NUM_BASE = 4250;       // starting quote # if no existing quotes
+
+// v7.45: Quote kinds — determines the workflow/path for a quote. Each kind
+// gets a focused editor in future versions (welding ops, BOM, etc.). For
+// v7.45, the kind is primarily metadata + a single-part lock for 'machining'.
+const QUOTE_KINDS = [
+  {
+    id: 'multipart',
+    label: 'Multi-part machining',
+    short: 'Multi-part',
+    icon: '⚙',
+    desc: 'Several machined parts in one quote — the default workflow you\'ve been using. Each part has its own material, ops, qty tiers.',
+    color: '#1E5BAE',
+  },
+  {
+    id: 'machining',
+    label: 'Single-part machining',
+    short: 'Single',
+    icon: '🔧',
+    desc: 'A focused one-part quote. Locks the quote to a single part so the editor stays simple.',
+    color: '#0F766E',
+  },
+  {
+    id: 'welding',
+    label: 'Welding job',
+    short: 'Welding',
+    icon: '🔥',
+    desc: 'Weld-focused work: process, weld feet, filler, certs. Weld-specific ops table coming in v7.47 — for now uses the standard part editor.',
+    color: '#C84317',
+  },
+  {
+    id: 'build',
+    label: 'Machine build',
+    short: 'Build',
+    icon: '🏗',
+    desc: 'Assembly of components — bought-out parts + machined parts + sub-assemblies + assembly labor. BOM view coming in v7.47 — for now uses the standard part editor.',
+    color: '#7F77DD',
+  },
+];
+const QUOTE_KIND_BY_ID = Object.fromEntries(QUOTE_KINDS.map(k => [k.id, k]));
+function quoteKindLabel(q) { const k = QUOTE_KIND_BY_ID[q && q.kind]; return k ? k.label : 'Multi-part machining'; }
+function quoteKindShort(q) { const k = QUOTE_KIND_BY_ID[q && q.kind]; return k ? k.short : 'Multi-part'; }
+function quoteKindIcon(q)  { const k = QUOTE_KIND_BY_ID[q && q.kind]; return k ? k.icon  : '⚙'; }
+function quoteKindColor(q) { const k = QUOTE_KIND_BY_ID[q && q.kind]; return k ? k.color : '#1E5BAE'; }
 const DEFAULT_SETTINGS = {"rates": [{"name": "Doosan mill", "setupRate": 300.0, "runRate": 300.0}, {"name": "GR Haas", "setupRate": 275.0, "runRate": 275.0}, {"name": "Puma lathe", "setupRate": 300.0, "runRate": 300.0}, {"name": "ST30 Haas lathe", "setupRate": 200.0, "runRate": 200.0}, {"name": "Welding", "setupRate": 160.0, "runRate": 160.0}, {"name": "Laguna router", "setupRate": 160.0, "runRate": 160.0}, {"name": "CNC plasma cutter", "setupRate": 140.0, "runRate": 140.0}, {"name": "Manual lathe", "setupRate": 120.0, "runRate": 120.0}, {"name": "Bridgeport", "setupRate": 100.0, "runRate": 100.0}, {"name": "Programming", "setupRate": 175.0, "runRate": 175.0}, {"name": "Engineering", "setupRate": 220.0, "runRate": 220.0}, {"name": "3D modeling", "setupRate": 140.0, "runRate": 140.0}], "markups": {"material": 0.25, "outside": 0.2}, "tierLaborDiscounts": [0, 5, 10, 15], "materials": [{"name": "6061 Aluminum", "density": 0.098, "vendorIds": []}, {"name": "7075 Aluminum", "density": 0.102, "vendorIds": []}, {"name": "A36 Steel", "density": 0.284, "vendorIds": []}, {"name": "Cold Rolled Steel", "density": 0.284, "vendorIds": []}, {"name": "4140", "density": 0.284, "vendorIds": []}, {"name": "4140 Q&T", "density": 0.284, "vendorIds": []}, {"name": "Copper", "density": 0.323, "vendorIds": []}, {"name": "Brass", "density": 0.307, "vendorIds": []}, {"name": "GPO-3", "density": 0.067, "vendorIds": []}, {"name": "G10", "density": 0.065, "vendorIds": []}, {"name": "G11", "density": 0.065, "vendorIds": []}, {"name": "Other", "density": 0.0, "vendorIds": []}], "vendors": [], "nextPoNum": 1001, "nextPackingSlipNum": 1001, "nextInvoiceNum": 2001, "salesTaxRate": 6.75, "paymentTerms": ["Net 30", "Net 15", "Net 45", "Net 60", "Due on receipt", "COD", "Prepaid"], "shopInfo": {"name": "Keystone Machine and Fab", "address": "827 Mechanic Street\nGrafton, OH 44044", "phone": "440-926-1234", "email": "quotes@keystonefab.com", "website": "", "tagline": "Precision machining and fabrication", "quoteValidDays": 30, "footerTerms": "Quote valid 30 days from date above. FOB shop, freight prepaid and added unless otherwise specified. Standard machine shop quality unless drawing specifies otherwise. Net 30 terms with approved credit."}};
 const SEED_CUSTOMERS = [{"code": "ABLEST MOLDI", "name": "Ablest Molding Inc - C", "contact": "", "email": "mikejenkins@ablestmolding.com", "phone": "", "billStreet": "16210 Wheeler Rd", "billCity": "Lagrange", "billState": "OH", "billZip": "44050", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "AFFILIATED M", "name": "Affiliated Metal", "contact": "", "email": "jland@affiliatedmetal.com", "phone": "440-235-3345", "billStreet": "25600 Chapin St", "billCity": "Olmsted Falls", "billState": "OH", "billZip": "44138", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "AFFILIATED 2", "name": "Affiliated Metal Industries INC.", "contact": "", "email": "jland@affiliatedmetal.com", "phone": "440-235-3345", "billStreet": "25600 Chapin St", "billCity": "Olmsted Falls", "billState": "OH", "billZip": "44138", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "AMERICAN TAN", "name": "AMERICAN TANK AND FAB", "contact": "", "email": "ap@atfco.com", "phone": "2166883176", "billStreet": "12314 ELMWOOD AVE", "billCity": "Cleveland", "billState": "OH", "billZip": "44111", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "BADGER MAGNE", "name": "Badger Magnetics", "contact": "", "email": "Ap.mke@badgermagnetics.com", "phone": "414-375-1105", "billStreet": "7939 W. Tower Ave.", "billCity": "Milwaukee", "billState": "WI", "billZip": "53223", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "BONEFISH SYS", "name": "Bonefish Systems", "contact": "", "email": "", "phone": "614-427-3827", "billStreet": "", "billCity": "150 Erie Court", "billState": "OH", "billZip": "", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "BRAND X ELEC", "name": "Brand X Electrical, LLC", "contact": "", "email": "mj@brandxelectrical.net", "phone": "", "billStreet": "18748 Mennell Rd", "billCity": "Grafton", "billState": "OH", "billZip": "44044", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "CAM INNOVATI", "name": "CAM INNOVATION INC", "contact": "", "email": "accounting@caminnovation.com", "phone": "717 637 5988", "billStreet": "215 PHILIDELPHIA ST", "billCity": "HANOVER", "billState": "PA", "billZip": "17331", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": "Website: Bryan 116"}, {"code": "COIL MANUFAC", "name": "COIL MANUFACTURING INC.", "contact": "", "email": "curtis.hill@cmicoil.com", "phone": "205-838-5985", "billStreet": "Coil Manufacturing, Inc. 940 Alton Parkway", "billCity": "Birmingham", "billState": "AL", "billZip": "35210", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "DXP ENTERPRI", "name": "DXP ENTERPRISES INC.", "contact": "", "email": "accountspayable@dxpe.com", "phone": "513 500-8617 Eric Shulltz", "billStreet": "4620 FOREST AVE.", "billCity": "NORWOOD", "billState": "OH", "billZip": "45212", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": "Work phone: 513-827-1672 Tracey A/P"}, {"code": "EFFOX FLEXTO", "name": "Effox Flextor Mader", "contact": "", "email": "", "phone": "440-355-4505", "billStreet": "", "billCity": "", "billState": "", "billZip": "", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "ELCTROLOCK I", "name": "ELCTROLOCK, INC.", "contact": "", "email": "Accounts.payable@electrolock.com", "phone": "440 364 0206", "billStreet": "17930 Great Lakes Parkway Hiram, Ohio 44234", "billCity": "HIRAM", "billState": "OH", "billZip": "44234", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "EXPERT CRANE", "name": "Expert Crane", "contact": "", "email": "ap@expertcrane.com", "phone": "1-800-860-6680 EX1282 julia m", "billStreet": "5755 Grant Ave", "billCity": "Cleveland", "billState": "OH", "billZip": "44105", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "FERROUS 85 C", "name": "Ferrous 85 CO", "contact": "", "email": "accountspayable@ferragon.com", "phone": "216-671-6161", "billStreet": "11103 Memphis Ave", "billCity": "Brooklyn", "billState": "OH", "billZip": "44144", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "FERROUS META", "name": "Ferrous Metals", "contact": "", "email": "accountspayable@ferragon.com", "phone": "216-671-6161", "billStreet": "11103 Memphis Ave", "billCity": "Brooklyn", "billState": "OH", "billZip": "44144", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": "Website: zzoric@ferrousmetalprocessing.com"}, {"code": "FIVE STAR FA", "name": "Five Star Fabrication", "contact": "", "email": "matt@weldandfabnow.com", "phone": "440-666-0427", "billStreet": "3910 1/2 Avon Lake Rd", "billCity": "Litchfield", "billState": "OH", "billZip": "44253", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "FOX EQUIPMEN", "name": "Fox Equipment, LLC", "contact": "", "email": "ap@foxequipment.com", "phone": "904-531-3150", "billStreet": "965 Bunker Avenue", "billCity": "Green Cove Springs", "billState": "FL", "billZip": "32043", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "FUSION INCOR", "name": "FUSION INCORPORATED", "contact": "", "email": "ap@fusion-inc.com", "phone": "440 946 3300", "billStreet": "JOHN SUFFRON 4658 E355 ST  USA", "billCity": "Willoughby", "billState": "OH", "billZip": "44094", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "GE VERNOVA", "name": "GE Vernova", "contact": "", "email": "", "phone": "346 833 7130", "billStreet": "7101 W Erie Ave", "billCity": "Lorain", "billState": "OH", "billZip": "44053", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "HANNON ELECT", "name": "HANNON ELECTRIC COMPANY", "contact": "", "email": "tleyman@hanco.com", "phone": "330 456 4728", "billStreet": "1605 WAYNESBURG DR SE", "billCity": "CANTON", "billState": "OH", "billZip": "44707", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "HORIZON META", "name": "HORIZON METALS INC.", "contact": "", "email": "horizonmet@aol.com", "phone": "440 235 3338", "billStreet": "P.O. BOX 38310", "billCity": "Olmsted Falls", "billState": "OH", "billZip": "44138", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "HYCAL CORP", "name": "HyCAL Corp.", "contact": "", "email": "sswan@hycalcorp.com", "phone": "248-697-8099", "billStreet": "Ferrolux Metals Co. & Autolum 27800 W. Jefferson Ave.", "billCity": "Gibraltar", "billState": "MI", "billZip": "48173", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "INNOMOTICS L", "name": "Innomotics LLC", "contact": "", "email": "Nrider09@yahoo.com", "phone": "", "billStreet": "", "billCity": "", "billState": "", "billZip": "", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "INNOMOTICS 2", "name": "Innomotics LLC (EIN 38-4207664)", "contact": "", "email": "", "phone": "513-827-1672", "billStreet": "Innomotics LLC PO Box 4356 MC-IMA069", "billCity": "Portland", "billState": "OR", "billZip": "97208-4356", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "INTEGRATED P", "name": "Integrated Power Services Cle LLC", "contact": "", "email": "APCleveland@ips.us", "phone": "216-433-7800", "billStreet": "Integrated Power Services Cle INC 5325 West 130th St", "billCity": "Cleveland", "billState": "OH", "billZip": "44130", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "INTEGRATED 2", "name": "Integrated Power Services Denver, LLC", "contact": "", "email": "RDZAPDept@ips.us", "phone": "303-935-4615", "billStreet": "4850 Moline St", "billCity": "Denver", "billState": "CO", "billZip": "80239", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "INTEGRATED 3", "name": "Integrated Power Services IL LLC", "contact": "", "email": "jedders@ips.us", "phone": "708-877-5310", "billStreet": "Integrated Power Services, IL LLC 17001 S. Vincennes Rd", "billCity": "Thornton", "billState": "IL", "billZip": "60476", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "INTEGRATED 4", "name": "Integrated Power Services OK LLC", "contact": "", "email": "ehqapinvoices@ips.us", "phone": "405-631-1344  ext390", "billStreet": "OK 6707 N Interstate Dr", "billCity": "Norman", "billState": "OK", "billZip": "730690", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "IPS CALIFORN", "name": "IPS CALIFORNIA", "contact": "", "email": "IVCAP@ips.us", "phone": "559 651 0606", "billStreet": "7515 W SUNNYVIEW AVE", "billCity": "VISALIA", "billState": "CA", "billZip": "93291", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "IPS HOUSTON", "name": "IPS HOUSTON SERVICE CENTER", "contact": "", "email": "PHansford@ips.us", "phone": "281 471 4611 AP", "billStreet": "1500 EAST MAIN ST", "billCity": "La Porte", "billState": "TX", "billZip": "77571", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": "Work phone: Cameron Rogers 281-471-4611"}, {"code": "JUSTIN M JEN", "name": "Justin M Jenkins", "contact": "", "email": "", "phone": "", "billStreet": "827 Mechanic St", "billCity": "Grafton", "billState": "OH", "billZip": "44044", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "KAPUCINSKI M", "name": "KAPUCINSKI MACHINE", "contact": "", "email": "rtk4@windstream.net", "phone": "440 213 1465", "billStreet": "15922 WHEELER RD", "billCity": "Lagrange", "billState": "OH", "billZip": "44050", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "KAPUCINSKI 2", "name": "Kapucinski Machine LLC.", "contact": "", "email": "rtk4@windstream.net", "phone": "440-213-1465", "billStreet": "15922 Wheeler Rd", "billCity": "Lagrange", "billState": "OH", "billZip": "44050", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "KENCOIL INC", "name": "Kencoil Inc.", "contact": "", "email": "dgervais@kencoil.com", "phone": "504-394-4010", "billStreet": "2805 Engineers Rd   70037", "billCity": "Belle Chasse", "billState": "LA", "billZip": "70037", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "KS WILSON HO", "name": "KS Wilson Holdings LLC.", "contact": "", "email": "", "phone": "", "billStreet": "", "billCity": "", "billState": "", "billZip": "", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "LEPPERT MACH", "name": "Leppert Machine Co Inc", "contact": "", "email": "", "phone": "419-522-4721", "billStreet": "650 Wayne St", "billCity": "Mansfield", "billState": "OH", "billZip": "44905", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "M P A INC", "name": "M P & A INC.", "contact": "", "email": "Nathan@MPAbag.us", "phone": "+1 (440) 926-1074", "billStreet": "1024 Commerce Dr", "billCity": "Grafton", "billState": "OH", "billZip": "44044", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "MADER ELECTR", "name": "Mader Electric Motors", "contact": "", "email": "davidl@maderelectricmotors.com", "phone": "239-731-5455", "billStreet": "Dave Lindley 18161 N. Tamiami Trail N. Ft Myers, Fl  33903", "billCity": "N. Ft Myers", "billState": "FL", "billZip": "33903", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "MASTER BOLT", "name": "Master Bolt, LLC", "contact": "", "email": "lisa.albright@ohiomet.com", "phone": "", "billStreet": "811 Taylor St", "billCity": "Elyria", "billState": "OH", "billZip": "44035", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "MESSER LLC", "name": "Messer LLC", "contact": "", "email": "", "phone": "", "billStreet": "PO Box 7448", "billCity": "Philadelphia", "billState": "PA", "billZip": "19101", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "PENNSYLVANIA", "name": "PENNSYLVANIA STEEL", "contact": "", "email": "clevelandinvoices@pasteel.com", "phone": "800-543-3743", "billStreet": "4521 WILLOW PARKWAY", "billCity": "Cleveland", "billState": "OH", "billZip": "44125", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "PRECISION CO", "name": "PRECISION COIL & ROTOR", "contact": "", "email": "tracey.berry@pecoil.com", "phone": "", "billStreet": "4305 BEACON DR.", "billCity": "OKLAHOMA CITY", "billState": "OK", "billZip": "73179", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "PRECISION CU", "name": "Precision Cut Fab", "contact": "", "email": "pcf@precisioncutfab.com", "phone": "", "billStreet": "9921 York Alpha Dr North Royalton, Oh 44133", "billCity": "North Royalton", "billState": "OH", "billZip": "44133", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "PURIFIED FLO", "name": "Purified Flow Technologies", "contact": "", "email": "sarahk.purifiedflowtechnologies@yahoo.com", "phone": "", "billStreet": "Purified Flow Technologles LLC 5506 Linn Rd  US", "billCity": "Amherst", "billState": "OH", "billZip": "44001", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "RUSH PRECISI", "name": "Rush Precision Machine", "contact": "", "email": "djenkins@rush-cnc.com", "phone": "", "billStreet": "15861 Wheeler Rd Lagrange, Oh 44050", "billCity": "Lagrange", "billState": "OH", "billZip": "44050", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "SHERMAN AND", "name": "Sherman and sons", "contact": "", "email": "shermansonslawncare@yahoo.com", "phone": "330-225-1599", "billStreet": "790 Barchard St", "billCity": "Grafton", "billState": "OH", "billZip": "44044", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "SMARTAUGER L", "name": "SMART-AUGER LLC", "contact": "", "email": "cmgurreri@smart-auger.com", "phone": "910 465 1144", "billStreet": "Smart-Auger LLC", "billCity": "", "billState": "", "billZip": "", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "SPECIALTY FI", "name": "Specialty Fitters Inc", "contact": "", "email": "office@specialtyfitters.com", "phone": "", "billStreet": "5630 Ternes Ln", "billCity": "Elyria", "billState": "OH", "billZip": "44035", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "SUPERIOR ROL", "name": "Superior Roll Forming LLC", "contact": "", "email": "k.westover@welser.com", "phone": "", "billStreet": "5535 Wegman Drive   44280", "billCity": "Valley City", "billState": "OH", "billZip": "44280", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "SWIGER COIL", "name": "Swiger Coil Systems", "contact": "", "email": "shari.lahm@ips.us", "phone": "", "billStreet": "4677 Manufacturing Rd", "billCity": "Cleveland", "billState": "OH", "billZip": "44135", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "TAMPA ARMATU", "name": "Tampa Armature Works, Inc", "contact": "", "email": "rudy.hernandez@tawinc.com", "phone": "305-884-1717", "billStreet": "9930 NW 89th Ave", "billCity": "Miami", "billState": "FL", "billZip": "33178", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "TECOWESTINGH", "name": "Teco-Westinghouse Motor Company", "contact": "", "email": "accountspayable@tecowestinghouse.com", "phone": "512-255-4141", "billStreet": ". 5100 N. IH-35 Round Rock, Tx  79681 US", "billCity": "Round Rock", "billState": "TX", "billZip": "79681", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "THE ELECTRIC", "name": "THE ELECTRIC MOTOR COIL CO. LTD", "contact": "", "email": "AP@emccltd.com", "phone": "705 735 0111", "billStreet": "191 SAUNDERS RD Canada", "billCity": "BARRIE", "billState": "ON", "billZip": "", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "THE SUPERIOR", "name": "THE SUPERIOR ALLOY STEEL CO.", "contact": "", "email": "Sales@superioralloysteel.com", "phone": "216 432 0900", "billStreet": "3835 LAKESIDE AVE.", "billCity": "Cleveland", "billState": "OH", "billZip": "44114", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "UNIVERSAL CO", "name": "Universal Coil Manufacturing", "contact": "", "email": "Justin@keymf.com", "phone": "504-367-8880", "billStreet": "2605 N Concord Rd", "billCity": "Belle Chasse", "billState": "LA", "billZip": "70037", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "US MACHINE A", "name": "US MACHINE AND PRECISION GRINDING", "contact": "", "email": "gregusmachine@yahoo.com", "phone": "440 284 0711", "billStreet": "880 TAYLOR S.", "billCity": "Elyria", "billState": "OH", "billZip": "44035", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "WABTEC CORPO", "name": "Wabtec Corporation", "contact": "", "email": "jdoemling@wabtec.com", "phone": "1-216-429-3349", "billStreet": "4477 E. 49th Street", "billCity": "Cleveland", "billState": "OH", "billZip": "44125", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "WILLIS CNC", "name": "WILLIS CNC", "contact": "", "email": "bev@williscnc.com", "phone": "440 926 0434", "billStreet": "1008 Commerce Dr", "billCity": "Grafton", "billState": "OH", "billZip": "44044", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}];
 const SEED_VENDORS = [{"name": "1800screwit.com, Inc.", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "1800sccrewit.com,Inc 36170 Kinzel Rd Avon, Ohio  44011", "notes": ""}, {"name": "A3 Precision Swiss Machining LLC", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "AC Precision Swiss Mach LLC 2323 East 28th St Lorain, Ohio 44055", "notes": ""}, {"name": "Ablest Molding Inc. - V", "contact": "", "email": "", "phone": "440-213-8984", "fax": "", "accountNum": "", "address": "Ablest Molding Inc 16210 Wheeler Rd Lagrange, Ohio 44050", "notes": ""}, {"name": "Advanced Paint Technologies, Ltd.", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "Eric Winbigler 4650 W. 160th St., #600 Cleveland, OH  44135", "notes": ""}, {"name": "Advanced Surface Technologies", "contact": "", "email": "", "phone": "216 476 8600", "fax": "", "accountNum": "", "address": "12211 Sobieski Ave Cleveland, OH  44135", "notes": ""}, {"name": "Alloy Fabricators, INC.", "contact": "", "email": "", "phone": "330-948-3535", "fax": "", "accountNum": "", "address": "700 Wooster St Lodi, Ohio  44254", "notes": ""}, {"name": "Alloys Unlimited and Processing, LLC", "contact": "", "email": "", "phone": "800-648-9469", "fax": "", "accountNum": "", "address": "3760 Oakwood Ave. Austintown, OH 44515", "notes": ""}, {"name": "Alro Steel", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "Dept 771478 P.O. Box 77000 Detroit. MI  48277-1478", "notes": ""}, {"name": "Amazon", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "Anna Miller", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "Atom Blasting & Finishing", "contact": "", "email": "", "phone": "440-235-4765", "fax": "", "accountNum": "", "address": "24933 Sprague Rd Columbia Station, Ohio 44028", "notes": ""}, {"name": "AW Metals", "contact": "", "email": "", "phone": "330-745-2588", "fax": "330-745-3744", "accountNum": "", "address": "780 Schocalog Rd. Akron, OH 44320", "notes": ""}, {"name": "Aydin Jenkins", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "827 Mechanic St Grafton, Ohio 44044", "notes": ""}, {"name": "Banks Manufacturing", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "Berish Logistics", "contact": "", "email": "", "phone": "440-554-0520", "fax": "", "accountNum": "", "address": "36170 Kinzel Rd Avon, Ohio 44011", "notes": ""}, {"name": "Beriswill Insurance Agency", "contact": "", "email": "", "phone": "440-926-3312", "fax": "", "accountNum": "", "address": "35881 Grafton Eastern Rd Grafton, Ohio 44044-9679", "notes": ""}, {"name": "Biddle Blast", "contact": "", "email": "", "phone": "330-687-6979", "fax": "", "accountNum": "", "address": "5500 Walworth Ave Cleveland, OH 44102", "notes": ""}, {"name": "Blue Arc Design Inc.", "contact": "", "email": "", "phone": "440-926-1717", "fax": "", "accountNum": "", "address": "156 Cook Ct. Elyria, Ohio 44035", "notes": ""}, {"name": "Bonefish System", "contact": "", "email": "", "phone": "6144273827", "fax": "", "accountNum": "", "address": "150 Erie Court, OH", "notes": ""}, {"name": "Bonnie Polly", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "Builders Design Inc", "contact": "", "email": "", "phone": "126-", "fax": "", "accountNum": "", "address": "2062 Stone Ridge Drive Hinkley, Ohio 44233", "notes": ""}, {"name": "C & M Trucking INC.", "contact": "", "email": "", "phone": "216-375-3822", "fax": "", "accountNum": "", "address": "PO Box 34225 Parma, Ohio 44134-0925", "notes": ""}, {"name": "Capital One", "contact": "", "email": "", "phone": "1-800-867-0904", "fax": "", "accountNum": "", "address": "P.O. Box 6492 Carol Stream, IL 60197-6492", "notes": ""}, {"name": "Capital One MM", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "Cartruck Packaging Inc", "contact": "", "email": "", "phone": "(216) 631-7225", "fax": "", "accountNum": "", "address": "7315 Associate Ave. Cleveland, Ohio 44144", "notes": ""}, {"name": "Cascade Plating", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "210 Abbe Rd Elyria, Ohio 44035", "notes": ""}, {"name": "Charlecopp Trucking", "contact": "", "email": "", "phone": "1-440-315-7546", "fax": "", "accountNum": "", "address": "15760 Quarry Rd Oberlin, Ohio 44074", "notes": ""}, {"name": "Chase", "contact": "", "email": "", "phone": "1-888-247-4080", "fax": "", "accountNum": "", "address": "P.O Box 15123 Wilmington, DE 19850-5123", "notes": ""}, {"name": "Chester", "contact": "", "email": "", "phone": "440-826-4900", "fax": "440-526-0726", "accountNum": "", "address": "6751 Engle Rd Suite G Middleburg Heights, Ohio 44130", "notes": ""}, {"name": "Chris Jenkins", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "CJ's Elite Services LLC", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "51112 Postman Rd Amherst, Ohio 44001", "notes": ""}, {"name": "Cleveland Crating Inc", "contact": "", "email": "", "phone": "216-362-7283", "fax": "", "accountNum": "", "address": "6091 Carey Dr. #3 Valley View, OH 44125", "notes": ""}, {"name": "Cleveland Industrial Group INC", "contact": "", "email": "", "phone": "(800) 947-3929", "fax": "", "accountNum": "", "address": "Cleveland Industrial Group 2981 Independence Rd Cleveland, OH 44115", "notes": ""}, {"name": "Clinton Aluminum", "contact": "", "email": "", "phone": "330-882-6743", "fax": "", "accountNum": "", "address": "DistributionI Inc P/O Box 674865 Detroit, MI 48267", "notes": ""}, {"name": "CNC Router", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "827 Mechanic St Grafton, Ohio 44044", "notes": ""}, {"name": "CNC Software", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "PO Box 81360 Woburn, MA 01813", "notes": ""}, {"name": "CNC Tools LLC", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "1215 Industrial Dr Progreso Lakes, TX 78596", "notes": ""}, {"name": "Cody Stetz - V", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "Cody Stetz", "notes": ""}, {"name": "Columbia Gas", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "PO Box 4629 Carol Stream, IL 60197-4629", "notes": ""}, {"name": "Commercial Anodizing", "contact": "", "email": "", "phone": "440 942 8384", "fax": "", "accountNum": "", "address": "38387 Apollo Pkwy Willoughby, OH 44094 USA", "notes": ""}, {"name": "Copper & Brass Sales", "contact": "", "email": "", "phone": "Sales 216-373-7909", "fax": "", "accountNum": "", "address": "ThyssenKrupp Materials NA, INC P.O Box 2625 Carol Stream,IL 60132-2625", "notes": ""}, {"name": "Cose Medical Mutual", "contact": "", "email": "", "phone": "440-572-6304", "fax": "440-878-5946", "accountNum": "", "address": "100 American Rd Brooklyn, Ohio 44144", "notes": ""}, {"name": "DAVENPORT CUSTOM COAT", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "Denny's Tool Mfg INC", "contact": "", "email": "", "phone": "440-326-0021", "fax": "", "accountNum": "", "address": "350 Warden Ave Elyria, Ohio 44035", "notes": ""}, {"name": "DFI Machine", "contact": "", "email": "", "phone": "440-336-3044", "fax": "", "accountNum": "", "address": "6577 Lake Ave Elyria, Ohio 44035", "notes": ""}, {"name": "Dodenhoff Industrial Textiles, Inc.", "contact": "", "email": "", "phone": "440-892-5511", "fax": "440-892-0387", "accountNum": "", "address": "Dodenhoff Industrial Textiles, Inc 28045 Ranney Parkway Westlake, OH 44145", "notes": ""}, {"name": "Dunstone Inc.", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "PO Box 645250 Cincinnati, Ohio 45264", "notes": ""}, {"name": "E Bay", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "E2TaxVendor", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "Eaton Comperssor", "contact": "", "email": "", "phone": "937-540-1140", "fax": "", "accountNum": "", "address": "1000 Class Dr Clayton, Ohio 45315", "notes": ""}, {"name": "Eaton Compressor", "contact": "", "email": "", "phone": "937-540-1140", "fax": "", "accountNum": "", "address": "1000 Cass Dr Clayton, Ohio 45315", "notes": ""}, {"name": "Eaton Fabricating Co Inc", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "1009 McAlpin Court Grafton, Ohio 44044", "notes": ""}, {"name": "EIS Legacy", "contact": "", "email": "", "phone": "216-267-1000", "fax": "", "accountNum": "167685", "address": "", "notes": ""}, {"name": "Electrolock Inc", "contact": "", "email": "", "phone": "440 834 7500", "fax": "", "accountNum": "", "address": "Electrolock P.O. Box 645249 Cincinnati,Ohio 45264-5249", "notes": ""}, {"name": "Ellipse Prototype & Machine LLC", "contact": "", "email": "", "phone": "440-242-7860", "fax": "", "accountNum": "", "address": "829 Lafayette blvd Sheffield Lake, Ohio 44054", "notes": ""}, {"name": "Ellison Technologies", "contact": "", "email": "", "phone": "4405461920", "fax": "", "accountNum": "", "address": "Matt Bujoll 6955 Treeline Dr Brecksville, OH 44141 USA", "notes": ""}, {"name": "Elyria Ford", "contact": "", "email": "", "phone": "440-366-3673", "fax": "440-322-0609", "accountNum": "", "address": "1115 E Broad St. Elyria, Ohio 44035", "notes": ""}, {"name": "Emerson Knife & Grinding, INC", "contact": "", "email": "", "phone": "330-773-0838", "fax": "", "accountNum": "", "address": "1200 Starlight Dr. Akron, OH 44306", "notes": ""}, {"name": "Emmalee Casey Miller", "contact": "", "email": "", "phone": "440 412 6818", "fax": "", "accountNum": "", "address": "1130 Elm St Grafton, OH 44044", "notes": ""}, {"name": "Eric J Clanin", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "160 Keywood Blvd Apt A Lagrange, Ohio 44050", "notes": ""}, {"name": "Family Heritage", "contact": "", "email": "", "phone": "216-408-4025", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "Fauver Inc", "contact": "", "email": "", "phone": "440-934-3700", "fax": "", "accountNum": "", "address": "409 East Ave, Suite A Elyria, Ohio 44035", "notes": ""}, {"name": "Fifth Third Bank", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "Five Star Fab Inc", "contact": "", "email": "", "phone": "440-462-1007", "fax": "", "accountNum": "", "address": "3910 1/2 Avon Lake Rd Litchfield,Ohio,44253", "notes": ""}, {"name": "Flatbed Tools", "contact": "", "email": "", "phone": "262-800-65500", "fax": "", "accountNum": "", "address": "P.O Box 44076 Racine, WI 53404", "notes": ""}, {"name": "FPT Cleveland, LLC", "contact": "", "email": "", "phone": "216-441-3800", "fax": "", "accountNum": "", "address": "8550 Aetna Rd Cleveland, Ohio 44105", "notes": ""}, {"name": "Frank Friedrich", "contact": "", "email": "", "phone": "440-506-8696", "fax": "", "accountNum": "", "address": "27074 Glendside Lane Olmsted Twp, Ohio 44138", "notes": ""}, {"name": "Frontier", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "P.O. Box 740407 Cincinnati, Ohio 45274-0407", "notes": ""}, {"name": "Fusion3", "contact": "", "email": "", "phone": "1877-425-0010", "fax": "", "accountNum": "", "address": "3D Printers 4321 Elm-Eugene St Greensboro,NC 27406", "notes": ""}, {"name": "G.L.W. Broadband Inc.", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": ". 993 Commerce Dr Grafton, Ohio 44044", "notes": ""}, {"name": "Gage Pro", "contact": "", "email": "", "phone": "216-265-9221", "fax": "", "accountNum": "", "address": "4775 W130th St Cleveland, Ohio 44135", "notes": ""}, {"name": "Gail Christensen", "contact": "", "email": "", "phone": "951-204-0109", "fax": "", "accountNum": "", "address": "35 Wildflower Drive Centerburg, OH  43011", "notes": ""}, {"name": "Geneva Capital", "contact": "", "email": "", "phone": "1-800-408-9352", "fax": "1-800284-3974", "accountNum": "", "address": "1311 Broadway St Alexandria, MN 56308", "notes": ""}, {"name": "George Rose", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "GoEngineer LLC", "contact": "", "email": "", "phone": "800-688-3234", "fax": "", "accountNum": "", "address": "739 E Fort Union Blvd Midvale, UT 84047", "notes": ""}, {"name": "Granite Steel & Processing Inc", "contact": "", "email": "", "phone": "216-651-5600", "fax": "", "accountNum": "", "address": "1245 West 65th Steet Cleveland,Ohio 44102", "notes": ""}, {"name": "Greater Cleveland Partnership", "contact": "", "email": "", "phone": "216-592-2222", "fax": "", "accountNum": "", "address": "Greater ClevelandPartnership 1240 Huron Rd. East Cleveland, Oh 44115", "notes": ""}, {"name": "Hannon Electric Inc", "contact": "", "email": "", "phone": "330-456-4728", "fax": "", "accountNum": "", "address": "1605 Waynesburg Dr. SE Canton, Ohio 44707", "notes": ""}, {"name": "Harris Welding Inc", "contact": "", "email": "", "phone": "419-281-8351", "fax": "", "accountNum": "", "address": "2219 Cottage St Ashland, Ohio 44805", "notes": ""}, {"name": "Hastings Mutual Insurance Co", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "P.O. Box 554869 Detroit, MI 48255-4869", "notes": ""}, {"name": "HFO Midwest Inc", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "1993 Case Parkway North Twinsburg,Ohio 44087", "notes": ""}, {"name": "HGR Industrial Surplus", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "20001 Euclid Ave Euclid,Ohio 44117", "notes": ""}, {"name": "HS SPINDLES LLC", "contact": "", "email": "", "phone": "(714)307-2332", "fax": "", "accountNum": "", "address": "22349 LA PALMA AVE. UNIT 114 YORBA LINDA, CA 92887 United States", "notes": ""}, {"name": "Huntington Bank", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "Huntington Line of Credit", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "Iler Networking & Computing", "contact": "", "email": "", "phone": "(440) 322-4537", "fax": "", "accountNum": "", "address": "5061 N Abbe Rd Suite 3 Sheffield Village, OH 44035", "notes": ""}, {"name": "Industrial Hydraulics", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "1027 Industrial Pkwy Medina, Ohio 44256", "notes": ""}, {"name": "James Pelfrey Construction Inc.", "contact": "", "email": "", "phone": "216-571-2975", "fax": "", "accountNum": "", "address": "45165 Webster Rd. Wellington, Oh 44090", "notes": ""}, {"name": "Jeffery Perzel", "contact": "", "email": "", "phone": "216-571-3148", "fax": "", "accountNum": "", "address": "37740 Sugar Ridge Rd. North Ridgeville, OH 44039", "notes": ""}, {"name": "Jennifer Jenkins", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "Jennifer R Jenkins.", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "Jennifer R Jenkins 43991 State Route 511 Oberlin, OH 44074", "notes": ""}, {"name": "Joe Pesch", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "854 Mechanic St Grafton, Ohio 44044", "notes": ""}, {"name": "John Paytosh", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "JP Morgan Bank", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "JRae Shop", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "Justin Jenkins", "contact": "", "email": "", "phone": "440-865-0363", "fax": "", "accountNum": "", "address": "827 Mechanic St Grafton, Ohio 44044", "notes": ""}, {"name": "JUSTINBOOTS", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "K S Wilson Holdings LLC", "contact": "", "email": "", "phone": "440-371-6455", "fax": "", "accountNum": "", "address": "1019 Commerce Drive Grafton, Ohio 44044", "notes": ""}, {"name": "Kapucinski Machine LLC", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "15922 Wheeler Rd Lagrange, Ohio 44050", "notes": ""}, {"name": "Keith Kelling", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "Kennametal INC", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "P/O Box 536435 Pittsburgh, PA 15253-5906", "notes": ""}, {"name": "Keystone Alumni", "contact": "", "email": "", "phone": "4402132368", "fax": "", "accountNum": "", "address": "P.O. Box 214 Lagrange, OH 44050", "notes": ""}, {"name": "Keystone Hot Stove.", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "Kinetic By Windstream", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "Korey Burrer", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "Leonard Vajas", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "Leppert Machine Inc", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "650 Wayne St Mansfield, Ohio 44905", "notes": ""}, {"name": "Levis Seguin CPAs Inc", "contact": "", "email": "", "phone": "440-322-4490", "fax": "", "accountNum": "", "address": "168 Cleveland St Elyria, Ohio 44035", "notes": ""}, {"name": "Lodi Lumber", "contact": "", "email": "", "phone": "1-330-948-1311", "fax": "", "accountNum": "", "address": "111 Wean, St Lodi, Ohio 44254", "notes": ""}, {"name": "Luke Engineering", "contact": "", "email": "", "phone": "330-335-1501", "fax": "", "accountNum": "", "address": "P.O. Box 478 Wadsworth, OH 44282 US", "notes": ""}, {"name": "Machinist Tool Repair Inc", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "6484 Grafton Rd Valley City, OH 44280", "notes": ""}, {"name": "Macho Machinery, Inc.", "contact": "", "email": "", "phone": "216-651-5170", "fax": "216-651-5152", "accountNum": "", "address": "5611 Clark Ave. Cleveland, Ohio 44102", "notes": ""}, {"name": "Madeline Sparks", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "Magnetic Springs Water Company, Inc", "contact": "", "email": "", "phone": "614-421-1780", "fax": "", "accountNum": "", "address": "1917 Joyce Avenue Columbus, Ohio 43219", "notes": ""}, {"name": "Manufacturers Financing Services", "contact": "", "email": "", "phone": "949-636-0114", "fax": "", "accountNum": "", "address": "P.O. Box 790448 St Louis, MO 63179-0448", "notes": ""}, {"name": "Matt Bujoll.", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "Matt Myers", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "McMaster Carr", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "McMormic Trailers", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "Medical Insurance", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "METRO MOULDED", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "Mike Jenkins", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "16210 Wheeler Rd Lagrange, Ohio 44050", "notes": ""}, {"name": "Mike Jenkins - v", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "Mike Jenkins 1621 Wheeler Rd Lagrange, OH 44050", "notes": ""}, {"name": "Mike Jirousek", "contact": "", "email": "", "phone": "440-669-4135", "fax": "", "accountNum": "", "address": "40505 Butternut Ridge Rd Elyria, Ohio 44035", "notes": ""}, {"name": "Mike Muller - v", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "Mike Muller", "notes": ""}, {"name": "Mike Novak", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "Mita Oancea", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "3295 West Blvd. Cleveland, Ohio 44111", "notes": ""}, {"name": "Mitch Polly", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "MPW Construction", "contact": "", "email": "", "phone": "4406476661", "fax": "", "accountNum": "", "address": "41807 OH-18 Wellington, OH 44090", "notes": ""}, {"name": "Multi-Axis Machining Co", "contact": "", "email": "", "phone": "1-419-651-4847", "fax": "", "accountNum": "", "address": "861 Twp Rd 875 Ashland, Oh 44805", "notes": ""}, {"name": "Newswanger Machine Ltd", "contact": "", "email": "", "phone": "419-896-3336", "fax": "", "accountNum": "", "address": "7828 Planktown N. Rd Shiloh, Ohio 44878", "notes": ""}, {"name": "Nicole Rider", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "North Coast Industrial Serrvies", "contact": "", "email": "", "phone": "330-995-3300", "fax": "3309953301", "accountNum": "", "address": "1260 Ethan Ave Streetsboro, OH 44241", "notes": ""}, {"name": "North Coast Industrial Serrvies INC", "contact": "", "email": "", "phone": "330-995-3300", "fax": "3309953301", "accountNum": "", "address": "1260 Ethan Ave Streetsboro, OH 44241", "notes": ""}, {"name": "Oakmont Capital Services.", "contact": "", "email": "", "phone": "877-701-2391", "fax": "800-843-2948", "accountNum": "", "address": "Oakmont Capital Services 600 Willowbrook Lane, Ste 601 West Chester, PA 19382", "notes": ""}, {"name": "Oggies MTS, LLC", "contact": "", "email": "", "phone": "330-641-4734", "fax": "", "accountNum": "", "address": "1854Blackberry Lane Orrville, Ohio 44667", "notes": ""}, {"name": "Ohio Anodizing Inc", "contact": "", "email": "", "phone": "(614) 258-2164", "fax": "", "accountNum": "", "address": "915 N 20th St Columbus, OH 43219 USA", "notes": ""}, {"name": "Ohio Bureau Of Workers Compensation", "contact": "", "email": "", "phone": "1-800-644-6292", "fax": "", "accountNum": "", "address": "Bureau Of Workers Compensation P.O Box 89492 Cleveland, Ohio 44101-6492", "notes": ""}, {"name": "Ohio Metallurgical Services Inc.", "contact": "", "email": "", "phone": "440-365-4104", "fax": "", "accountNum": "", "address": "P.O. Box 1228 Elyria, Ohio 44036", "notes": ""}, {"name": "Ohio School Tax", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "Ohio Treasurer Of Ohio", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "Ohio Treasurer of State", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "Olivia Kirkpatrick", "contact": "", "email": "", "phone": "440-281-5940", "fax": "", "accountNum": "", "address": "1129 Willow St Grafton, OH 44044", "notes": ""}, {"name": "Orange Vise Company", "contact": "", "email": "", "phone": "714-988-1423", "fax": "", "accountNum": "", "address": "931 S Via Rodeo Placentia, CA 92870", "notes": ""}, {"name": "Paragon Supply Co", "contact": "", "email": "", "phone": "440-365-8040", "fax": "", "accountNum": "", "address": "160 Reaser Ct Elyria, Ohio 44035", "notes": ""}, {"name": "Pennsylvania Steel Company INC", "contact": "", "email": "", "phone": "440-243-9800", "fax": "", "accountNum": "", "address": "4521 Willow Parkway Cuyahoga Heights, Ohio 44125", "notes": ""}, {"name": "Perfection Fabricators Inc", "contact": "", "email": "", "phone": "440-365-5850", "fax": "", "accountNum": "", "address": "680 Sugar Lane Elyria, Oh 44035", "notes": ""}, {"name": "Piedmont Plastics", "contact": "", "email": "", "phone": "7048161971", "fax": "", "accountNum": "", "address": "PO Box 931291 Atlanta, GA 31193", "notes": ""}, {"name": "Pitt Ohio", "contact": "", "email": "", "phone": "216-433-9000", "fax": "", "accountNum": "REVKEYS1021", "address": "P.O. Box 643271 Pittsburg, PA 15264", "notes": ""}, {"name": "PJ Electronics, Inc.", "contact": "", "email": "", "phone": "412-793-3912", "fax": "", "accountNum": "", "address": "Robert Mlynar 575 Davidson Rd. Pittsburgh, PA 15239", "notes": ""}, {"name": "PM Electric, LLC", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "8611 Pin Oak DR. Parma, Ohio 44130", "notes": ""}, {"name": "Polymershapes Holdings Inc", "contact": "", "email": "", "phone": "704-948-5000", "fax": "", "accountNum": "", "address": "Polymershapes LLC P.O. Box 7411904 Chicago, IL 60674-1904", "notes": ""}, {"name": "Precision Cut Fab INC", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "9921 York Alpha Dr North Royalton, OH 44133", "notes": ""}, {"name": "Precision Straightening, LLC", "contact": "", "email": "", "phone": "216-861-2992", "fax": "", "accountNum": "", "address": "1740 Columbus Rd. Cleveland, OH 44113", "notes": ""}, {"name": "Pro-Tec Services LLC", "contact": "", "email": "", "phone": "330-705-3768", "fax": "", "accountNum": "", "address": "11737 Sinclair St Sw Massillon, Ohio 44647", "notes": ""}, {"name": "PTSolutions", "contact": "", "email": "", "phone": "216-265-0000", "fax": "", "accountNum": "", "address": "10801 Brookpark Rd Cleveland, Ohio 44130-1120", "notes": ""}, {"name": "QuickBooks Payroll Service", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "Randi Rose", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "Rapid Propane Exchange", "contact": "", "email": "", "phone": "440-236-3270", "fax": "", "accountNum": "", "address": "P.O Box 1089 Columbia Station, Ohio 44028", "notes": ""}, {"name": "Ray  Geyser.", "contact": "", "email": "", "phone": "440-665-6678", "fax": "", "accountNum": "", "address": "Ray Geyser 11025 Riverwood Dr Grafton, Ohio 44044", "notes": ""}, {"name": "Red Seal Electric Company", "contact": "", "email": "", "phone": "216 941 3900", "fax": "216 941 5305", "accountNum": "", "address": "3835 W. 150th Street Cleveland, OH  44111", "notes": ""}, {"name": "Republic Services", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "40195 Butternut Ridge Rd Elyria, Ohio 44035-790303", "notes": ""}, {"name": "RITA - Grafton", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "Regional Income Tax Agency P.O Box 94736 Cleveland, Ohio 44101-4736", "notes": ""}, {"name": "RM Auction LLC", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "1505 W 9th St Mount Carmel, IL 62863", "notes": ""}, {"name": "Rush Precision Machining, INC", "contact": "", "email": "", "phone": "440-371-0983", "fax": "", "accountNum": "", "address": "Rush Precision Machining, LLC 15861 Wheeler Rd Lagrange, Ohio 44050", "notes": ""}, {"name": "Russell Products Co Inc", "contact": "", "email": "", "phone": "330-535-9246", "fax": "", "accountNum": "", "address": "275 North Forge Street Akron, OH 44304", "notes": ""}, {"name": "Sandy Pesch.", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "854 Mechanic St Grafton, Ohio 44044", "notes": ""}, {"name": "Saw Service & Supply, Inc", "contact": "", "email": "", "phone": "216-252-5600", "fax": "", "accountNum": "", "address": "11925 Zelis Rd Cleveland, Ohio 44135", "notes": ""}, {"name": "Shannon Douglas", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "309 State Street Kipton, Ohio 44049", "notes": ""}, {"name": "Siesel Distributing", "contact": "", "email": "", "phone": "419-426-3033", "fax": "", "accountNum": "", "address": "5148 S County Rd.23 Bloomvile, Ohio 44818", "notes": ""}, {"name": "SolidCam", "contact": "", "email": "", "phone": "866-975-1115", "fax": "", "accountNum": "", "address": "1631 Rock Springs RdSte 320 Apopka, Fl 32712", "notes": ""}, {"name": "Sophie Miller", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "South Side Bearing & Supply Co.", "contact": "", "email": "", "phone": "216-641-2630", "fax": "", "accountNum": "", "address": "8803 Brecksville Rd Suite 7-243 Brecksville, Ohio 44141", "notes": ""}, {"name": "Specialy Pallet & Design", "contact": "", "email": "", "phone": "3308570257", "fax": "", "accountNum": "", "address": "2600 Kidron Rd Orrville, OH 44667", "notes": ""}, {"name": "Square INC", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "Stahl Gear & Machine Co", "contact": "", "email": "", "phone": "216-431-2820", "fax": "", "accountNum": "", "address": "3901 Hamilton Ave Cleveland, Ohio  44114", "notes": ""}, {"name": "Stefan Oancea", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "Steve Bishop", "contact": "", "email": "", "phone": "4403878240", "fax": "", "accountNum": "", "address": "2215 Holly Lane Avon, OH 44011", "notes": ""}, {"name": "Tap Industries", "contact": "", "email": "", "phone": "440-355-4557", "fax": "", "accountNum": "", "address": "167 Commerce Dr Lagrange, Ohio 44050", "notes": ""}, {"name": "Tim Banks", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "Titan Supply", "contact": "", "email": "", "phone": "440-365-7000", "fax": "", "accountNum": "", "address": "1305 Taylor St Elyria, Ohio 44035", "notes": ""}, {"name": "Toolquip, Inc", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "2828 Utica Rd Lebanon, Ohio 44536", "notes": ""}, {"name": "Top Tool & Die, Inc", "contact": "", "email": "", "phone": "216-267-58/78", "fax": "", "accountNum": "", "address": "15500 Brookpark Rd Grafton, Ohio 44135", "notes": ""}, {"name": "Total Plastics International", "contact": "", "email": "", "phone": "440-891-1140", "fax": "", "accountNum": "", "address": "PO Box 788866 Philadelphia, PA 19178", "notes": ""}, {"name": "Tremblay Tools", "contact": "", "email": "", "phone": "330-467-4725", "fax": "", "accountNum": "", "address": "8111 Roll & Hold Parkway Macedonia, Ohio 44056", "notes": ""}, {"name": "Trico Oxygen Company", "contact": "", "email": "", "phone": "4403665580", "fax": "", "accountNum": "", "address": "1147 E. Broad St Elyria, OH 44035", "notes": ""}, {"name": "Triple J Sewing & Embroidery", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "Triple j Sewing & Embroidery 854 Mechanic St Grafton, Ohio 44044", "notes": ""}, {"name": "Trolley LLC", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "3291 Boyne Rd Barberton, Ohio 44203", "notes": ""}, {"name": "ULINE", "contact": "", "email": "", "phone": "1-800-295-5510", "fax": "", "accountNum": "", "address": "P.O Box 88741 Chicago, IL  60680-1741", "notes": ""}, {"name": "Ultra Tech Industries Co", "contact": "", "email": "", "phone": "440-835-3311", "fax": "", "accountNum": "", "address": "25670 First St Westlake, Oh 44145", "notes": ""}, {"name": "Unemployment Insurance", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}, {"name": "United States Treasury", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "PO Box 806531 Cincinnati, Ohio 45280-6531", "notes": ""}, {"name": "Universal Grinding Corporation Inc", "contact": "", "email": "", "phone": "216-631-9410", "fax": "216-631-5264", "accountNum": "", "address": "P.O. Box 70599 Cleveland, OH 44190", "notes": ""}, {"name": "UPS Deliver service", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "P.O.Box 809488 Chicago, IL 60680-9488", "notes": ""}, {"name": "Varouh Oil", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "Varough Oil 970 Griswold Rd Elyria, OH 44035", "notes": ""}, {"name": "Village of Grafton", "contact": "", "email": "", "phone": "1-440-926-1093", "fax": "", "accountNum": "", "address": "960 Main St Grafton, Ohio 44044", "notes": ""}, {"name": "Ward Trucking", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "P.O Box 1553 Altoona, PA 16603", "notes": ""}, {"name": "White House Artesian Springs INC", "contact": "", "email": "", "phone": "800-458-6043", "fax": "", "accountNum": "", "address": "8100 West Ridge Rd Elyria, Ohio 44035", "notes": ""}, {"name": "Williamson Wire EDM INC", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "27852 Royalton Rd Columbia Station, Ohio 44028", "notes": ""}, {"name": "Willis CNC", "contact": "", "email": "", "phone": "440 926 0434", "fax": "", "accountNum": "", "address": "JEREMY WILLIS 1008 COMMERCE DR GRAFTON, OHIO 44044 USA", "notes": ""}, {"name": "Zack Page", "contact": "", "email": "", "phone": "", "fax": "", "accountNum": "", "address": "", "notes": ""}];
@@ -665,6 +714,7 @@ const state = {
     quoteArchiveFilters: { search:'', customerId:'all', salesman:'all', quotedBy:'all', dateFrom:'', dateTo:'' }, // v7.38
     quoteArchiveImport: { open:false, rowsText:'', rows:null, headers:null, map:null, filename:'', sheetName:'', loading:false, error:'' }, // v7.38
     mcMasterPaste: null, // v7.43: { partId, text, extracted } — transient smart-paste state
+    newQuoteKindPicker: false, // v7.45: when true, show the type-picker modal before creating a quote
     followUpDays: 14,
     // v7.37 Customer History panel — per-section search + show-all toggles
     custHist: {
@@ -722,6 +772,8 @@ function migrateState() {
   if (!Array.isArray(state.archivedInvoices)) state.archivedInvoices = [];
   // v7.38: Quote history archive
   if (!Array.isArray(state.archivedQuotes)) state.archivedQuotes = [];
+  // v7.45: quote kind — default existing quotes to multi-part machining
+  (state.quotes || []).forEach(q => { if (!q.kind) q.kind = 'multipart'; });
   // v7.41: filter chips — hiddenStatuses semantics (default: nothing hidden)
   // Migrates from v7.40's statuses[] (include-list) and pre-v7.40's status:'all'
   if (state.ui.quoteFilters) {
@@ -1734,6 +1786,156 @@ const OutlookGraph = {
 };
 window.OutlookGraph = OutlookGraph;
 
+// ============================================================================
+// v7.45 — OneDriveGraph: file + folder operations via Microsoft Graph
+// Piggybacks on OutlookGraph's access token (Files.ReadWrite.All scope was
+// added in v7.45 — user must disconnect + reconnect Outlook once to re-consent).
+// ============================================================================
+const OneDriveGraph = {
+  // Hit Graph with auth header from OutlookGraph's fresh access token.
+  async _fetch(url, opts = {}) {
+    const token = await OutlookGraph.ensureFreshToken();
+    return fetch(url, {
+      ...opts,
+      headers: {
+        'Authorization': 'Bearer ' + token,
+        ...(opts.headers || {}),
+      },
+    });
+  },
+  // Convert a Windows-style path ("Acme\\Folder") or forward-slash path to
+  // a URL-encoded Graph path segment ("Acme/Folder"). Strips empty parts.
+  _encodePath(path) {
+    return (path || '').split(/[\\/]+/).filter(Boolean).map(encodeURIComponent).join('/');
+  },
+  // GET a folder/file by path. Returns the item or null on 404.
+  async getItem(path) {
+    if (!path) return null;
+    const enc = this._encodePath(path);
+    const url = `https://graph.microsoft.com/v1.0/me/drive/root:/${enc}`;
+    const resp = await this._fetch(url);
+    if (resp.status === 404) return null;
+    if (!resp.ok) throw new Error(`Graph getItem failed (${resp.status}) for ${path}`);
+    return resp.json();
+  },
+  // Idempotently create every segment of a folder path. Returns the leaf item.
+  async ensureFolderPath(path) {
+    const segments = (path || '').split(/[\\/]+/).filter(Boolean);
+    if (segments.length === 0) throw new Error('ensureFolderPath: empty path');
+    let runningPath = '';
+    let parentId = null;     // null = root
+    for (const seg of segments) {
+      const candidatePath = runningPath ? `${runningPath}/${seg}` : seg;
+      const existing = await this.getItem(candidatePath);
+      if (existing) {
+        parentId = existing.id;
+      } else {
+        const createUrl = parentId
+          ? `https://graph.microsoft.com/v1.0/me/drive/items/${parentId}/children`
+          : `https://graph.microsoft.com/v1.0/me/drive/root/children`;
+        const resp = await this._fetch(createUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: seg,
+            folder: {},
+            '@microsoft.graph.conflictBehavior': 'fail',
+          }),
+        });
+        if (!resp.ok) {
+          // If 409, someone created it concurrently — re-fetch.
+          if (resp.status === 409) {
+            const item = await this.getItem(candidatePath);
+            if (item) { parentId = item.id; runningPath = candidatePath; continue; }
+          }
+          const txt = await resp.text();
+          throw new Error(`Graph createFolder "${seg}" failed (${resp.status}): ${txt.slice(0, 200)}`);
+        }
+        const item = await resp.json();
+        parentId = item.id;
+      }
+      runningPath = candidatePath;
+    }
+    return this.getItem(runningPath);
+  },
+  // Upload a Blob/File to <folderPath>/<filename>. Small files (<4MB) use
+  // simple PUT; larger use upload sessions in 5MB chunks.
+  async uploadFile(folderPath, file, filename) {
+    const name = filename || file.name || 'file.bin';
+    const folderEnc = this._encodePath(folderPath);
+    const nameEnc = encodeURIComponent(name);
+    const SMALL = 4 * 1024 * 1024;
+    if (file.size <= SMALL) {
+      const url = `https://graph.microsoft.com/v1.0/me/drive/root:/${folderEnc}/${nameEnc}:/content`;
+      const resp = await this._fetch(url, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: file,
+      });
+      if (!resp.ok) {
+        const txt = await resp.text();
+        throw new Error(`Upload failed (${resp.status}): ${txt.slice(0, 200)}`);
+      }
+      return resp.json();
+    }
+    // Large file: upload session
+    const sessionUrl = `https://graph.microsoft.com/v1.0/me/drive/root:/${folderEnc}/${nameEnc}:/createUploadSession`;
+    const sessResp = await this._fetch(sessionUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ item: { '@microsoft.graph.conflictBehavior': 'rename' } }),
+    });
+    if (!sessResp.ok) throw new Error(`Upload session failed (${sessResp.status})`);
+    const session = await sessResp.json();
+    const chunkSize = 5 * 1024 * 1024;     // must be multiple of 320 KiB
+    let pos = 0;
+    let lastBody = null;
+    while (pos < file.size) {
+      const end = Math.min(pos + chunkSize, file.size);
+      const chunk = file.slice(pos, end);
+      const r = await fetch(session.uploadUrl, {
+        method: 'PUT',
+        headers: {
+          'Content-Length': String(end - pos),
+          'Content-Range': `bytes ${pos}-${end-1}/${file.size}`,
+        },
+        body: chunk,
+      });
+      if (!r.ok && r.status !== 202) {
+        const txt = await r.text();
+        throw new Error(`Chunk upload failed (${r.status}) at byte ${pos}: ${txt.slice(0, 200)}`);
+      }
+      pos = end;
+      if (r.status === 200 || r.status === 201) lastBody = await r.json();
+    }
+    return lastBody;
+  },
+  // List children of a folder (returns []). Honors $top=200 — for bigger folders
+  // we'd add paging, but job folders won't realistically exceed that.
+  async listFolder(folderPath) {
+    const enc = this._encodePath(folderPath);
+    const url = `https://graph.microsoft.com/v1.0/me/drive/root:/${enc}:/children?$top=200`;
+    const resp = await this._fetch(url);
+    if (resp.status === 404) return [];
+    if (!resp.ok) throw new Error(`Graph list failed (${resp.status})`);
+    const data = await resp.json();
+    return data.value || [];
+  },
+  // Get or create an organization-scope view link for an item.
+  async getShareLink(itemId) {
+    const url = `https://graph.microsoft.com/v1.0/me/drive/items/${itemId}/createLink`;
+    const resp = await this._fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'view', scope: 'organization' }),
+    });
+    if (!resp.ok) throw new Error(`Share link failed (${resp.status})`);
+    const data = await resp.json();
+    return data.link && data.link.webUrl;
+  },
+};
+window.OneDriveGraph = OneDriveGraph;
+
 // Helper: very basic HTML → text. Used to flatten Graph email body content
 // (which is HTML) into plain text for parsing. Not perfect but sufficient
 // for RFQ keyword/dimension extraction.
@@ -1942,6 +2144,53 @@ function customerFolderPath(c) {
   const sep = root.includes('\\') ? '\\' : (root.includes('/') ? '/' : '\\');
   const cleanRoot = root.replace(/[\\/]+$/, '');
   return `${cleanRoot}${sep}${sanitizeFolderSubpath(c.oneDriveFolder)}`;
+}
+
+// v7.45 — OneDrive CLOUD path helpers (used by Microsoft Graph operations).
+// Always forward slashes; targets the user's OneDrive cloud, not their
+// synced local folder. cloudRoot is configured in Settings (e.g.
+// "/KMF Documents/___Customers" — relative to the user's OneDrive root).
+function cloudRoot() {
+  const r = (state.settings.shopInfo && state.settings.shopInfo.oneDriveCloudRoot) || '';
+  return ('/' + r.replace(/[\\/]+/g, '/').replace(/^\/+|\/+$/g, '')).replace(/\/$/, '');
+}
+function cloudCustomerFolderPath(c) {
+  if (!c || !c.oneDriveFolder) return null;
+  const root = cloudRoot();
+  const sub = c.oneDriveFolder.replace(/[\\/]+/g, '/').replace(/^\/+|\/+$/g, '');
+  return `${root}/${sub}`.replace(/^\/+/, '/');
+}
+function cloudJobFolderPath(q) {
+  const c = getCustomer(q.customerId);
+  const custPath = cloudCustomerFolderPath(c);
+  if (!custPath) return null;
+  return `${custPath}/${suggestedFolderName(q)}`;
+}
+// Idempotently create job folder + DXF + RFQ Email subfolders via Graph.
+async function ensureJobFolder(quote) {
+  if (!quote || !quote.customerId) return { ok: false, error: 'no customer set' };
+  if (!OutlookGraph.state || !OutlookGraph.state.refreshToken) {
+    return { ok: false, error: 'Outlook (Graph) not connected — connect in RFQ Inbox tab first' };
+  }
+  const jobPath = cloudJobFolderPath(quote);
+  if (!jobPath || jobPath === '/') return { ok: false, error: 'cannot resolve cloud path (cloud root or customer folder not set)' };
+  try {
+    await OneDriveGraph.ensureFolderPath(jobPath);
+    await OneDriveGraph.ensureFolderPath(`${jobPath}/DXF`);
+    await OneDriveGraph.ensureFolderPath(`${jobPath}/RFQ Email`);
+    return { ok: true, jobPath };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+// File routing: .dxf → DXF; .msg/.eml → RFQ Email; others → RFQ Email if
+// quote was created in the last 24h, else job-folder root ('').
+function routeFileToSubfolder(file, quote) {
+  const name = (file.name || '').toLowerCase();
+  if (name.endsWith('.dxf')) return 'DXF';
+  if (name.endsWith('.msg') || name.endsWith('.eml')) return 'RFQ Email';
+  const created = quote.createdAt || (quote.date ? new Date(quote.date + 'T00:00:00').getTime() : Date.now());
+  return (Date.now() - created) < 24 * 60 * 60 * 1000 ? 'RFQ Email' : '';
 }
 
 // Lazy-load a script (used for jsPDF on demand)
@@ -2953,9 +3202,10 @@ function nextQuoteNumber() {
   });
   return String(max + 1);
 }
-function newQuote() {
+function newQuote(kind) {
   return {
     id: uid(),
+    kind: kind || 'multipart',   // v7.45: quote type — affects editor flow + future PDF templates
     quoteNum: nextQuoteNumber(),
     rfqNum:'',
     date: new Date().toISOString().slice(0,10),
@@ -3920,6 +4170,7 @@ function render() {
   renderPoArchiveImportModal();
   renderInvoiceArchiveImportModal();
   renderQuoteArchiveImportModal();
+  renderNewQuoteKindPickerModal();
   renderMsgImportModal();
   renderMissingCustFolderModal();
   // v7.34: user management dialogs
@@ -4010,7 +4261,11 @@ function renderActiveQuoteNav() {
           <span>Part ${i+1}${p.partNum?' — '+esc(p.partNum):''}</span>
         </div>
       `).join('')}
-      <div class="nav-item" style="color:var(--text-mute);" onclick="App.addPart()">+ Add Part</div>
+      ${(q.kind === 'machining' && q.parts.length >= 1) ? `
+        <div class="nav-item" style="color:var(--text-mute); opacity:0.5; cursor:not-allowed;" title="Single-part machining quote — change kind to add more parts">+ Add Part (locked)</div>
+      ` : `
+        <div class="nav-item" style="color:var(--text-mute);" onclick="App.addPart()">+ Add Part</div>
+      `}
       <div class="nav-item ${t==='summary'?'active':''}" onclick="App.goTab('summary')">Summary</div>
       <div class="nav-item ${t==='materials'?'active':''}" onclick="App.goTab('materials')">Material List</div>
     </div>
@@ -4128,7 +4383,7 @@ function renderQuotesList() {
       return `
         <div class="list-card" onclick="App.openQuote('${q.id}')">
           <div>
-            <div class="list-card-title">${esc(q.quoteNum || '(no quote #)')} <span class="pill ${esc(q.status)}">${esc(q.status)}</span>${q.imported ? ' <span class="pill" style="background:#E5E7EB; color:#374151;">📜 imported</span>' : ''}</div>
+            <div class="list-card-title">${esc(q.quoteNum || '(no quote #)')} <span class="pill" style="background:${quoteKindColor(q)}22; color:${quoteKindColor(q)}; border:1px solid ${quoteKindColor(q)}55;" title="${esc(quoteKindLabel(q))}">${quoteKindIcon(q)} ${esc(quoteKindShort(q))}</span> <span class="pill ${esc(q.status)}">${esc(q.status)}</span>${q.imported ? ' <span class="pill" style="background:#E5E7EB; color:#374151;">📜 imported</span>' : ''}</div>
             <div class="list-card-meta">
               ${esc(c?.name || (q.imported ? q.importedCustomerName || '(no customer)' : '(no customer)'))} · ${esc(q.date)} · ${q.imported ? 'historical (no line items)' : `${q.parts.length} part${q.parts.length!==1?'s':''}`}
               ${q.oneDriveUrl ? ' · <span style="color:var(--navy);">📁 OneDrive</span>' : ''}
@@ -7584,6 +7839,57 @@ function renderArchivedQuote() {
   `;
 }
 
+// v7.45 — New-quote type picker modal. Shown when user clicks "+ New Quote".
+// Each card is a quote kind; click one to create the quote with that kind set.
+function renderNewQuoteKindPickerModal() {
+  const host = document.getElementById('quote-parser-host');
+  if (!host) return;
+  if (!state.ui.newQuoteKindPicker) {
+    if (host.dataset.modalOwner === 'newQuoteKindPicker') {
+      host.innerHTML = '';
+      host.dataset.modalOwner = '';
+    }
+    return;
+  }
+  host.dataset.modalOwner = 'newQuoteKindPicker';
+  host.innerHTML = `
+    <div class="modal-backdrop" onclick="App.closeNewQuoteKindPicker()">
+      <div class="modal" style="width:820px; max-width:96vw;" onclick="event.stopPropagation()">
+        <div class="modal-header" style="display:flex; align-items:center; justify-content:space-between;">
+          <span>New Quote — pick the type</span>
+          <button class="btn btn-sm" onclick="App.closeNewQuoteKindPicker()" style="background:rgba(255,255,255,0.18); color:white;">✕</button>
+        </div>
+        <div class="modal-body" style="padding:18px;">
+          <p style="margin:0 0 14px; color:var(--text-mute); font-size:13px;">
+            The kind determines the workflow inside the quote. You can change it later.
+          </p>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+            ${QUOTE_KINDS.map(k => `
+              <button onclick="App.createQuoteOfKind('${k.id}')" style="
+                  text-align:left; padding:14px 16px; background:var(--paper);
+                  border:1.5px solid var(--line-dark); border-radius:6px;
+                  cursor:pointer; display:flex; gap:12px; align-items:flex-start;
+                  font-family:inherit;
+                  transition:border-color 0.12s, background 0.12s;"
+                  onmouseover="this.style.borderColor='${k.color}'; this.style.background='${k.color}15';"
+                  onmouseout="this.style.borderColor='var(--line-dark)'; this.style.background='var(--paper)';">
+                <div style="font-size:24px; line-height:1;">${k.icon}</div>
+                <div style="flex:1;">
+                  <div style="font-size:14px; font-weight:600; color:${k.color}; margin-bottom:4px;">${esc(k.label)}</div>
+                  <div style="font-size:12px; color:var(--text-mute); line-height:1.45;">${esc(k.desc)}</div>
+                </div>
+              </button>
+            `).join('')}
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn" onclick="App.closeNewQuoteKindPicker()">Cancel</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 function renderQuoteArchiveImportModal() {
   const host = document.getElementById('quote-parser-host');
   if (!host) return;
@@ -8816,11 +9122,11 @@ function renderSettings() {
 
     <div class="card">
       <div class="card-header">
-        <span>OneDrive Integration · per-quote DXF folders</span>
+        <span>OneDrive Integration · per-job folders</span>
       </div>
       <div class="card-body">
         <p class="text-mute small" style="margin-bottom:10px;">
-          Configure where DXF files for each quote are stored. The app will suggest a folder path per quote (named by quote #) so DXFs stay organized and shareable.
+          Configure where each customer's job folders live in OneDrive. The app auto-creates a per-quote job folder (with <span class="mono">DXF\\</span> and <span class="mono">RFQ Email\\</span> subfolders inside) when a quote is built. Files dropped on a quote auto-route to the right subfolder.
         </p>
         <div class="form-grid cols-2">
           <div class="field" style="grid-column:span 2;">
@@ -8830,6 +9136,11 @@ function renderSettings() {
               Browse to your OneDrive folder in File Explorer, copy the path from the address bar, paste here. Example: <code>C:\\Users\\Justin\\OneDrive - Keystone Machine and Fab\\Quotes</code><br>
               <strong>Per-PC setting</strong> — saved locally, not synced via cloud. Set it on each shop computer.
             </div>
+          </div>
+          <div class="field" style="grid-column:span 2;">
+            <label>OneDrive Cloud Root Path (synced — Microsoft Graph uses this for auto-folder + uploads)</label>
+            ${bind({label:'OneDrive cloud root', value:s.shopInfo.oneDriveCloudRoot||'', onChange:v=>{s.shopInfo.oneDriveCloudRoot=v;}, placeholder:'/KMF Documents/___Customers'})}
+            <div class="hint">Path inside your OneDrive cloud where customer folders live. Forward slashes. Example: <code>/KMF Documents/___Customers</code>. Customers' folder values append below this. Required for v7.45+ auto-folder + drop-to-upload.</div>
           </div>
           <div class="field" style="grid-column:span 2;">
             <label>Folder Name Template (synced — same on every PC)</label>
@@ -9616,8 +9927,13 @@ function renderQuote() {
   return `
     <div class="page-header">
       <div>
-        <div class="page-title">${esc(q.quoteNum || 'New Quote')}</div>
-        <div class="page-subtitle">${esc(c?.name || 'No customer')} · ${esc(q.date)} · <span class="pill ${esc(q.status)}">${esc(q.status)}</span></div>
+        <div class="page-title">
+          ${esc(q.quoteNum || 'New Quote')}
+          <span class="pill" style="background:${quoteKindColor(q)}22; color:${quoteKindColor(q)}; border:1px solid ${quoteKindColor(q)}55; vertical-align:middle; margin-left:6px; font-size:11px;" title="${esc(quoteKindLabel(q))}">${quoteKindIcon(q)} ${esc(quoteKindShort(q))}</span>
+        </div>
+        <div class="page-subtitle">${esc(c?.name || 'No customer')} · ${esc(q.date)} · <span class="pill ${esc(q.status)}">${esc(q.status)}</span> · <span class="text-mute">Type:</span> <select onchange="App.setQuoteKind('${q.id}', this.value)" style="font-size:11px; padding:1px 4px; margin-left:2px;">
+          ${QUOTE_KINDS.map(k => `<option value="${k.id}" ${(q.kind||'multipart')===k.id?'selected':''}>${esc(k.label)}</option>`).join('')}
+        </select></div>
       </div>
       <div class="header-actions">
         <button class="btn" onclick="App.downloadQuotePDF('${q.id}')">⬇ Download PDF</button>
@@ -9679,7 +9995,7 @@ function renderQuoteInfo(q) {
             <div class="hint">Falls back to the first part's description if you leave this blank. Folder will be: <span class="mono">${esc(suggestedFolderName(q))}</span></div>
           </div>
           <div class="field" style="grid-column:span 3;">
-            <label>OneDrive Folder for this Quote</label>
+            <label>OneDrive Job Folder</label>
             ${(() => {
               const localRoot = localStorage.getItem('keystone-onedrive-root') || '';
               const folderName = suggestedFolderName(q);
@@ -9690,7 +10006,7 @@ function renderQuoteInfo(q) {
                     <input type="text" readonly value="${esc(folderName)}" style="background:var(--bg); font-family:var(--font-mono);">
                   </div>
                   ${localRoot ? `
-                    <button class="btn" style="flex:0 0 auto;" onclick="App.openLocalQuoteFolder('${q.id}')" title="Opens the folder in File Explorer (creates it if it doesn't exist). The OneDrive desktop client will sync it to the cloud automatically.">📁 Open Local Folder</button>
+                    <button class="btn" style="flex:0 0 auto;" onclick="App.openLocalQuoteFolder('${q.id}')" title="Opens the job folder in File Explorer (creates it if missing, with DXF\\ and RFQ Email\\ subfolders). The OneDrive desktop client syncs to the cloud automatically.">📁 Open Local Folder</button>
                     <button class="btn btn-sm" style="flex:0 0 auto;" onclick="App.copyQuoteFolderPath('${q.id}')" title="Copy full local path to clipboard">📋 Copy Path</button>
                   ` : `
                     <span class="text-mute small" style="flex:1;">⚠ Set OneDrive root path in Settings to enable</span>
@@ -9701,7 +10017,7 @@ function renderQuoteInfo(q) {
                   <div style="flex:5;">${bind({label:'OneDrive share URL',value:q.oneDriveUrl, onChange:v=>{q.oneDriveUrl=v;}, placeholder:'paste OneDrive share link here (right-click folder in OneDrive → Share → Copy link)'})}</div>
                   ${q.oneDriveUrl ? `<a class="btn" style="flex:0 0 auto;" href="${esc(q.oneDriveUrl)}" target="_blank" rel="noopener">↗ Open Web</a>` : ''}
                 </div>
-                <div class="hint">After dropping DXFs into the local folder above, right-click the folder in OneDrive (online or in File Explorer), pick "Share" → "Copy link", and paste here. The link gets included in cut RFQ emails.</div>
+                <div class="hint">Job folder + <span class="mono">DXF\\</span> and <span class="mono">RFQ Email\\</span> subfolders are auto-created when you connect Outlook (with file permission) and have the customer mapped. Files dropped on this quote auto-route: <span class="mono">.dxf</span> → <span class="mono">DXF\\</span>, <span class="mono">.msg/.eml</span> → <span class="mono">RFQ Email\\</span>, others → <span class="mono">RFQ Email\\</span> for the first 24 hours then job-folder root.</div>
               `;
             })()}
           </div>
@@ -9718,7 +10034,47 @@ function renderQuoteInfo(q) {
         </div>
       </div>
     </div>
+    ${renderJobFolderDropCard(q)}
     ${renderCustomerHistoryPanel(q)}
+  `;
+}
+
+// v7.45 — Drop-files-to-job-folder card. Appears on Quote Info tab.
+// Routes by file type + age: .dxf → DXF, .msg/.eml → RFQ Email,
+// others → RFQ Email if quote is <24h old, else job-folder root.
+function renderJobFolderDropCard(q) {
+  const c = getCustomer(q.customerId);
+  const cloudPath = cloudJobFolderPath(q);
+  const cloudReady = !!(cloudPath && cloudPath !== '/');
+  const graphReady = !!(window.OutlookGraph && OutlookGraph.state && OutlookGraph.state.refreshToken);
+  return `
+    <div class="card" style="margin-top:16px;">
+      <div class="card-header"><span>📥 Drop Files to Job Folder · OneDrive auto-upload</span>
+        ${graphReady && cloudReady ? `<span class="text-mute small" style="font-weight:normal;">→ <span class="mono">${esc(cloudPath)}</span></span>` : ''}
+      </div>
+      <div class="card-body">
+        ${!c ? `
+          <div class="text-mute small" style="padding:14px; text-align:center;">Pick a customer above first.</div>
+        ` : !graphReady ? `
+          <div class="text-mute small" style="padding:14px; text-align:center;">⚠ Outlook (Microsoft Graph) not connected. Connect on the RFQ Inbox tab — make sure to accept the file-permission consent (v7.45+).</div>
+        ` : !cloudReady ? `
+          <div class="text-mute small" style="padding:14px; text-align:center;">⚠ Cloud root not configured. Set <strong>OneDrive Cloud Root Path</strong> in Settings, AND set this customer's folder name on the customer card.</div>
+        ` : `
+          <div id="job-folder-dropzone-${q.id}"
+               style="border:2px dashed var(--line-dark); border-radius:6px; padding:24px; text-align:center; cursor:pointer; transition:background 0.15s;"
+               ondragover="event.preventDefault(); this.style.background='rgba(59,130,246,0.08)';"
+               ondragleave="this.style.background='';"
+               ondrop="event.preventDefault(); this.style.background=''; App.dropFilesToJobFolder('${q.id}', event.dataTransfer.files);"
+               onclick="App.pickFilesForJobFolder('${q.id}')">
+            <div style="font-size:28px; margin-bottom:6px;">📥</div>
+            <strong>Drop files here</strong> or click to pick
+            <div class="hint" style="margin-top:8px;">
+              Auto-routing: <span class="mono">.dxf</span> → <span class="mono">DXF\\</span>, <span class="mono">.msg/.eml</span> → <span class="mono">RFQ Email\\</span>, others → <span class="mono">RFQ Email\\</span> for first 24h after quote creation, then job-folder root.
+            </div>
+          </div>
+        `}
+      </div>
+    </div>
   `;
 }
 
@@ -12467,13 +12823,80 @@ const App = {
   },
 
   newQuote() {
+    // v7.45: Open the type picker first; the user picks a kind, then we create.
+    state.ui.newQuoteKindPicker = true;
+    saveState(); render();
+  },
+  createQuoteOfKind(kind) {
+    // v7.45: Called from the type picker after user selects a kind.
     update(s => {
-      const q = newQuote();
+      const q = newQuote(kind);
       s.quotes.unshift(q);
-      logActivity('Created quote', q.quoteNum);
+      const label = QUOTE_KIND_BY_ID[kind]?.label || 'Multi-part machining';
+      logActivity('Created quote', q.quoteNum, label);
       s.ui.view = 'quote'; s.ui.activeQuoteId = q.id; s.ui.activeQuoteTab = 'info';
+      s.ui.newQuoteKindPicker = false;
     });
   },
+  closeNewQuoteKindPicker() {
+    state.ui.newQuoteKindPicker = false;
+    saveState(); render();
+  },
+  setQuoteKind(quoteId, kind) {
+    // Allow changing kind on existing quotes
+    update(s => {
+      const q = s.quotes.find(x => x.id === quoteId); if (!q) return;
+      const oldKind = q.kind || 'multipart';
+      q.kind = kind;
+      logActivity('Changed quote kind', q.quoteNum, `${QUOTE_KIND_BY_ID[oldKind]?.label || oldKind} → ${QUOTE_KIND_BY_ID[kind]?.label || kind}`);
+    });
+    showToast(`Quote kind changed to ${QUOTE_KIND_BY_ID[kind]?.label || kind}`);
+  },
+  // v7.45 — Drop files onto a quote → upload to OneDrive job folder via Graph
+  async dropFilesToJobFolder(quoteId, fileList) {
+    const q = getQuote(quoteId); if (!q) return;
+    await App._uploadFilesToJobFolder(q, Array.from(fileList || []));
+  },
+  pickFilesForJobFolder(quoteId) {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.multiple = true;
+    input.onchange = () => {
+      const q = getQuote(quoteId); if (!q) return;
+      App._uploadFilesToJobFolder(q, Array.from(input.files || []));
+    };
+    input.click();
+  },
+  async _uploadFilesToJobFolder(quote, files) {
+    if (!files || files.length === 0) return;
+    showToast(`Preparing ${files.length} file${files.length!==1?'s':''}…`, 2500);
+    const ensure = await ensureJobFolder(quote);
+    if (!ensure.ok) {
+      alert('Cannot upload to job folder.\n\nReason: ' + ensure.error);
+      return;
+    }
+    const uploaded = [], failed = [];
+    for (const file of files) {
+      const sub = routeFileToSubfolder(file, quote);
+      const folderPath = sub ? `${ensure.jobPath}/${sub}` : ensure.jobPath;
+      try {
+        await OneDriveGraph.uploadFile(folderPath, file);
+        uploaded.push({ name: file.name, sub: sub || '(job-folder root)' });
+        logActivity('Uploaded to OneDrive job folder', quote.quoteNum || '?', `${file.name} → ${sub || 'root'}`);
+      } catch (e) {
+        failed.push({ name: file.name, error: e.message });
+      }
+    }
+    if (failed.length === 0) {
+      const breakdown = uploaded.reduce((acc, u) => { acc[u.sub] = (acc[u.sub]||0)+1; return acc; }, {});
+      const summary = Object.entries(breakdown).map(([sub,n]) => `${n}→${sub}`).join(', ');
+      showToast(`✓ Uploaded ${uploaded.length} file${uploaded.length!==1?'s':''} to OneDrive (${summary}).`, 6000);
+    } else {
+      alert(`Uploaded ${uploaded.length}, failed ${failed.length}.\n\nFailures:\n${failed.map(f => '• ' + f.name + ': ' + f.error).join('\n')}`);
+    }
+    render();
+  },
+
   duplicateQuote(id) {
     update(s => {
       const orig = s.quotes.find(q => q.id === id); if (!orig) return;
