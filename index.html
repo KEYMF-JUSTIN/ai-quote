@@ -231,34 +231,38 @@
   .pill.accepted { background:var(--green-l); color:var(--green); }
   .pill.declined { background:#FCE4E4; color:var(--red); }
 
-  /* v7.40: Status chip toggles + imported toggle (filter bar) */
+  /* v7.41: Status chip toggles — click to HIDE that status (default = all visible) */
   .chip-row { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin:0 0 12px; }
   .chip-row-label { font-size:11px; font-weight:600; letter-spacing:0.08em; text-transform:uppercase; color:var(--text-mute); margin-right:4px; }
   .chip {
     display:inline-flex; align-items:center; gap:4px;
     padding:5px 12px; border-radius:14px;
-    font-size:12px; font-weight:600; letter-spacing:0.02em;
-    background:var(--paper); color:var(--text-mute);
-    border:1.5px solid var(--line-dark);
+    font-size:12px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
     cursor:pointer; user-select:none;
-    transition:background 0.12s, color 0.12s, border-color 0.12s;
+    border:1.5px solid transparent;
+    transition:opacity 0.15s, filter 0.15s;
   }
-  .chip:hover { border-color:var(--navy); color:var(--navy); }
-  .chip.active { background:var(--navy); color:white; border-color:var(--navy); }
-  .chip.active.status-draft { background:var(--steel); border-color:var(--steel); }
-  .chip.active.status-sent { background:#1E5BAE; border-color:#1E5BAE; }
-  .chip.active.status-accepted { background:var(--green); border-color:var(--green); }
-  .chip.active.status-declined { background:var(--red); border-color:var(--red); }
-  .chip.active.status-open { background:var(--steel); border-color:var(--steel); }
-  .chip.active.status-in_progress { background:#1E5BAE; border-color:#1E5BAE; }
-  .chip.active.status-shipped { background:var(--green); border-color:var(--green); }
-  .chip.active.status-closed { background:var(--green); border-color:var(--green); }
-  .chip.active.status-cancelled { background:var(--red); border-color:var(--red); }
-  .chip .chip-check { font-size:11px; opacity:0; transition:opacity 0.12s; }
-  .chip.active .chip-check { opacity:1; }
-  .chip-imported.active { background:#6B7280; color:white; border-color:#6B7280; }
-  body[data-theme="dark"] .chip { background:var(--bg); color:var(--steel-l); border-color:var(--line-dark); }
-  body[data-theme="dark"] .chip:hover { border-color:var(--steel-l); color:white; }
+  .chip:hover { filter:brightness(0.94); }
+  /* Status colors mirror the status pills on each row, so the chips read the
+     same as the badges underneath them. */
+  .chip.status-draft       { background:var(--bg);     color:var(--steel); border-color:var(--line-dark); }
+  .chip.status-sent        { background:#DBE9F4;       color:var(--navy);  border-color:#B8D4ED; }
+  .chip.status-accepted    { background:var(--green-l);color:var(--green); border-color:#BFE4A8; }
+  .chip.status-declined    { background:#FCE4E4;       color:var(--red);   border-color:#F5C7C7; }
+  /* Order statuses — distinct semantics: open=fresh-needs-action, shipped=in-transit, closed=done */
+  .chip.status-open        { background:#FEF3C7;       color:#92400E;      border-color:#FDE68A; }
+  .chip.status-in_progress { background:#DBE9F4;       color:var(--navy);  border-color:#B8D4ED; }
+  .chip.status-shipped     { background:#CFFAF0;       color:#0F766E;      border-color:#A7F0E1; }
+  .chip.status-closed      { background:var(--green-l);color:var(--green); border-color:#BFE4A8; }
+  .chip.status-cancelled   { background:#FCE4E4;       color:var(--red);   border-color:#F5C7C7; }
+  .chip-imported           { background:#E5E7EB;       color:#374151;      border-color:#D1D5DB; }
+  /* Hidden state — record-type is being filtered OUT. Dim + strikethrough. */
+  .chip.hidden {
+    opacity:0.32;
+    filter:grayscale(0.7);
+    text-decoration:line-through;
+    text-decoration-thickness:1.5px;
+  }
 
   /* Modal */
   .modal-backdrop { position:fixed; inset:0; background:rgba(15,25,45,0.55); z-index:100; display:flex; align-items:center; justify-content:center; padding:32px; }
@@ -521,12 +525,13 @@
 <div id="quote-parser-host"></div>
 <div id="msg-modal-host"></div>
 <div id="invite-modal-host"></div>
+<div id="cust-folder-host"></div>
 
 <script>
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.40.0';
+const APP_VERSION = '7.41.0';
 
 // v7.34.1: Pre-baked Firebase config for the Keystone shop's keystone-quoting
 // project. Users still need to enter their own email + password, but the
@@ -642,8 +647,8 @@ const state = {
     priceBookImport: { open: false, text: '', preview: null, error: '' },
     customerView: 'cards',         // 'cards' | 'table'
     vendorView: 'table',           // 'cards' | 'table'
-    quoteFilters: { search:'', statuses:[], customerId:'all', dateRange:'all', showImported:true }, // v7.40: statuses[] replaces status, showImported toggles historical
-    orderFilters: { search:'', statuses:[], showImported:true },                                     // v7.40
+    quoteFilters: { search:'', hiddenStatuses:[], customerId:'all', dateRange:'all', showImported:true }, // v7.41: chips hide statuses (default = nothing hidden)
+    orderFilters: { search:'', hiddenStatuses:[], showImported:true },                                     // v7.41
     poFilters: { search:'', status:'all', vendorId:'all' },              // v7.19
     packingSlipFilters: { search:'', status:'all', customerId:'all' },   // v7.19
     invoiceFilters: { search:'', status:'all', customerId:'all' },        // v7.19
@@ -716,22 +721,21 @@ function migrateState() {
   if (!Array.isArray(state.archivedInvoices)) state.archivedInvoices = [];
   // v7.38: Quote history archive
   if (!Array.isArray(state.archivedQuotes)) state.archivedQuotes = [];
-  // v7.40: quoteFilters/orderFilters — single status string → multi-select statuses[] + showImported toggle
+  // v7.41: filter chips — hiddenStatuses semantics (default: nothing hidden)
+  // Migrates from v7.40's statuses[] (include-list) and pre-v7.40's status:'all'
   if (state.ui.quoteFilters) {
     const qf = state.ui.quoteFilters;
-    if (!Array.isArray(qf.statuses)) {
-      qf.statuses = (qf.status && qf.status !== 'all') ? [qf.status] : [];
-    }
+    if (!Array.isArray(qf.hiddenStatuses)) qf.hiddenStatuses = [];
     if (qf.showImported == null) qf.showImported = true;
     delete qf.status;
+    delete qf.statuses;
   }
   if (state.ui.orderFilters) {
     const of = state.ui.orderFilters;
-    if (!Array.isArray(of.statuses)) {
-      of.statuses = (of.status && of.status !== 'all') ? [of.status] : [];
-    }
+    if (!Array.isArray(of.hiddenStatuses)) of.hiddenStatuses = [];
     if (of.showImported == null) of.showImported = true;
     delete of.status;
+    delete of.statuses;
   }
   // v7.37: Customer History panel UI state
   if (!state.ui.custHist) {
@@ -816,6 +820,10 @@ function migrateState() {
     if (c.status == null) c.status = 'Active';
     if (c.notes == null) c.notes = '';
     if (!Array.isArray(c.pricingHistory)) c.pricingHistory = [];
+    // v7.41: per-customer OneDrive subfolder name. When set, quote folders
+    // get created at <root>\<oneDriveFolder>\<quote-folder>. Empty = unset
+    // (the missing-folder prompt fires first time you try to open a folder).
+    if (c.oneDriveFolder == null) c.oneDriveFolder = '';
   });
   // v3 → v4: vendors + oneDriveUrl
   if (state.settings) {
@@ -1806,12 +1814,27 @@ function suggestedFolderName(q) {
 function suggestedFolderPath(q) {
   const root = localStorage.getItem('keystone-onedrive-root') || '';
   if (!root) return null;
+  const cust = getCustomer(q.customerId);
   const name = suggestedFolderName(q);
   // Use OS-appropriate separator. Windows-style backslash since target is Win 11.
   const sep = root.includes('\\') ? '\\' : (root.includes('/') ? '/' : '\\');
-  // Strip trailing separator from root
   const cleanRoot = root.replace(/[\\/]+$/, '');
+  // v7.41: insert customer folder layer if the customer has one set.
+  // If not, the path falls back to <root>\<quote-folder> (legacy behavior).
+  // The missing-folder prompt is fired separately by openLocalQuoteFolder.
+  const custFolder = (cust && cust.oneDriveFolder) ? sanitizeFolderName(cust.oneDriveFolder) : '';
+  if (custFolder) return `${cleanRoot}${sep}${custFolder}${sep}${name}`;
   return `${cleanRoot}${sep}${name}`;
+}
+
+// Per-customer folder path (no quote layer). Returns null if root not set
+// or customer has no folder name configured.
+function customerFolderPath(c) {
+  const root = localStorage.getItem('keystone-onedrive-root') || '';
+  if (!root || !c || !c.oneDriveFolder) return null;
+  const sep = root.includes('\\') ? '\\' : (root.includes('/') ? '/' : '\\');
+  const cleanRoot = root.replace(/[\\/]+$/, '');
+  return `${cleanRoot}${sep}${sanitizeFolderName(c.oneDriveFolder)}`;
 }
 
 // Lazy-load a script (used for jsPDF on demand)
@@ -3782,6 +3805,8 @@ function render() {
   renderInvoiceArchiveImportModal();
   renderQuoteArchiveImportModal();
   renderMsgImportModal();
+  renderMissingCustFolderModal();
+  renderCustFolderWizardModal();
   // v7.34: user management dialogs
   const inviteHost = document.getElementById('invite-modal-host');
   if (inviteHost) {
@@ -3882,9 +3907,9 @@ function applyQuoteFilters(quotes) {
   const f = state.ui.quoteFilters;
   const q = (f.search || '').toLowerCase().trim();
   let out = quotes;
-  // v7.40: multi-select statuses
-  const statuses = Array.isArray(f.statuses) ? f.statuses : [];
-  if (statuses.length > 0) out = out.filter(x => statuses.includes(x.status));
+  // v7.41: chips hide statuses (empty array = show all)
+  const hidden = Array.isArray(f.hiddenStatuses) ? f.hiddenStatuses : [];
+  if (hidden.length > 0) out = out.filter(x => !hidden.includes(x.status));
   // v7.40: imported toggle — hide historical when off
   if (f.showImported === false) out = out.filter(x => !x.imported);
   if (f.customerId !== 'all') out = out.filter(x => x.customerId === f.customerId);
@@ -3941,15 +3966,16 @@ function renderQuotesList() {
     </div>
     <div class="card no-print" style="padding:14px 16px; margin-bottom:16px;">
       <div class="chip-row">
-        <span class="chip-row-label">Status:</span>
+        <span class="chip-row-label">Showing:</span>
         ${['draft','sent','accepted','declined'].map(s => {
-          const active = (f.statuses||[]).includes(s);
-          return `<span class="chip status-${s} ${active?'active':''}" onclick="App.toggleQuoteStatusFilter('${s}')"><span class="chip-check">✓</span>${esc(s.charAt(0).toUpperCase()+s.slice(1))}</span>`;
+          const isHidden = (f.hiddenStatuses||[]).includes(s);
+          return `<span class="chip status-${s} ${isHidden?'hidden':''}" onclick="App.toggleQuoteStatusFilter('${s}')" title="${isHidden?'Click to show':'Click to hide'} ${esc(s)} quotes">${esc(s.charAt(0).toUpperCase()+s.slice(1))}</span>`;
         }).join('')}
         <span style="flex:1;"></span>
-        <span class="chip chip-imported ${f.showImported===false?'':'active'}" onclick="App.toggleQuoteShowImported()" title="Toggle historical imported records on or off">
-          <span class="chip-check">✓</span>📜 Show imported${(state.quotes||[]).some(q=>q.imported)?` (${(state.quotes||[]).filter(q=>q.imported).length})`:''}
-        </span>
+        ${(state.quotes||[]).some(q=>q.imported) ? `
+        <span class="chip chip-imported ${f.showImported===false?'hidden':''}" onclick="App.toggleQuoteShowImported()" title="${f.showImported===false?'Click to show':'Click to hide'} historical imported quotes">
+          📜 Imported (${(state.quotes||[]).filter(q=>q.imported).length})
+        </span>` : ''}
       </div>
       <div style="display:grid; grid-template-columns: 2fr 1.5fr 1fr auto; gap:10px; align-items:end;">
         <div class="field"><label>Search</label>
@@ -5127,9 +5153,9 @@ function applyOrderFilters(orders) {
   const f = state.ui.orderFilters;
   const q = (f.search || '').toLowerCase().trim();
   let out = orders;
-  // v7.40: multi-select statuses
-  const statuses = Array.isArray(f.statuses) ? f.statuses : [];
-  if (statuses.length > 0) out = out.filter(o => statuses.includes(o.status));
+  // v7.41: chips hide statuses
+  const hidden = Array.isArray(f.hiddenStatuses) ? f.hiddenStatuses : [];
+  if (hidden.length > 0) out = out.filter(o => !hidden.includes(o.status));
   // v7.40: imported toggle
   if (f.showImported === false) out = out.filter(o => !o.imported);
   if (q) out = out.filter(o => {
@@ -5156,15 +5182,16 @@ function renderOrders() {
     </div>
     <div class="card no-print" style="padding:14px 16px; margin-bottom:16px;">
       <div class="chip-row">
-        <span class="chip-row-label">Status:</span>
+        <span class="chip-row-label">Showing:</span>
         ${ORDER_STATUSES.map(s => {
-          const active = (f.statuses||[]).includes(s);
-          return `<span class="chip status-${s} ${active?'active':''}" onclick="App.toggleOrderStatusFilter('${s}')"><span class="chip-check">✓</span>${esc(ORDER_STATUS_LABELS[s]||s)}</span>`;
+          const isHidden = (f.hiddenStatuses||[]).includes(s);
+          return `<span class="chip status-${s} ${isHidden?'hidden':''}" onclick="App.toggleOrderStatusFilter('${s}')" title="${isHidden?'Click to show':'Click to hide'} ${esc(ORDER_STATUS_LABELS[s]||s)} orders">${esc(ORDER_STATUS_LABELS[s]||s)}</span>`;
         }).join('')}
         <span style="flex:1;"></span>
-        <span class="chip chip-imported ${f.showImported===false?'':'active'}" onclick="App.toggleOrderShowImported()" title="Toggle historical imported records on or off">
-          <span class="chip-check">✓</span>📜 Show imported${(state.orders||[]).some(o=>o.imported)?` (${(state.orders||[]).filter(o=>o.imported).length})`:''}
-        </span>
+        ${(state.orders||[]).some(o=>o.imported) ? `
+        <span class="chip chip-imported ${f.showImported===false?'hidden':''}" onclick="App.toggleOrderShowImported()" title="${f.showImported===false?'Click to show':'Click to hide'} historical imported orders">
+          📜 Imported (${(state.orders||[]).filter(o=>o.imported).length})
+        </span>` : ''}
       </div>
       <div style="display:grid; grid-template-columns: 2fr auto; gap:10px; align-items:end;">
         <div class="field"><label>Search</label>
@@ -8204,6 +8231,22 @@ function renderCustomers() {
     <div style="margin-bottom:16px;">
       <input type="search" placeholder="Search customers (name, code, city, sales rep)…" value="${esc(state.ui.customerSearch)}" oninput="App.setCustomerSearch(this.value)" style="max-width:520px;">
     </div>
+    ${(() => {
+      // v7.41 — one-time wizard banner. Shown until every customer has a folder.
+      const missing = state.customers.filter(c => !((c.oneDriveFolder || '').trim()));
+      if (missing.length === 0 || state.customers.length === 0) return '';
+      return `
+        <div class="card no-print" style="margin-bottom:16px; padding:12px 16px; border-left:3px solid var(--orange);">
+          <div style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
+            <div>
+              <strong>📁 ${missing.length} of ${state.customers.length} customers don't have a OneDrive folder yet.</strong>
+              <div class="hint" style="margin-top:2px;">Map them now in one batch — quote folders will auto-organize under each customer's folder. One-time setup.</div>
+            </div>
+            <button class="btn btn-primary" style="flex:0 0 auto;" onclick="App.openCustFolderWizard()">⚡ Map Folders</button>
+          </div>
+        </div>
+      `;
+    })()}
     ${state.customers.length === 0 ? `
       <div class="empty-state">
         <h3>No customers yet</h3>
@@ -8275,6 +8318,26 @@ function renderCustomersCards(list) {
               <div class="field"><label>Email</label>${bind({label:'Email',value:c.email, type:'email', onChange:v=>{c.email=v;}})}</div>
               <div class="field"><label>Phone</label>${bind({label:'Phone',value:c.phone, type:'tel', onChange:v=>{c.phone=v;}})}</div>
               <div class="field"><label>Sales Rep</label>${bind({label:'Sales Rep',value:c.salesRep, onChange:v=>{c.salesRep=v;}, placeholder:'HOUSE / MJ / JMJ / MM'})}</div>
+            </div>
+            <hr>
+            <div style="font-family:var(--font-display); font-size:11px; letter-spacing:0.12em; color:var(--steel); margin-bottom:8px;">ONEDRIVE FOLDER</div>
+            <div class="row" style="gap:8px; align-items:end;">
+              <div class="field grow">
+                <label>Folder name (under OneDrive root)</label>
+                <input type="text" value="${esc(c.oneDriveFolder||'')}"
+                  oninput="App.setCustomerOneDriveFolder('${c.id}', this.value)"
+                  placeholder="e.g. ACME-MFG or Acme Manufacturing"
+                  style="font-family:var(--font-mono);">
+              </div>
+              <button class="btn" style="flex:0 0 auto;" onclick="App.openCustomerFolder('${c.id}')"
+                title="Opens this customer's folder in File Explorer (creates it if missing). The OneDrive desktop client syncs it.">
+                📁 Open Folder
+              </button>
+            </div>
+            <div class="hint" style="margin-top:4px;">
+              ${c.oneDriveFolder
+                ? `Quotes for this customer will save under <span class="mono">${esc(sanitizeFolderName(c.oneDriveFolder))}\\Quote_…</span>`
+                : `Not set yet — you'll be prompted to pick a folder name the first time you open a quote folder for this customer.`}
             </div>
             <hr>
             <div style="font-family:var(--font-display); font-size:11px; letter-spacing:0.12em; color:var(--steel); margin-bottom:8px;">BILL-TO ADDRESS</div>
@@ -8463,6 +8526,18 @@ function renderSettings() {
             ${bind({label:'Folder template', value:s.shopInfo.oneDriveFolderTemplate||'Quote_{quoteNum}_{customer}', onChange:v=>{s.shopInfo.oneDriveFolderTemplate=v;}, placeholder:'Quote_{quoteNum}_{customer}'})}
             <div class="hint">Tokens: <code>{quoteNum}</code>, <code>{customer}</code>, <code>{date}</code>. Result is sanitized — no slashes or special chars.</div>
           </div>
+        </div>
+        <hr>
+        <div class="row" style="gap:10px; align-items:center; justify-content:space-between; margin-top:8px;">
+          <div>
+            <strong style="font-size:13px;">Per-customer subfolder mapping (v7.41)</strong>
+            <div class="hint" style="margin-top:2px;">Map each customer to their own folder, so quote folders nest under <code>&lt;root&gt;\\&lt;customer&gt;\\&lt;quote&gt;</code>. ${(() => {
+              const missing = state.customers.filter(c => !((c.oneDriveFolder || '').trim())).length;
+              const total = state.customers.length;
+              return total === 0 ? '' : `<strong>${total - missing} of ${total} customers mapped.</strong>`;
+            })()}</div>
+          </div>
+          <button class="btn" style="flex:0 0 auto;" onclick="App.openCustFolderWizard()">⚡ Open Mapping Wizard</button>
         </div>
       </div>
     </div>
@@ -10756,6 +10831,137 @@ function renderQuoteParserModal() {
   `;
 }
 
+// ============================================================================
+// v7.41 — Customer OneDrive folder modals
+// ============================================================================
+function renderMissingCustFolderModal() {
+  const host = document.getElementById('cust-folder-host');
+  if (!host) return;
+  const m = state.ui.missingCustFolder;
+  if (!m || !m.open) { /* leave host alone — wizard may share it */ return _maybeClearCustFolderHost(); }
+  const c = state.customers.find(x => x.id === m.customerId);
+  if (!c) { _maybeClearCustFolderHost(); return; }
+  const suggested = (c.name || '').replace(/[<>:"/\\|?*\x00-\x1F]/g, '').trim();
+  host.innerHTML = `
+    <div class="modal-backdrop" onclick="App.closeMissingCustFolderPrompt()">
+      <div class="modal" style="width:480px; max-width:96vw;" onclick="event.stopPropagation()">
+        <div class="modal-header">Set OneDrive folder for ${esc(c.name || 'this customer')}</div>
+        <div class="modal-body" style="padding:18px 20px;">
+          <p style="margin:0 0 12px; font-size:13px; color:var(--text-mute);">
+            Quote folders for this customer will be created at:
+          </p>
+          <div class="mono" style="background:var(--bg); padding:8px 10px; border-radius:4px; font-size:12px; margin-bottom:14px;">
+            &lt;OneDrive root&gt; \\ <span id="mcf-preview" style="color:var(--orange); font-weight:bold;">${esc(suggested) || '(folder name)'}</span> \\ Quote_…
+          </div>
+          <label style="display:block; font-size:12px; color:var(--text-mute); margin-bottom:4px;">Folder name</label>
+          <input id="mcf-input" type="text" value="${esc(m.draft || suggested || '')}"
+            placeholder="e.g. ACME-MFG or Acme Manufacturing"
+            style="width:100%; font-family:var(--font-mono); padding:8px 10px;"
+            oninput="App.setMissingCustFolderDraft(this.value); document.getElementById('mcf-preview').textContent = this.value || '(folder name)';"
+            onkeydown="if(event.key==='Enter'){App.saveMissingCustFolder();}">
+          <div class="hint" style="margin-top:6px;">Saved on this customer record. You'll only get this prompt once per customer.</div>
+        </div>
+        <div class="modal-footer" style="display:flex; gap:8px; justify-content:flex-end; padding:12px 20px; border-top:1px solid var(--line);">
+          <button class="btn" onclick="App.closeMissingCustFolderPrompt()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.saveMissingCustFolder()">Save & Continue</button>
+        </div>
+      </div>
+    </div>
+  `;
+  // Auto-set draft from suggested if empty, and focus the input
+  if (!m.draft && suggested) m.draft = suggested;
+  setTimeout(() => { const inp = document.getElementById('mcf-input'); if (inp) inp.focus(); inp && inp.select && inp.select(); }, 30);
+}
+
+function renderCustFolderWizardModal() {
+  const host = document.getElementById('cust-folder-host');
+  if (!host) return;
+  const wiz = state.ui.custFolderWizard;
+  if (!wiz || !wiz.open) { return _maybeClearCustFolderHost(); }
+  const search = (wiz.search || '').toLowerCase();
+  let list = state.customers.slice().sort((a,b) => (a.name||'').localeCompare(b.name||''));
+  if (wiz.onlyMissing) list = list.filter(c => !((wiz.drafts[c.id] || '').trim()));
+  if (search) list = list.filter(c =>
+    (c.name||'').toLowerCase().includes(search) ||
+    (c.code||'').toLowerCase().includes(search)
+  );
+  const totalMissing = state.customers.filter(c => !((wiz.drafts[c.id] || '').trim())).length;
+  const totalCustomers = state.customers.length;
+  const setCount = totalCustomers - totalMissing;
+  host.innerHTML = `
+    <div class="modal-backdrop" onclick="App.closeCustFolderWizard()">
+      <div class="modal" style="width:820px; max-width:96vw; max-height:90vh; display:flex; flex-direction:column;" onclick="event.stopPropagation()">
+        <div class="modal-header">Map Customers to OneDrive Folders</div>
+        <div class="modal-body" style="padding:16px 20px; overflow-y:auto; flex:1; min-height:300px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+            <div>
+              <div style="font-size:13px;">${setCount} of ${totalCustomers} customers have folders set</div>
+              <div class="hint" style="margin-top:2px;">Each folder will live under your OneDrive root. Empty rows stay empty (you'll be prompted later).</div>
+            </div>
+            <button class="btn btn-sm" onclick="App.bulkFillCustFolderWizard()" title="Fills every empty row with a sanitized version of the customer name">⚡ Quick-fill empty rows from customer name</button>
+          </div>
+          <div class="row" style="gap:8px; margin-bottom:10px; align-items:center;">
+            <input type="search" placeholder="Search by customer name or code…"
+              value="${esc(wiz.search)}" oninput="App.setCustFolderWizardSearch(this.value)"
+              style="flex:1; font-size:13px; padding:6px 10px;">
+            <label style="display:inline-flex; gap:4px; align-items:center; font-size:12px; cursor:pointer;">
+              <input type="checkbox" ${wiz.onlyMissing?'checked':''} onchange="App.toggleCustFolderWizardOnlyMissing()" style="width:auto; padding:0; margin:0;">
+              Only show missing
+            </label>
+          </div>
+          ${list.length === 0 ? `
+            <div class="empty-state" style="padding:28px;">
+              <p style="margin:0;">${wiz.onlyMissing && totalMissing === 0 ? '🎉 All customers have OneDrive folders set.' : 'No matches.'}</p>
+            </div>
+          ` : `
+            <table class="tbl" style="font-size:12px;">
+              <thead>
+                <tr>
+                  <th style="width:30%;">Customer</th>
+                  <th style="width:80px;">Code</th>
+                  <th>Folder name (under OneDrive root)</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${list.map(c => {
+                  const draft = wiz.drafts[c.id] || '';
+                  return `
+                    <tr>
+                      <td><strong>${esc(c.name || '(unnamed)')}</strong></td>
+                      <td class="text-mute small">${esc(c.code || '')}</td>
+                      <td>
+                        <input type="text" value="${esc(draft)}"
+                          data-cust-folder-input="${c.id}"
+                          oninput="App.setCustFolderWizardField('${c.id}', this.value)"
+                          placeholder="(leave empty to skip)"
+                          style="width:100%; font-family:var(--font-mono); padding:4px 8px; font-size:12px;">
+                      </td>
+                    </tr>
+                  `;
+                }).join('')}
+              </tbody>
+            </table>
+          `}
+        </div>
+        <div class="modal-footer" style="display:flex; gap:8px; justify-content:space-between; padding:12px 20px; border-top:1px solid var(--line);">
+          <span class="text-mute small">${totalMissing} still missing</span>
+          <div style="display:flex; gap:8px;">
+            <button class="btn" onclick="App.closeCustFolderWizard()">Cancel</button>
+            <button class="btn btn-primary" onclick="App.saveCustFolderWizard()">Save All</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function _maybeClearCustFolderHost() {
+  const host = document.getElementById('cust-folder-host');
+  if (!host) return;
+  const m = state.ui.missingCustFolder, w = state.ui.custFolderWizard;
+  if (!(m && m.open) && !(w && w.open)) host.innerHTML = '';
+}
+
 function renderPartTemplateModal() {
   const host = document.getElementById('template-modal-host');
   if (!state.ui.partTemplate) { host.innerHTML = ''; return; }
@@ -12747,16 +12953,16 @@ const App = {
     }
   },
   clearQuoteFilters() {
-    update(s => { s.ui.quoteFilters = { search:'', statuses:[], customerId:'all', dateRange:'all', showImported:true }; });
+    update(s => { s.ui.quoteFilters = { search:'', hiddenStatuses:[], customerId:'all', dateRange:'all', showImported:true }; });
   },
-  // v7.40: chip toggles
+  // v7.41: chip toggles — clicking a chip HIDES that status (default = show all)
   toggleQuoteStatusFilter(status) {
     update(s => {
       const f = s.ui.quoteFilters;
-      if (!Array.isArray(f.statuses)) f.statuses = [];
-      const i = f.statuses.indexOf(status);
-      if (i >= 0) f.statuses.splice(i, 1);
-      else f.statuses.push(status);
+      if (!Array.isArray(f.hiddenStatuses)) f.hiddenStatuses = [];
+      const i = f.hiddenStatuses.indexOf(status);
+      if (i >= 0) f.hiddenStatuses.splice(i, 1);
+      else f.hiddenStatuses.push(status);
     });
   },
   toggleQuoteShowImported() {
@@ -13100,28 +13306,169 @@ Trimble Tool`;
   },
   openLocalQuoteFolder(quoteId) {
     const q = getQuote(quoteId); if (!q) return;
+    if (!localStorage.getItem('keystone-onedrive-root')) {
+      alert('Set the OneDrive root path in Settings first.');
+      return;
+    }
+    const cust = getCustomer(q.customerId);
+    // v7.41: prompt for the customer folder name if not set.
+    if (cust && !cust.oneDriveFolder) {
+      App.openMissingCustFolderPrompt(cust.id, () => App.openLocalQuoteFolder(quoteId));
+      return;
+    }
     const path = suggestedFolderPath(q);
     if (!path) { alert('Set the OneDrive root path in Settings first.'); return; }
-    // Browsers block file:// navigation directly. Best UX: copy path, show
-    // a short modal with one-click "Open in File Explorer" that downloads a
-    // tiny .bat that creates the folder if missing then opens it.
     const folderName = suggestedFolderName(q);
-    // Build the .bat content: create folder then start it
+    // Build the .bat content: create folder then start it. Includes the
+    // customer-folder layer when the customer has one set.
     const bat = `@echo off\r\nif not exist "${path}" mkdir "${path}"\r\nstart "" "${path}"\r\n`;
     const blob = new Blob([bat], { type: 'application/x-bat' });
     const url = URL.createObjectURL(blob);
-    // Auto-download the .bat. User clicks it to open. (Edge/Chrome may show
-    // a SmartScreen warning the first time — user clicks "Keep" / "Run anyway".)
     const a = document.createElement('a');
     a.href = url;
     a.download = `open_${folderName}.bat`;
     document.body.appendChild(a);
     a.click();
     setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
-    // Also copy the path so user has a fallback if SmartScreen blocks the .bat
     navigator.clipboard.writeText(path).catch(() => {});
     logActivity('Opened quote folder', q.quoteNum || '?', folderName);
     showToast(`Downloaded "open_${folderName}.bat" — run it to open/create the folder. (Path also copied to clipboard.)`, 5000);
+  },
+
+  // ----- v7.41: per-customer OneDrive folder integration -----
+  setCustomerOneDriveFolder(customerId, value) {
+    update(s => {
+      const c = s.customers.find(x => x.id === customerId);
+      if (c) c.oneDriveFolder = value || '';
+    });
+    // Debounce re-render so the input keeps focus while typing.
+    clearTimeout(window._custFolderT);
+    window._custFolderT = setTimeout(() => render(), 600);
+  },
+  openCustomerFolder(customerId) {
+    const c = getCustomer(customerId); if (!c) return;
+    if (!localStorage.getItem('keystone-onedrive-root')) {
+      alert('Set the OneDrive root path in Settings first.');
+      return;
+    }
+    if (!c.oneDriveFolder) {
+      App.openMissingCustFolderPrompt(customerId, () => App.openCustomerFolder(customerId));
+      return;
+    }
+    const path = customerFolderPath(c);
+    const safe = sanitizeFolderName(c.oneDriveFolder);
+    const bat = `@echo off\r\nif not exist "${path}" mkdir "${path}"\r\nstart "" "${path}"\r\n`;
+    const blob = new Blob([bat], { type: 'application/x-bat' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `open_${safe}.bat`;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
+    navigator.clipboard.writeText(path).catch(() => {});
+    logActivity('Opened customer folder', c.name || '?', safe);
+    showToast(`Downloaded "open_${safe}.bat" — run it to open/create ${c.name || 'the customer'}'s folder.`, 5000);
+  },
+  openMissingCustFolderPrompt(customerId, onConfirm) {
+    state.ui.missingCustFolder = {
+      open: true,
+      customerId,
+      draft: '',                             // user-entered folder name
+      onConfirm: onConfirm || (() => {}),
+    };
+    render();
+  },
+  closeMissingCustFolderPrompt() {
+    if (state.ui.missingCustFolder) state.ui.missingCustFolder.open = false;
+    render();
+  },
+  setMissingCustFolderDraft(value) {
+    if (state.ui.missingCustFolder) state.ui.missingCustFolder.draft = value;
+    // Don't full re-render — the input is controlled in the modal
+  },
+  saveMissingCustFolder() {
+    const m = state.ui.missingCustFolder;
+    if (!m || !m.open) return;
+    const value = (m.draft || '').trim();
+    if (!value) { alert('Please enter a folder name.'); return; }
+    const cb = m.onConfirm;
+    update(s => {
+      const c = s.customers.find(x => x.id === m.customerId);
+      if (c) c.oneDriveFolder = value;
+      s.ui.missingCustFolder.open = false;
+    });
+    if (typeof cb === 'function') cb();
+  },
+  // ----- One-time wizard to map all existing customers to OneDrive folders -----
+  openCustFolderWizard() {
+    const drafts = {};
+    state.customers.forEach(c => {
+      drafts[c.id] = c.oneDriveFolder || '';
+    });
+    state.ui.custFolderWizard = {
+      open: true,
+      drafts,
+      search: '',
+      onlyMissing: true,
+    };
+    render();
+  },
+  closeCustFolderWizard() {
+    if (state.ui.custFolderWizard) state.ui.custFolderWizard.open = false;
+    render();
+  },
+  setCustFolderWizardField(customerId, value) {
+    if (!state.ui.custFolderWizard) return;
+    state.ui.custFolderWizard.drafts[customerId] = value;
+    // Don't re-render on every keystroke
+  },
+  setCustFolderWizardSearch(value) {
+    if (!state.ui.custFolderWizard) return;
+    state.ui.custFolderWizard.search = value || '';
+    render();
+  },
+  toggleCustFolderWizardOnlyMissing() {
+    if (!state.ui.custFolderWizard) return;
+    state.ui.custFolderWizard.onlyMissing = !state.ui.custFolderWizard.onlyMissing;
+    render();
+  },
+  // Quick-fill empty fields with sanitized customer name
+  bulkFillCustFolderWizard() {
+    if (!state.ui.custFolderWizard) return;
+    const wiz = state.ui.custFolderWizard;
+    state.customers.forEach(c => {
+      if (!wiz.drafts[c.id] || !wiz.drafts[c.id].trim()) {
+        // Sanitize: strip illegal chars, leave spaces alone
+        const clean = (c.name || '').replace(/[<>:"/\\|?*\x00-\x1F]/g, '').trim();
+        if (clean) wiz.drafts[c.id] = clean;
+      }
+    });
+    // Capture the input DOM values too in case user has unsaved keystrokes —
+    // but easier path: re-render so all inputs reflect the new drafts.
+    render();
+  },
+  saveCustFolderWizard() {
+    const wiz = state.ui.custFolderWizard;
+    if (!wiz) return;
+    // Capture any in-flight DOM input values (since we don't re-render on
+    // every keystroke). Find each row input by data attribute.
+    document.querySelectorAll('[data-cust-folder-input]').forEach(input => {
+      const id = input.getAttribute('data-cust-folder-input');
+      if (id) wiz.drafts[id] = input.value;
+    });
+    let changed = 0;
+    update(s => {
+      s.customers.forEach(c => {
+        const v = (wiz.drafts[c.id] || '').trim();
+        if (v !== (c.oneDriveFolder || '')) {
+          c.oneDriveFolder = v;
+          changed++;
+        }
+      });
+      s.ui.custFolderWizard.open = false;
+    });
+    showToast(`Saved OneDrive folder names — updated ${changed} customer${changed!==1?'s':''}.`);
   },
 
   // --- Cloud Sync ---
@@ -13250,15 +13597,15 @@ Trimble Tool`;
       }, 220);
     } else { saveState(); render(); }
   },
-  clearOrderFilters() { update(s => { s.ui.orderFilters = { search:'', statuses:[], showImported:true }; }); },
-  // v7.40: chip toggles
+  clearOrderFilters() { update(s => { s.ui.orderFilters = { search:'', hiddenStatuses:[], showImported:true }; }); },
+  // v7.41: chip toggles — clicking a chip HIDES that status
   toggleOrderStatusFilter(status) {
     update(s => {
       const f = s.ui.orderFilters;
-      if (!Array.isArray(f.statuses)) f.statuses = [];
-      const i = f.statuses.indexOf(status);
-      if (i >= 0) f.statuses.splice(i, 1);
-      else f.statuses.push(status);
+      if (!Array.isArray(f.hiddenStatuses)) f.hiddenStatuses = [];
+      const i = f.hiddenStatuses.indexOf(status);
+      if (i >= 0) f.hiddenStatuses.splice(i, 1);
+      else f.hiddenStatuses.push(status);
     });
   },
   toggleOrderShowImported() {
