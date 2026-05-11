@@ -531,7 +531,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.45.0';
+const APP_VERSION = '7.46.0';
 
 // v7.34.1: Pre-baked Firebase config for the Keystone shop's keystone-quoting
 // project. Users still need to enter their own email + password, but the
@@ -1787,43 +1787,51 @@ const OutlookGraph = {
 window.OutlookGraph = OutlookGraph;
 
 // ============================================================================
-// v7.45 — OneDriveGraph: file + folder operations via Microsoft Graph
-// Piggybacks on OutlookGraph's access token (Files.ReadWrite.All scope was
-// added in v7.45 — user must disconnect + reconnect Outlook once to re-consent).
+// v7.45/v7.46 — OneDriveGraph: file + folder operations via Microsoft Graph
+// Piggybacks on OutlookGraph's access token (Files.ReadWrite.All scope).
+// v7.46 — supports SharePoint document libraries via Settings:
+//   - oneDriveSiteHostname (e.g. keystonemachineandfab559.sharepoint.com)
+//   - oneDriveSitePath     (e.g. sites/KMFDocs)
+// When both are set, all operations target /sites/{host}:/{sitePath}:/drive
+// instead of /me/drive. Empty falls back to personal OneDrive (legacy).
 // ============================================================================
 const OneDriveGraph = {
-  // Hit Graph with auth header from OutlookGraph's fresh access token.
   async _fetch(url, opts = {}) {
     const token = await OutlookGraph.ensureFreshToken();
     return fetch(url, {
       ...opts,
-      headers: {
-        'Authorization': 'Bearer ' + token,
-        ...(opts.headers || {}),
-      },
+      headers: { 'Authorization': 'Bearer ' + token, ...(opts.headers || {}) },
     });
   },
-  // Convert a Windows-style path ("Acme\\Folder") or forward-slash path to
-  // a URL-encoded Graph path segment ("Acme/Folder"). Strips empty parts.
   _encodePath(path) {
     return (path || '').split(/[\\/]+/).filter(Boolean).map(encodeURIComponent).join('/');
   },
-  // GET a folder/file by path. Returns the item or null on 404.
+  // v7.46 — Returns the Graph drive base URL. SharePoint when configured;
+  // /me/drive otherwise. Single source of truth for endpoint construction.
+  _driveBase() {
+    const sp = state.settings.shopInfo || {};
+    const host = (sp.oneDriveSiteHostname || '').trim();
+    const sitePath = (sp.oneDriveSitePath || '').trim().replace(/^\/+|\/+$/g, '');
+    if (host && sitePath) {
+      return `https://graph.microsoft.com/v1.0/sites/${host}:/${sitePath}:/drive`;
+    }
+    return 'https://graph.microsoft.com/v1.0/me/drive';
+  },
   async getItem(path) {
     if (!path) return null;
     const enc = this._encodePath(path);
-    const url = `https://graph.microsoft.com/v1.0/me/drive/root:/${enc}`;
+    const url = `${this._driveBase()}/root:/${enc}`;
     const resp = await this._fetch(url);
     if (resp.status === 404) return null;
     if (!resp.ok) throw new Error(`Graph getItem failed (${resp.status}) for ${path}`);
     return resp.json();
   },
-  // Idempotently create every segment of a folder path. Returns the leaf item.
   async ensureFolderPath(path) {
     const segments = (path || '').split(/[\\/]+/).filter(Boolean);
     if (segments.length === 0) throw new Error('ensureFolderPath: empty path');
     let runningPath = '';
-    let parentId = null;     // null = root
+    let parentId = null;
+    const base = this._driveBase();
     for (const seg of segments) {
       const candidatePath = runningPath ? `${runningPath}/${seg}` : seg;
       const existing = await this.getItem(candidatePath);
@@ -1831,19 +1839,17 @@ const OneDriveGraph = {
         parentId = existing.id;
       } else {
         const createUrl = parentId
-          ? `https://graph.microsoft.com/v1.0/me/drive/items/${parentId}/children`
-          : `https://graph.microsoft.com/v1.0/me/drive/root/children`;
+          ? `${base}/items/${parentId}/children`
+          : `${base}/root/children`;
         const resp = await this._fetch(createUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            name: seg,
-            folder: {},
+            name: seg, folder: {},
             '@microsoft.graph.conflictBehavior': 'fail',
           }),
         });
         if (!resp.ok) {
-          // If 409, someone created it concurrently — re-fetch.
           if (resp.status === 409) {
             const item = await this.getItem(candidatePath);
             if (item) { parentId = item.id; runningPath = candidatePath; continue; }
@@ -1858,15 +1864,14 @@ const OneDriveGraph = {
     }
     return this.getItem(runningPath);
   },
-  // Upload a Blob/File to <folderPath>/<filename>. Small files (<4MB) use
-  // simple PUT; larger use upload sessions in 5MB chunks.
   async uploadFile(folderPath, file, filename) {
     const name = filename || file.name || 'file.bin';
     const folderEnc = this._encodePath(folderPath);
     const nameEnc = encodeURIComponent(name);
     const SMALL = 4 * 1024 * 1024;
+    const base = this._driveBase();
     if (file.size <= SMALL) {
-      const url = `https://graph.microsoft.com/v1.0/me/drive/root:/${folderEnc}/${nameEnc}:/content`;
+      const url = `${base}/root:/${folderEnc}/${nameEnc}:/content`;
       const resp = await this._fetch(url, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/octet-stream' },
@@ -1878,8 +1883,7 @@ const OneDriveGraph = {
       }
       return resp.json();
     }
-    // Large file: upload session
-    const sessionUrl = `https://graph.microsoft.com/v1.0/me/drive/root:/${folderEnc}/${nameEnc}:/createUploadSession`;
+    const sessionUrl = `${base}/root:/${folderEnc}/${nameEnc}:/createUploadSession`;
     const sessResp = await this._fetch(sessionUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1887,9 +1891,8 @@ const OneDriveGraph = {
     });
     if (!sessResp.ok) throw new Error(`Upload session failed (${sessResp.status})`);
     const session = await sessResp.json();
-    const chunkSize = 5 * 1024 * 1024;     // must be multiple of 320 KiB
-    let pos = 0;
-    let lastBody = null;
+    const chunkSize = 5 * 1024 * 1024;
+    let pos = 0, lastBody = null;
     while (pos < file.size) {
       const end = Math.min(pos + chunkSize, file.size);
       const chunk = file.slice(pos, end);
@@ -1910,20 +1913,17 @@ const OneDriveGraph = {
     }
     return lastBody;
   },
-  // List children of a folder (returns []). Honors $top=200 — for bigger folders
-  // we'd add paging, but job folders won't realistically exceed that.
   async listFolder(folderPath) {
     const enc = this._encodePath(folderPath);
-    const url = `https://graph.microsoft.com/v1.0/me/drive/root:/${enc}:/children?$top=200`;
+    const url = `${this._driveBase()}/root:/${enc}:/children?$top=200`;
     const resp = await this._fetch(url);
     if (resp.status === 404) return [];
     if (!resp.ok) throw new Error(`Graph list failed (${resp.status})`);
     const data = await resp.json();
     return data.value || [];
   },
-  // Get or create an organization-scope view link for an item.
   async getShareLink(itemId) {
-    const url = `https://graph.microsoft.com/v1.0/me/drive/items/${itemId}/createLink`;
+    const url = `${this._driveBase()}/items/${itemId}/createLink`;
     const resp = await this._fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1932,6 +1932,57 @@ const OneDriveGraph = {
     if (!resp.ok) throw new Error(`Share link failed (${resp.status})`);
     const data = await resp.json();
     return data.link && data.link.webUrl;
+  },
+  // v7.46 — Parse a SharePoint URL into {hostname, sitePath, folderPath}.
+  // Handles direct SharePoint URLs and the "/my?remoteItem=..." shortcut URL.
+  parseSharePointUrl(rawUrl) {
+    if (!rawUrl) return null;
+    try {
+      const u = new URL(rawUrl);
+      // Case 1: shortcut URL like /my?remoteItem=...&id=/sites/X/Shared Documents/Y
+      const remote = u.searchParams.get('remoteItem');
+      const idParam = u.searchParams.get('id');
+      if (remote || idParam) {
+        // Try the remoteItem JSON payload first — it's authoritative.
+        if (remote) {
+          try {
+            const data = JSON.parse(decodeURIComponent(remote));
+            const rsi = data.rsi || data.mp;
+            if (rsi && rsi.webAbsoluteUrl) {
+              const ru = new URL(rsi.webAbsoluteUrl);
+              const m = ru.pathname.match(/^\/(sites|teams)\/([^/]+)/);
+              if (m) {
+                let folder = '';
+                if (rsi.rootFolder) {
+                  // rootFolder like "/sites/KMFDocs/Shared Documents/___A Customers"
+                  folder = rsi.rootFolder.replace(/^\/(sites|teams)\/[^/]+\//, '');
+                  folder = folder.replace(/^Shared Documents\//, '/').replace(/^Documents\//, '/');
+                  if (!folder.startsWith('/')) folder = '/' + folder;
+                }
+                return { hostname: ru.hostname, sitePath: `${m[1]}/${m[2]}`, folderPath: folder };
+              }
+            }
+          } catch (_) { /* fall through */ }
+        }
+        // Fall back to id parameter
+        if (idParam) {
+          const decoded = decodeURIComponent(idParam);
+          const m = decoded.match(/^\/(sites|teams)\/([^/]+)\/(?:Shared Documents|Documents)\/(.*)$/);
+          if (m) {
+            return { hostname: u.hostname.replace(/-my\./, '.'), sitePath: `${m[1]}/${m[2]}`, folderPath: '/' + m[3] };
+          }
+        }
+      }
+      // Case 2: direct SharePoint URL like https://host/sites/X/Shared Documents/Y/Z
+      const pathDecoded = decodeURIComponent(u.pathname);
+      const m = pathDecoded.match(/^\/(sites|teams)\/([^/]+)\/(?:Shared Documents|Documents)\/?(.*)$/);
+      if (m) {
+        return { hostname: u.hostname, sitePath: `${m[1]}/${m[2]}`, folderPath: '/' + (m[3] || '').replace(/\/+$/, '') };
+      }
+      return null;
+    } catch (e) {
+      return null;
+    }
   },
 };
 window.OneDriveGraph = OneDriveGraph;
@@ -9138,9 +9189,27 @@ function renderSettings() {
             </div>
           </div>
           <div class="field" style="grid-column:span 2;">
-            <label>OneDrive Cloud Root Path (synced — Microsoft Graph uses this for auto-folder + uploads)</label>
-            ${bind({label:'OneDrive cloud root', value:s.shopInfo.oneDriveCloudRoot||'', onChange:v=>{s.shopInfo.oneDriveCloudRoot=v;}, placeholder:'/KMF Documents/___Customers'})}
-            <div class="hint">Path inside your OneDrive cloud where customer folders live. Forward slashes. Example: <code>/KMF Documents/___Customers</code>. Customers' folder values append below this. Required for v7.45+ auto-folder + drop-to-upload.</div>
+            <label>SharePoint / OneDrive — paste a folder URL to auto-configure (v7.46)</label>
+            <div class="row" style="gap:6px;">
+              <input id="sp-url-paste" type="text" placeholder="https://&lt;tenant&gt;.sharepoint.com/sites/KMFDocs/Shared Documents/___A Customers" style="font-family:var(--font-mono); flex:1;">
+              <button class="btn btn-sm" onclick="App.parseSharePointUrlIntoSettings(document.getElementById('sp-url-paste').value)">⚡ Parse + fill below</button>
+            </div>
+            <div class="hint">Paste the SharePoint URL of your customers folder (from a browser tab). The button extracts the host, site path, and folder path and fills the three fields below. You can also fill them manually if you know them.</div>
+          </div>
+          <div class="field">
+            <label>SharePoint Site Hostname (blank = use personal OneDrive)</label>
+            ${bind({label:'SP hostname', value:s.shopInfo.oneDriveSiteHostname||'', onChange:v=>{s.shopInfo.oneDriveSiteHostname=v;}, placeholder:'keystonemachineandfab559.sharepoint.com'})}
+            <div class="hint">e.g. <code>keystonemachineandfab559.sharepoint.com</code> (no <code>https://</code>, no path). Leave blank if your customer folders live in your personal OneDrive instead.</div>
+          </div>
+          <div class="field">
+            <label>SharePoint Site Path (relative — sites/X or teams/X)</label>
+            ${bind({label:'SP site path', value:s.shopInfo.oneDriveSitePath||'', onChange:v=>{s.shopInfo.oneDriveSitePath=v;}, placeholder:'sites/KMFDocs'})}
+            <div class="hint">e.g. <code>sites/KMFDocs</code>. The default Document Library on this site is used.</div>
+          </div>
+          <div class="field" style="grid-column:span 2;">
+            <label>Folder Path within drive (where customer folders live)</label>
+            ${bind({label:'Folder path', value:s.shopInfo.oneDriveCloudRoot||'', onChange:v=>{s.shopInfo.oneDriveCloudRoot=v;}, placeholder:'/___A Customers'})}
+            <div class="hint">e.g. <code>/___A Customers</code>. Forward slashes. Customers' folder values append below this. The full Graph path becomes: <code>/sites/&lt;host&gt;:/&lt;sitePath&gt;:/drive/root:&lt;folder path&gt;/&lt;customer&gt;/&lt;job&gt;</code>.</div>
           </div>
           <div class="field" style="grid-column:span 2;">
             <label>Folder Name Template (synced — same on every PC)</label>
@@ -12852,6 +12921,25 @@ const App = {
     });
     showToast(`Quote kind changed to ${QUOTE_KIND_BY_ID[kind]?.label || kind}`);
   },
+  // v7.46 — Parse a SharePoint URL into the three settings fields.
+  parseSharePointUrlIntoSettings(rawUrl) {
+    if (!rawUrl || !rawUrl.trim()) {
+      alert('Paste a SharePoint URL into the field first.');
+      return;
+    }
+    const parsed = OneDriveGraph.parseSharePointUrl(rawUrl.trim());
+    if (!parsed) {
+      alert('Could not parse that URL. Expected something like:\n\nhttps://<tenant>.sharepoint.com/sites/<sitename>/Shared Documents/<folder>\n\nor a "/my?remoteItem=..." shortcut URL from OneDrive.');
+      return;
+    }
+    update(s => {
+      s.settings.shopInfo.oneDriveSiteHostname = parsed.hostname;
+      s.settings.shopInfo.oneDriveSitePath = parsed.sitePath;
+      s.settings.shopInfo.oneDriveCloudRoot = parsed.folderPath || '';
+    });
+    showToast(`Parsed: ${parsed.hostname} · ${parsed.sitePath} · ${parsed.folderPath || '(root)'}`, 5000);
+  },
+
   // v7.45 — Drop files onto a quote → upload to OneDrive job folder via Graph
   async dropFilesToJobFolder(quoteId, fileList) {
     const q = getQuote(quoteId); if (!q) return;
