@@ -208,6 +208,45 @@
   table.tbl input[type=number] { font-family:var(--font-mono); }
   table.tbl td.action { width:30px; text-align:center; }
 
+  /* v7.47: Structured setup blocks */
+  .setup-block { border:1px solid var(--line-dark); border-radius:6px; margin-bottom:14px; background:var(--paper); overflow:hidden; }
+  .setup-block-header { display:flex; align-items:center; gap:8px; padding:8px 12px; background:var(--bg); border-bottom:1px solid var(--line-dark); }
+  .setup-block-body { padding:12px; }
+  .setup-block-footer { display:flex; justify-content:space-between; align-items:center; padding:8px 12px; margin-top:10px; background:var(--bg); border-top:1px dashed var(--line-dark); font-size:13px; }
+  .setup-pill { display:inline-flex; align-items:center; padding:2px 8px; border-radius:10px; background:var(--navy); color:white; font-size:11px; font-weight:700; letter-spacing:0.06em; text-transform:uppercase; }
+  .setup-pill.weld-pill { background:#C73E1D; }
+  .setup-name-input { border:1px solid var(--line); background:white; border-radius:3px; }
+  .setup-name-input:focus { border-color:var(--navy); outline:none; }
+  .setup-meta-grid { display:grid; grid-template-columns:repeat(4, minmax(0, 1fr)); gap:10px; }
+  .setup-meta-grid .label { font-size:10px; text-transform:uppercase; letter-spacing:0.08em; color:var(--text-mute); font-weight:600; margin-bottom:3px; }
+  .setup-meta-grid input, .setup-meta-grid select { width:100%; padding:5px 7px; border:1px solid var(--line); background:var(--input-bg); font-size:13px; }
+  .setup-meta-grid input:focus, .setup-meta-grid select:focus { border-color:var(--navy); outline:none; }
+  .setup-meta-grid .value-cell { padding:5px 7px; font-family:var(--font-mono); font-weight:700; color:var(--navy); }
+  .setups-footer { margin-top:8px; border-top:2px solid var(--line-dark); padding-top:8px; }
+  .setups-footer-row { display:flex; justify-content:space-between; align-items:center; padding:6px 12px; font-size:13px; }
+  .setups-footer-row.nre { background:var(--orange-l); color:var(--orange); font-weight:700; border-top:1px solid var(--orange); border-bottom:1px solid var(--orange); }
+  .setups-footer-row.total { background:var(--bg); border-top:2px solid var(--navy); border-bottom:2px solid var(--navy); font-weight:700; }
+  .weld-block { border-color:#E8B4A8; }
+  .weld-block .setup-block-header { background:#FDF1ED; }
+  .weld-grid { display:grid; grid-template-columns:repeat(4, minmax(0, 1fr)); gap:10px; }
+  .weld-grid .label { font-size:10px; text-transform:uppercase; letter-spacing:0.08em; color:var(--text-mute); font-weight:600; margin-bottom:3px; }
+  .weld-grid input, .weld-grid select { width:100%; padding:5px 7px; border:1px solid var(--line); background:var(--input-bg); font-size:13px; }
+  .weld-grid input:focus, .weld-grid select:focus { border-color:var(--navy); outline:none; }
+  .weld-grid .value-cell { padding:5px 7px; font-family:var(--font-mono); color:var(--navy); }
+
+  /* v7.47: BOM tree */
+  .bom-tree { font-size:13px; }
+  .bom-row { display:grid; grid-template-columns: 24px minmax(80px,1fr) minmax(160px,2fr) 70px 110px 100px 110px 30px; gap:6px; align-items:center; padding:6px 8px; border-bottom:1px solid var(--line); }
+  .bom-row.bom-header { background:var(--bg); font-size:10px; text-transform:uppercase; letter-spacing:0.08em; color:var(--steel); font-weight:700; padding:8px; border-bottom:2px solid var(--line-dark); }
+  .bom-row.bom-subassy { background:#F4F8FC; font-weight:600; }
+  .bom-row input, .bom-row select { width:100%; padding:4px 6px; border:1px solid transparent; background:var(--input-bg); font-size:13px; }
+  .bom-row input:focus, .bom-row select:focus { border-color:var(--navy); outline:none; }
+  .bom-toggle { background:none; border:none; cursor:pointer; padding:0; font-size:13px; color:var(--steel); width:18px; }
+  .bom-toggle:hover { color:var(--navy); }
+  .bom-cost { font-family:var(--font-mono); text-align:right; }
+  .bom-children { padding-left:24px; border-left:2px solid var(--line-dark); margin-left:4px; }
+  .bom-footer { display:flex; justify-content:space-between; align-items:center; padding:10px 12px; background:var(--bg); border-top:2px solid var(--navy); font-weight:700; }
+
   .readout { display:grid; grid-template-columns:repeat(4,1fr); gap:1px; background:var(--line-dark); border:1px solid var(--line-dark); margin-bottom:16px; }
   .readout > div { background:var(--paper); padding:12px 16px; }
   .readout .label { font-size:10px; text-transform:uppercase; letter-spacing:0.1em; color:var(--text-mute); font-weight:600; }
@@ -531,7 +570,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.46.0';
+const APP_VERSION = '7.48.0';
 
 // v7.34.1: Pre-baked Firebase config for the Keystone shop's keystone-quoting
 // project. Users still need to enter their own email + password, but the
@@ -812,7 +851,102 @@ function migrateState() {
     if (c.defaultTerms == null) c.defaultTerms = 'Net 30';
     if (c.taxable == null) c.taxable = false;       // default to non-taxable (B2B common)
     if (c.taxRateOverride === undefined) c.taxRateOverride = null;
+    // v7.48: backfill contacts[] from legacy single-email field. Keep c.email
+    // intact for backwards compat — it stays the "primary" email and tracks
+    // contacts[].find(p=>p.isPrimary).email.
+    if (!Array.isArray(c.contacts)) c.contacts = [];
+    if (c.contacts.length === 0 && (c.email || c.contact || c.phone)) {
+      c.contacts.push(newContact({
+        name: c.contact || '',
+        email: c.email || '',
+        phone: c.phone || '',
+        isPrimary: true,
+        role: 'Primary'
+      }));
+    }
   });
+
+  // v7.48: ARCHIVE → LIVE one-time auto-promote.
+  // Both archivedInvoices and archivedQuotes get pushed into state.invoices and
+  // state.quotes respectively, tagged imported:true so they can be filtered
+  // separately. Guarded by archivePromotedAt so this runs once per install.
+  if (!state.archivePromotedAt) {
+    let promoted = { invoices: 0, quotes: 0 };
+    if (Array.isArray(state.archivedInvoices) && state.archivedInvoices.length > 0) {
+      const liveInvNums = new Set((state.invoices || []).map(i => (i.invoiceNum || '').trim()).filter(Boolean));
+      state.archivedInvoices.forEach(ai => {
+        const num = (ai.invoiceNum || '').trim();
+        if (!num || liveInvNums.has(num)) return;   // skip duplicates
+        const inv = newInvoice();
+        inv.invoiceNum    = num;
+        inv.customerId    = ai.customerId;
+        inv.invoiceDate   = ai.invoiceDate || '';
+        inv.dueDate       = ai.dueDate || '';
+        inv.poRef         = ai.poRef || '';
+        inv.notes         = ai.notes || '';
+        inv.terms         = ai.terms || 'Net 30';
+        // v7.48: synthetic single-line entry so the live invoice has SOME line and
+        // legacy table renderers don't crash. Header-only archive → header-only invoice.
+        inv.lines = [{
+          partNum: '',
+          description: ai.salesman ? ('Imported from JobBOSS · ' + (ai.salesman || '')) : 'Imported from JobBOSS',
+          qty: 1,
+          unitPrice: ai.amount || 0,
+          extended: ai.amount || 0
+        }];
+        inv.status        = ai.status && ai.status.toLowerCase() === 'closed' ? 'paid' : (ai.status && ai.status.toLowerCase() === 'open' ? 'sent' : 'draft');
+        inv.imported      = true;
+        inv.importedAt    = ai.importedAt || new Date().toISOString();
+        inv.importBatch   = ai.importBatch || '';
+        inv.importedTotal = ai.amount;  // frozen total so it doesn't drift if lines change
+        inv.customerCode  = ai.customerCode || '';
+        inv.customerName  = ai.customerName || '';
+        inv.salesman      = ai.salesman || '';
+        liveInvNums.add(num);
+        state.invoices.push(inv);
+        promoted.invoices++;
+      });
+      state.archivedInvoices = [];
+    }
+    if (Array.isArray(state.archivedQuotes) && state.archivedQuotes.length > 0) {
+      const liveQuoteNums = new Set((state.quotes || []).map(q => (q.quoteNum || '').trim()).filter(Boolean));
+      state.archivedQuotes.forEach(aq => {
+        const num = (aq.quoteNum || '').trim();
+        if (!num || liveQuoteNums.has(num)) return;
+        const qt = newQuote('multipart');
+        qt.quoteNum = num;
+        qt.customerId = aq.customerId;
+        qt.date = aq.quoteDate || '';
+        qt.rfqNum = aq.inquiryNum || '';
+        qt.quotedBy = aq.quotedBy || '';
+        qt.notes = aq.notes || '';
+        qt.status = 'sent';
+        qt.imported = true;
+        qt.importedAt = aq.importedAt || new Date().toISOString();
+        qt.importBatch = aq.importBatch || '';
+        qt.importedTotal = aq.amount;
+        qt.customerCode = aq.customerCode || '';
+        qt.customerName = aq.customerName || '';
+        qt.salesman = aq.salesman || '';
+        // Header-only: keep the placeholder part empty (newQuote already gives one blank part).
+        // The total is frozen in importedTotal so quoteTotalAt downstream uses that.
+        liveQuoteNums.add(num);
+        state.quotes.unshift(qt);
+        promoted.quotes++;
+      });
+      state.archivedQuotes = [];
+    }
+    state.archivePromotedAt = new Date().toISOString();
+    state.archivePromotedCounts = promoted;
+    // Log so the user sees it after the migration runs
+    if ((promoted.invoices + promoted.quotes) > 0) {
+      console.log('[v7.48] Promoted archive → live:', promoted);
+      // Surface via toast on next render
+      setTimeout(() => {
+        try { showToast(`Promoted ${promoted.invoices} invoice${promoted.invoices===1?'':'s'} + ${promoted.quotes} quote${promoted.quotes===1?'':'s'} from archive to live workspace.`, 8000); } catch (_) {}
+      }, 1200);
+    }
+  }
   // v7.19: vendor schema - default terms
   if (state.settings && Array.isArray(state.settings.vendors)) {
     state.settings.vendors.forEach(v => {
@@ -825,12 +959,43 @@ function migrateState() {
   state.quotes.forEach(q => {
     // v7.30: default to showing the Quote Total section on customer PDFs
     if (q.showTotalOnPDF === undefined) q.showTotalOnPDF = true;
+    // v7.47: BOM for machine-build quotes
+    if (!q.bom || typeof q.bom !== 'object') q.bom = newQuoteBom();
+    if (!Array.isArray(q.bom.items)) q.bom.items = [];
+    if (q.bom.assemblyHrs === undefined) q.bom.assemblyHrs = null;
+    if (q.bom.assemblyMachine === undefined) q.bom.assemblyMachine = '';
+    if (q.bom.notes === undefined) q.bom.notes = '';
     if (!Array.isArray(q.parts)) q.parts = [];
     q.parts.forEach(p => {
       // v7.34.7: heal missing array fields so cost-calc helpers never crash.
       // These should always be arrays per schema, but old/restored data may
       // be missing them.
       if (!Array.isArray(p.machineOps)) p.machineOps = [];
+      // v7.47: structured setups — wrap legacy flat machineOps[] into per-op setups[].
+      // Each old op becomes its own Setup since it already had its own machine + setupHrs.
+      if (!Array.isArray(p.setups)) {
+        if (p.machineOps.length > 0) {
+          p.setups = p.machineOps.map((op, i) => ({
+            id: uid(),
+            name: 'Setup ' + (i + 1),
+            machine: op.machine || '',
+            fixture: '',
+            setupHrs: op.setupHrs,
+            notes: '',
+            ops: [{
+              id: uid(),
+              description: '',
+              runTime: op.runTime,
+              runUnit: op.runUnit || 'min',
+              notes: ''
+            }]
+          }));
+        } else {
+          p.setups = [];
+        }
+      }
+      // v7.47: weld ops (welding-kind quotes)
+      if (!Array.isArray(p.weldOps)) p.weldOps = [];
       if (!Array.isArray(p.qtyTiers)) p.qtyTiers = [1];
       if (!Array.isArray(p.outsideServices)) p.outsideServices = [];
       if (!p.materialCost) p.materialCost = { perPiece: [], vendorId: null, vendorPartNum: '', vendorUrl: '' };
@@ -2275,6 +2440,8 @@ function newPart() {
       partsPerOverride: null,
     },
     machineOps: [],
+    setups: [],     // v7.47: structured setups (machine + fixture + nested ops)
+    weldOps: [],    // v7.47: weld ops (used when q.kind === 'welding')
     tooling: 0,
     outsideServices: DEFAULT_OUTSIDE_OPS.map(n => ({ name:n, cost:0 })),
     dxfFiles: [],  // outside cut-service routing: laser/waterjet/EDM/etc per file
@@ -2314,6 +2481,81 @@ function newSpecialtyTool() {
 }
 function newMachineOp() {
   return { id: uid(), machine:'', setupHrs:null, runTime:null, runUnit:'min' };
+}
+// v7.47: structured setups — one machine + fixture, with ops nested inside.
+function newSetup(n) {
+  return {
+    id: uid(),
+    name: 'Setup ' + (n || 1),
+    machine: '',
+    fixture: '',
+    setupHrs: null,
+    notes: '',
+    ops: []
+  };
+}
+function newSetupOp() {
+  return { id: uid(), description:'', runTime:null, runUnit:'min', notes:'' };
+}
+// v7.47: weld operations (welding-kind quotes).
+// `machine` picks a rate from settings.rates the same way machining ops do.
+const WELD_PROCESSES = ['MIG','TIG','Stick','Flux-core','Sub-arc','Brazing','Spot','Other'];
+const WELD_POSITIONS = ['1F','2F','3F','4F','1G','2G','3G','4G','5G','6G','6GR'];
+function newWeldOp() {
+  return {
+    id: uid(),
+    machine: '',         // e.g. "MIG Welder" — used for rate lookup
+    process: 'MIG',
+    filler: '',          // ER70S-6, ER308L, E7018, etc.
+    fillerSize: '',      // .035, .045, 3/32, 1/8
+    lengthIn: null,      // linear inches per part
+    position: '1F',
+    passCount: 1,
+    prepMin: null,       // per part
+    weldMin: null,       // per part PER PASS
+    cleanupMin: null,    // per part
+    certLevel: '',       // AWS D1.1, ASME Sec IX, etc.
+    certProcedure: '',   // WPS number
+    notes: ''
+  };
+}
+// v7.47: BOM items — recursive tree for machine-build quotes
+function newBomItem(opts) {
+  opts = opts || {};
+  return {
+    id: uid(),
+    partNum: '',
+    description: '',
+    qty: 1,
+    source: opts.source || 'purchased',  // machined | purchased | subassy | csm
+    costEach: null,
+    vendor: '',
+    vendorUrl: '',
+    notes: '',
+    children: []
+  };
+}
+function newQuoteBom() {
+  return { items: [], assemblyHrs: null, assemblyMachine: '', notes: '' };
+}
+// v7.47: deep re-ID a cloned part — setups + nested ops + weldOps + legacy machineOps
+function reidPartInPlace(p) {
+  if (!p) return;
+  p.id = uid();
+  if (Array.isArray(p.setups)) p.setups.forEach(st => {
+    st.id = uid();
+    if (Array.isArray(st.ops)) st.ops.forEach(op => op.id = uid());
+  });
+  if (Array.isArray(p.weldOps)) p.weldOps.forEach(op => op.id = uid());
+  if (Array.isArray(p.machineOps)) p.machineOps.forEach(op => op.id = uid());
+  if (Array.isArray(p.dxfFiles)) p.dxfFiles.forEach(f => f.id = uid());
+  if (Array.isArray(p.specialtyTooling)) p.specialtyTooling.forEach(t => t.id = uid());
+}
+// v7.47: deep re-ID a BOM item tree
+function reidBomItemInPlace(item) {
+  if (!item) return;
+  item.id = uid();
+  if (Array.isArray(item.children)) item.children.forEach(reidBomItemInPlace);
 }
 
 // ============================================================================
@@ -3267,6 +3509,7 @@ function newQuote(kind) {
     status:'draft', notes:'',
     showTotalOnPDF: true,    // v7.30: show "Quote Total" section at bottom of customer PDF
     parts:[ newPart() ],
+    bom: newQuoteBom(),       // v7.47: BOM tree (used when kind === 'build')
   };
 }
 function newCustomer() {
@@ -3277,6 +3520,20 @@ function newCustomer() {
     shipStreet:'', shipCity:'', shipState:'', shipZip:'',
     salesRep:'', paymentTerms:'', status:'Active', notes:'',
     pricingHistory: [],
+    contacts: [],     // v7.48: multiple people per customer — {id, name, email, phone, role, isPrimary, notes}
+  };
+}
+// v7.48: separate-person contact under a customer
+function newContact(opts) {
+  opts = opts || {};
+  return {
+    id: uid(),
+    name: opts.name || '',
+    email: opts.email || '',
+    phone: opts.phone || '',
+    role: opts.role || '',           // e.g. "Buyer", "Engineer", "Accounts Payable"
+    isPrimary: !!opts.isPrimary,
+    notes: opts.notes || ''
   };
 }
 function newOrder(quote, qtyIdx) {
@@ -3505,6 +3762,61 @@ function stockWeightAt(part, qty) {
   return weightPerPiece(part) * num(qty);
 }
 function setupCost(op) { return num(op.setupHrs) * setupRateFor(op.machine); }
+// v7.47: setup-level NRE — setup hrs at the setup's machine rate
+function setupSetupCost(setup) {
+  if (!setup) return 0;
+  return num(setup.setupHrs) * setupRateFor(setup.machine);
+}
+// v7.47: run cost per part for one nested op (uses parent setup's machine rate)
+function setupOpRunCost(op, setup, discountFactor) {
+  const factor = op.runUnit === 'min' ? (1/60) : 1;
+  const f = (discountFactor != null && isFinite(discountFactor)) ? discountFactor : 1;
+  return num(op.runTime) * factor * runRateFor(setup ? setup.machine : '') * f;
+}
+function setupRunCostPerPart(setup, discountFactor) {
+  if (!setup || !Array.isArray(setup.ops)) return 0;
+  return setup.ops.reduce((s, op) => s + setupOpRunCost(op, setup, discountFactor), 0);
+}
+// v7.47: weld-op time per part = prep + (weld × passes) + cleanup, all in minutes
+function weldOpMinutesPerPart(op) {
+  if (!op) return 0;
+  const passes = Math.max(1, num(op.passCount) || 1);
+  return num(op.prepMin) + (num(op.weldMin) * passes) + num(op.cleanupMin);
+}
+function weldOpRunCostPerPart(op, discountFactor) {
+  const minutes = weldOpMinutesPerPart(op);
+  const f = (discountFactor != null && isFinite(discountFactor)) ? discountFactor : 1;
+  return (minutes / 60) * runRateFor(op.machine) * f;
+}
+function totalWeldRunPerPart(part, qtyIdx) {
+  if (!part || !Array.isArray(part.weldOps)) return 0;
+  const factor = (qtyIdx != null) ? laborDiscountFactor(part, qtyIdx) : 1;
+  return part.weldOps.reduce((s, op) => s + weldOpRunCostPerPart(op, factor), 0);
+}
+// v7.47: BOM recursion — sum of (qty × costEach) + nested children
+function bomItemTotal(item) {
+  if (!item) return 0;
+  const qty = num(item.qty) || 1;
+  const ownCost = num(item.costEach) * qty;
+  const childTotal = Array.isArray(item.children)
+    ? item.children.reduce((s, c) => s + bomItemTotal(c) * qty, 0)
+    : 0;
+  return ownCost + childTotal;
+}
+function bomTotal(quote) {
+  if (!quote || !quote.bom || !Array.isArray(quote.bom.items)) return 0;
+  return quote.bom.items.reduce((s, it) => s + bomItemTotal(it), 0);
+}
+function bomAssemblyCost(quote) {
+  if (!quote || !quote.bom) return 0;
+  return num(quote.bom.assemblyHrs) * runRateFor(quote.bom.assemblyMachine);
+}
+function bomGrandTotal(quote) { return bomTotal(quote) + bomAssemblyCost(quote); }
+// Recursive item counter for BOM displays
+function bomItemCount(items) {
+  if (!Array.isArray(items)) return 0;
+  return items.reduce((s, it) => s + 1 + bomItemCount(it.children), 0);
+}
 /**
  * Get the labor discount factor for a given quantity-tier index on a part.
  * Returns a multiplier (e.g. 0.90 for 10% discount). Always between 0 and 1.
@@ -3562,17 +3874,38 @@ function quoteVisibleNREtotal(quote) {
 }
 function totalNRE(part) {
   if (!part) return 0;
-  const ops = Array.isArray(part.machineOps) ? part.machineOps : [];
-  return ops.reduce((s,op) => s + setupCost(op), 0)
+  // v7.47: prefer structured setups[]; fall back to flat machineOps[] for any
+  // record not yet migrated (defensive — migration runs on load).
+  const setups = Array.isArray(part.setups) ? part.setups : [];
+  const flatOps = Array.isArray(part.machineOps) ? part.machineOps : [];
+  const setupNre = setups.length > 0
+    ? setups.reduce((s, st) => s + setupSetupCost(st), 0)
+    : flatOps.reduce((s, op) => s + setupCost(op), 0);
+  return setupNre
        + num(part.tooling)
        + totalDxfSetup(part)
        + totalServiceSetup(part)
        + totalSpecialtyTooling(part);
 }
 function totalRunPerPart(part, qtyIdx) {
-  if (!part || !Array.isArray(part.machineOps)) return 0;
+  if (!part) return 0;
   const factor = (qtyIdx != null) ? laborDiscountFactor(part, qtyIdx) : 1;
-  return part.machineOps.reduce((s,op) => s + runCostPerPart(op, factor), 0);
+  const setups = Array.isArray(part.setups) ? part.setups : [];
+  if (setups.length > 0) {
+    let total = setups.reduce((s, st) => s + setupRunCostPerPart(st, factor), 0);
+    // v7.47: weld ops contribute additional run time on welding-kind quotes
+    if (Array.isArray(part.weldOps) && part.weldOps.length > 0) {
+      total += part.weldOps.reduce((s, op) => s + weldOpRunCostPerPart(op, factor), 0);
+    }
+    return total;
+  }
+  // Legacy path
+  const flatOps = Array.isArray(part.machineOps) ? part.machineOps : [];
+  let total = flatOps.reduce((s, op) => s + runCostPerPart(op, factor), 0);
+  if (Array.isArray(part.weldOps) && part.weldOps.length > 0) {
+    total += part.weldOps.reduce((s, op) => s + weldOpRunCostPerPart(op, factor), 0);
+  }
+  return total;
 }
 function totalDxfPerPart(part) {
   // Per-part DXF cut cost: sum of (price/piece × qty/part) for each DXF file
@@ -4268,12 +4601,16 @@ function renderNav() {
       <div class="nav-item ${v==='poArchive'||v==='archivedPo'?'active':''}" onclick="App.go('poArchive')">
         <span>PO Archive</span><span class="badge">${(state.archivedPos||[]).length}</span>
       </div>
-      <div class="nav-item ${v==='invoiceArchive'||v==='archivedInvoice'?'active':''}" onclick="App.go('invoiceArchive')">
-        <span>Invoice Archive</span><span class="badge">${(state.archivedInvoices||[]).length}</span>
-      </div>
-      <div class="nav-item ${v==='quoteArchive'||v==='archivedQuote'?'active':''}" onclick="App.go('quoteArchive')">
-        <span>Quote Archive</span><span class="badge">${(state.archivedQuotes||[]).length}</span>
-      </div>
+      ${(state.archivedInvoices||[]).length > 0 ? `
+        <div class="nav-item ${v==='invoiceArchive'||v==='archivedInvoice'?'active':''}" onclick="App.go('invoiceArchive')">
+          <span>Invoice Archive</span><span class="badge">${(state.archivedInvoices||[]).length}</span>
+        </div>
+      ` : ''}
+      ${(state.archivedQuotes||[]).length > 0 ? `
+        <div class="nav-item ${v==='quoteArchive'||v==='archivedQuote'?'active':''}" onclick="App.go('quoteArchive')">
+          <span>Quote Archive</span><span class="badge">${(state.archivedQuotes||[]).length}</span>
+        </div>
+      ` : ''}
     </div>
 
     <div class="nav-section">
@@ -4317,6 +4654,12 @@ function renderActiveQuoteNav() {
       ` : `
         <div class="nav-item" style="color:var(--text-mute);" onclick="App.addPart()">+ Add Part</div>
       `}
+      ${q.kind === 'build' ? `
+        <div class="nav-item ${t==='bom'?'active':''}" onclick="App.goTab('bom')">
+          <span>🔧 BOM Tree</span>
+          <span class="badge">${bomItemCount(q.bom && q.bom.items)}</span>
+        </div>
+      ` : ''}
       <div class="nav-item ${t==='summary'?'active':''}" onclick="App.goTab('summary')">Summary</div>
       <div class="nav-item ${t==='materials'?'active':''}" onclick="App.goTab('materials')">Material List</div>
     </div>
@@ -5388,14 +5731,26 @@ function renderReports() {
   const topMaterials = Object.entries(matCount).sort((a,b) => b[1]-a[1]).slice(0, 10);
 
   // Machine hours (setup + run, summed across all quoted parts at qty 1)
+  // v7.47: walks structured setups[] when present, falls back to flat machineOps[]
   const machineHrs = {};
-  all.forEach(q => q.parts.forEach(p => p.machineOps.forEach(op => {
-    if (!op.machine) return;
-    if (!machineHrs[op.machine]) machineHrs[op.machine] = { setup:0, run:0 };
-    machineHrs[op.machine].setup += num(op.setupHrs);
-    const rh = op.runUnit === 'min' ? num(op.runTime)/60 : num(op.runTime);
-    machineHrs[op.machine].run += rh;
-  })));
+  function addMachineHrs(machine, setupHrs, runTime, runUnit) {
+    if (!machine) return;
+    if (!machineHrs[machine]) machineHrs[machine] = { setup:0, run:0 };
+    machineHrs[machine].setup += num(setupHrs);
+    const rh = runUnit === 'min' ? num(runTime)/60 : num(runTime);
+    machineHrs[machine].run += rh;
+  }
+  all.forEach(q => q.parts.forEach(p => {
+    if (Array.isArray(p.setups) && p.setups.length > 0) {
+      p.setups.forEach(st => {
+        // setup hrs once at the setup's machine
+        addMachineHrs(st.machine, st.setupHrs, 0, 'hr');
+        (st.ops || []).forEach(op => addMachineHrs(st.machine, 0, op.runTime, op.runUnit));
+      });
+    } else if (Array.isArray(p.machineOps)) {
+      p.machineOps.forEach(op => addMachineHrs(op.machine, op.setupHrs, op.runTime, op.runUnit));
+    }
+  }));
   const topMachines = Object.entries(machineHrs)
     .map(([m, v]) => ({ machine: m, setup:v.setup, run:v.run, total:v.setup+v.run }))
     .sort((a,b) => b.total - a.total);
@@ -8867,6 +9222,50 @@ function renderCutRFQ() {
 }
 
 // ----- Customers -----
+// v7.48: Additional contacts under a customer — separate from the legacy Primary
+// fields. Used by the msg parser to match incoming RFQ emails to the right customer
+// regardless of who at the company sent it.
+function renderCustomerContactsSection(c) {
+  const additional = (c.contacts || []).filter(ct => !ct.isPrimary);
+  const cid = c.id;
+  return `
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+      <div style="font-family:var(--font-display); font-size:11px; letter-spacing:0.12em; color:var(--steel);">
+        ADDITIONAL CONTACTS <span class="text-mute" style="font-weight:normal; letter-spacing:0; font-size:11px; margin-left:6px;">${additional.length === 0 ? '— other people who email in from this customer' : '(' + additional.length + ')'}</span>
+      </div>
+      <button class="btn btn-sm" onclick="App.addContact('${cid}')">+ Add Contact</button>
+    </div>
+    ${additional.length === 0 ? `
+      <div class="text-mute small" style="padding:8px 0;">No additional contacts yet. Add one when a different person at this company emails you — the RFQ parser will auto-match them to ${esc(c.name)} next time.</div>
+    ` : `
+      <table class="tbl">
+        <thead>
+          <tr>
+            <th style="width:18%;">Name</th>
+            <th style="width:26%;">Email</th>
+            <th style="width:18%;">Phone</th>
+            <th style="width:18%;">Role</th>
+            <th>Notes</th>
+            <th class="action"></th>
+          </tr>
+        </thead>
+        <tbody>
+          ${additional.map((ct) => `
+            <tr>
+              <td>${bind({value:ct.name||'', type:'text', placeholder:'Full name', onChange:v=>{ App.setContactField(cid, ct.id, 'name', v); }})}</td>
+              <td>${bind({value:ct.email||'', type:'email', placeholder:'name@company.com', onChange:v=>{ App.setContactField(cid, ct.id, 'email', v); }})}</td>
+              <td>${bind({value:ct.phone||'', type:'tel', placeholder:'(330) 555-1234', onChange:v=>{ App.setContactField(cid, ct.id, 'phone', v); }})}</td>
+              <td>${bind({value:ct.role||'', type:'text', placeholder:'Buyer / Engineer / A/P', onChange:v=>{ App.setContactField(cid, ct.id, 'role', v); }})}</td>
+              <td>${bind({value:ct.notes||'', type:'text', placeholder:'optional', onChange:v=>{ App.setContactField(cid, ct.id, 'notes', v); }})}</td>
+              <td class="action"><button class="btn btn-sm btn-danger" onclick="App.removeContact('${cid}','${ct.id}')" title="Remove this contact">×</button></td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    `}
+  `;
+}
+
 function renderCustomers() {
   const q = (state.ui.customerSearch || '').toLowerCase().trim();
   const filtered = !q ? state.customers : state.customers.filter(c =>
@@ -8967,6 +9366,8 @@ function renderCustomersCards(list) {
               <div class="field"><label>Phone</label>${bind({label:'Phone',value:c.phone, type:'tel', onChange:v=>{c.phone=v;}})}</div>
               <div class="field"><label>Sales Rep</label>${bind({label:'Sales Rep',value:c.salesRep, onChange:v=>{c.salesRep=v;}, placeholder:'HOUSE / MJ / JMJ / MM'})}</div>
             </div>
+            <hr>
+            ${renderCustomerContactsSection(c)}
             <hr>
             <div style="font-family:var(--font-display); font-size:11px; letter-spacing:0.12em; color:var(--steel); margin-bottom:8px;">ONEDRIVE</div>
             <div class="row" style="gap:8px; align-items:end;">
@@ -9987,6 +10388,7 @@ function renderQuote() {
   if (t === 'info') body = renderQuoteInfo(q);
   else if (t === 'summary') body = renderQuoteSummary(q);
   else if (t === 'materials') body = renderMaterialList(q);
+  else if (t === 'bom') body = renderBomEditor(q);
   else if (t.startsWith('part-')) {
     const id = t.slice(5);
     const part = q.parts.find(p => p.id === id);
@@ -10463,6 +10865,218 @@ function renderCollapsibleHeader({partId, sectionKey, title, count, addLabel, ad
       </span>
       <div class="header-actions" onclick="event.stopPropagation()">
         <button class="btn btn-sm" onclick="${onClickAdd}">+ ${esc(addLabel)}</button>
+      </div>
+    </div>
+  `;
+}
+
+// v7.47: Structured Setups card — each setup has a machine + fixture + setup hrs,
+// with ops nested inside. Replaces the flat machineOps table.
+function renderSetupsCard(q, p, machineOpts) {
+  const setups = Array.isArray(p.setups) ? p.setups : [];
+  const isWelding = q.kind === 'welding';
+  const cardTitle = isWelding ? 'Machining Setups (prep for welding)' : 'Machine Setups';
+  const setupBlocks = setups.length === 0
+    ? `<div class="text-mute" style="text-align:center; padding:28px 12px;">
+         No setups yet. Each setup = one machine + fixturing (e.g. <em>OP10 — HAAS VF-2, Kurt vise</em>).
+         <div style="margin-top:10px;"><button class="btn btn-sm btn-primary" onclick="App.addSetup('${p.id}')">+ Add First Setup</button></div>
+       </div>`
+    : setups.map((st, si) => {
+        const setupHrs = num(st.setupHrs);
+        const setupRate = setupRateFor(st.machine);
+        const setupNRE = setupSetupCost(st);
+        const runPerPart = setupRunCostPerPart(st);
+        const opsTotalMin = (st.ops || []).reduce((s, op) => s + (op.runUnit === 'hr' ? num(op.runTime)*60 : num(op.runTime)), 0);
+        return `
+        <div class="setup-block">
+          <div class="setup-block-header">
+            <div style="flex:1; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+              <span class="setup-pill">${esc(st.name || 'Setup ' + (si+1))}</span>
+              <input class="setup-name-input" value="${esc(st.name||'')}" placeholder="Setup name (e.g. OP10)" oninput="App.setSetupField('${p.id}','${st.id}','name',this.value)" style="width:160px; padding:4px 8px; font-size:13px;">
+            </div>
+            <div class="header-actions">
+              <button class="btn btn-sm" title="Add operation" onclick="App.addSetupOp('${p.id}','${st.id}')">+ Op</button>
+              <button class="btn btn-sm btn-danger" title="Remove setup" onclick="App.removeSetup('${p.id}','${st.id}')">×</button>
+            </div>
+          </div>
+          <div class="setup-block-body">
+            <div class="setup-meta-grid">
+              <div>
+                <div class="label">Machine</div>
+                ${bind({value:st.machine, type:'select', options:machineOpts, placeholder:'— select —', onChange:v=>{ App.setSetupField(p.id, st.id, 'machine', v); }})}
+              </div>
+              <div>
+                <div class="label">Fixture / workhold</div>
+                ${bind({value:st.fixture||'', type:'text', placeholder:'e.g. Kurt 6" vise', onChange:v=>{ App.setSetupField(p.id, st.id, 'fixture', v); }})}
+              </div>
+              <div>
+                <div class="label">Setup hrs <span class="text-mute small">@ ${fmtMoney(setupRate)}/hr</span></div>
+                ${bind({value:st.setupHrs, type:'number', placeholder:'0', onChange:v=>{ App.setSetupField(p.id, st.id, 'setupHrs', v); }, attrs:'step="any" min="0"'})}
+              </div>
+              <div>
+                <div class="label">Setup $ <span class="text-mute small">(NRE)</span></div>
+                <div class="value-cell">${fmtMoney(setupNRE)}</div>
+              </div>
+            </div>
+            <div style="margin-top:10px;">
+              <div class="label" style="margin-bottom:6px;">Operations <span class="text-mute small">— tool changes / cuts within this setup</span></div>
+              <table class="tbl tight">
+                <thead><tr>
+                  <th>Operation</th>
+                  <th class="num" style="width:90px;">Run time</th>
+                  <th style="width:70px;">Unit</th>
+                  <th class="num" style="width:90px;">$/part</th>
+                  <th class="action"></th>
+                </tr></thead>
+                <tbody>
+                  ${(st.ops||[]).length === 0
+                    ? `<tr><td colspan="5" class="text-mute" style="text-align:center; padding:14px;">No ops yet — click "+ Op" above</td></tr>`
+                    : (st.ops||[]).map((op, oi) => `
+                        <tr>
+                          <td>${bind({value:op.description||'', type:'text', placeholder:'e.g. Face mill top, drill 6×ø.250', onChange:v=>{ App.setSetupOpField(p.id, st.id, op.id, 'description', v); }})}</td>
+                          <td class="num">${bind({value:op.runTime, type:'number', onChange:v=>{ App.setSetupOpField(p.id, st.id, op.id, 'runTime', v); }, attrs:'step="any" min="0"'})}</td>
+                          <td>${bind({value:op.runUnit||'min', type:'select', options:RUN_UNITS, onChange:v=>{ App.setSetupOpField(p.id, st.id, op.id, 'runUnit', v||'min'); }})}</td>
+                          <td class="num calc">${fmtMoney(setupOpRunCost(op, st))}</td>
+                          <td class="action"><button class="btn btn-sm btn-danger" onclick="App.removeSetupOp('${p.id}','${st.id}','${op.id}')">×</button></td>
+                        </tr>
+                      `).join('')}
+                </tbody>
+              </table>
+            </div>
+            <div class="setup-block-footer">
+              <span class="text-mute small">${fmtNum(setupHrs,2)}hr setup + ${fmtNum(opsTotalMin,1)}min run</span>
+              <strong>$/pc: ${fmtMoney(runPerPart)}</strong>
+            </div>
+          </div>
+        </div>`;
+      }).join('');
+
+  return `
+    <div class="card">
+      <div class="card-header">
+        <span>${esc(cardTitle)}</span>
+        <div class="header-actions">
+          ${setups.length > 0 ? `<button class="btn btn-sm" onclick="App.addSetup('${p.id}')">+ Add Setup</button>` : ''}
+        </div>
+      </div>
+      <div class="card-body tight">
+        ${setupBlocks}
+        <div class="setups-footer">
+          <div class="setups-footer-row">
+            <span><strong>Tooling / Fixturing ($)</strong> <span class="text-mute small">one-time</span></span>
+            <span class="num input-cell" style="max-width:140px;">${bind({label:'Tooling',value:p.tooling, type:'number', onChange:v=>{p.tooling=v;}, attrs:'step="any" min="0"'})}</span>
+          </div>
+          <div class="setups-footer-row nre">
+            <span><strong>TOTAL ONE-TIME / NRE</strong> <span class="text-mute small">setup costs + tooling + outside setup + specialty tooling + DXF setup</span></span>
+            <strong>${fmtMoney(totalNRE(p))}</strong>
+          </div>
+          <div class="setups-footer-row total">
+            <span><strong>TOTAL RUN COST PER PART</strong> ${q.kind === 'welding' ? `<span class="text-mute small">(machining only — weld run below)</span>` : ''}</span>
+            <strong>${fmtMoney(setups.reduce((s, st) => s + setupRunCostPerPart(st), 0))}</strong>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// v7.47: Weld Ops card — shown only when q.kind === 'welding'
+function renderWeldOpsCard(q, p, machineOpts) {
+  const ops = Array.isArray(p.weldOps) ? p.weldOps : [];
+  return `
+    <div class="card">
+      <div class="card-header">
+        <span>🔥 Weld Operations</span>
+        <button class="btn btn-sm" onclick="App.addWeldOp('${p.id}')">+ Add Weld Op</button>
+      </div>
+      <div class="card-body tight">
+        ${ops.length === 0
+          ? `<div class="text-mute" style="text-align:center; padding:24px;">No weld ops yet — click "+ Add Weld Op"</div>`
+          : ops.map((op, oi) => {
+              const totalMin = weldOpMinutesPerPart(op);
+              const perPart = weldOpRunCostPerPart(op);
+              return `
+              <div class="setup-block weld-block">
+                <div class="setup-block-header">
+                  <div style="flex:1; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                    <span class="setup-pill weld-pill">Weld ${oi+1}</span>
+                    <span class="text-mute small">${esc(op.process||'')} · ${esc(op.position||'')}</span>
+                  </div>
+                  <div class="header-actions">
+                    <button class="btn btn-sm btn-danger" onclick="App.removeWeldOp('${p.id}','${op.id}')">×</button>
+                  </div>
+                </div>
+                <div class="setup-block-body">
+                  <div class="weld-grid">
+                    <div>
+                      <div class="label">Process</div>
+                      ${bind({value:op.process||'MIG', type:'select', options:WELD_PROCESSES, onChange:v=>{ App.setWeldOpField(p.id, op.id, 'process', v); }})}
+                    </div>
+                    <div>
+                      <div class="label">Machine (for rate)</div>
+                      ${bind({value:op.machine||'', type:'select', options:machineOpts, placeholder:'— select —', onChange:v=>{ App.setWeldOpField(p.id, op.id, 'machine', v); }})}
+                    </div>
+                    <div>
+                      <div class="label">Position</div>
+                      ${bind({value:op.position||'1F', type:'select', options:WELD_POSITIONS, onChange:v=>{ App.setWeldOpField(p.id, op.id, 'position', v); }})}
+                    </div>
+                    <div>
+                      <div class="label">Pass count</div>
+                      ${bind({value:op.passCount||1, type:'number', onChange:v=>{ App.setWeldOpField(p.id, op.id, 'passCount', v); }, attrs:'step="1" min="1"'})}
+                    </div>
+                    <div>
+                      <div class="label">Filler</div>
+                      ${bind({value:op.filler||'', type:'text', placeholder:'ER70S-6', onChange:v=>{ App.setWeldOpField(p.id, op.id, 'filler', v); }})}
+                    </div>
+                    <div>
+                      <div class="label">Filler size</div>
+                      ${bind({value:op.fillerSize||'', type:'text', placeholder:'.035', onChange:v=>{ App.setWeldOpField(p.id, op.id, 'fillerSize', v); }})}
+                    </div>
+                    <div>
+                      <div class="label">Weld length (in/pc)</div>
+                      ${bind({value:op.lengthIn, type:'number', onChange:v=>{ App.setWeldOpField(p.id, op.id, 'lengthIn', v); }, attrs:'step="any" min="0"'})}
+                    </div>
+                    <div></div>
+                    <div>
+                      <div class="label">Prep min/pc</div>
+                      ${bind({value:op.prepMin, type:'number', onChange:v=>{ App.setWeldOpField(p.id, op.id, 'prepMin', v); }, attrs:'step="any" min="0"'})}
+                    </div>
+                    <div>
+                      <div class="label">Weld min/pc <span class="text-mute small">(per pass)</span></div>
+                      ${bind({value:op.weldMin, type:'number', onChange:v=>{ App.setWeldOpField(p.id, op.id, 'weldMin', v); }, attrs:'step="any" min="0"'})}
+                    </div>
+                    <div>
+                      <div class="label">Cleanup min/pc</div>
+                      ${bind({value:op.cleanupMin, type:'number', onChange:v=>{ App.setWeldOpField(p.id, op.id, 'cleanupMin', v); }, attrs:'step="any" min="0"'})}
+                    </div>
+                    <div>
+                      <div class="label">Total min/pc <span class="text-mute small">(prep + weld×passes + cleanup)</span></div>
+                      <div class="value-cell">${fmtNum(totalMin,1)} min</div>
+                    </div>
+                    <div>
+                      <div class="label">Cert level</div>
+                      ${bind({value:op.certLevel||'', type:'text', placeholder:'AWS D1.1, ASME Sec IX…', onChange:v=>{ App.setWeldOpField(p.id, op.id, 'certLevel', v); }})}
+                    </div>
+                    <div style="grid-column: span 2;">
+                      <div class="label">WPS / procedure ref</div>
+                      ${bind({value:op.certProcedure||'', type:'text', placeholder:'WPS-001', onChange:v=>{ App.setWeldOpField(p.id, op.id, 'certProcedure', v); }})}
+                    </div>
+                    <div>
+                      <div class="label">$/pc</div>
+                      <div class="value-cell"><strong>${fmtMoney(perPart)}</strong></div>
+                    </div>
+                  </div>
+                </div>
+              </div>`;
+            }).join('')
+        }
+        ${ops.length > 0 ? `
+          <div class="setups-footer">
+            <div class="setups-footer-row total">
+              <span><strong>TOTAL WELD RUN PER PART</strong></span>
+              <strong>${fmtMoney(totalWeldRunPerPart(p))}</strong>
+            </div>
+          </div>` : ''}
       </div>
     </div>
   `;
@@ -10992,59 +11606,8 @@ function renderPartEditor(q, p) {
       <span class="label">Production</span>
       <span class="hint-text">how we're making it</span>
     </div>
-    <div class="card">
-      <div class="card-header">
-        <span>Machine Time</span>
-        <button class="btn btn-sm" onclick="App.addMachineOp('${p.id}')">+ Add Operation</button>
-      </div>
-      <div class="card-body tight">
-        <table class="tbl">
-          <thead><tr>
-            <th style="width:24%;">Machine / Service</th>
-            <th class="num">Setup Rate</th>
-            <th class="num">Setup hrs</th>
-            <th class="num">Setup $</th>
-            <th class="num">Run Rate</th>
-            <th class="num">Run time</th>
-            <th>Unit</th>
-            <th class="num">Run $/part</th>
-            <th class="action"></th>
-          </tr></thead>
-          <tbody>
-            ${p.machineOps.length === 0 ? `<tr><td colspan="9" class="text-mute" style="text-align:center; padding:24px;">No operations yet — click "Add Operation"</td></tr>` :
-            p.machineOps.map((op, i) => `
-              <tr>
-                <td>${bind({value:op.machine, type:'select', options:machineOpts, placeholder:'— select —', onChange:v=>{p.machineOps[i].machine=v;}})}</td>
-                <td class="num calc">${fmtMoney(setupRateFor(op.machine))}</td>
-                <td class="num">${bind({label:(op.machine||'machine')+' setup hrs',value:op.setupHrs, type:'number', onChange:v=>{p.machineOps[i].setupHrs=v;}, attrs:'step="any" min="0"'})}</td>
-                <td class="num calc">${fmtMoney(setupCost(op))}</td>
-                <td class="num calc">${fmtMoney(runRateFor(op.machine))}</td>
-                <td class="num">${bind({label:(op.machine||'machine')+' run time',value:op.runTime, type:'number', onChange:v=>{p.machineOps[i].runTime=v;}, attrs:'step="any" min="0"'})}</td>
-                <td>${bind({value:op.runUnit, type:'select', options:RUN_UNITS, onChange:v=>{p.machineOps[i].runUnit=v||'min';}})}</td>
-                <td class="num calc">${fmtMoney(runCostPerPart(op))}</td>
-                <td class="action"><button class="btn btn-sm btn-danger" onclick="App.removeMachineOp('${p.id}',${i})">×</button></td>
-              </tr>
-            `).join('')}
-            <tr>
-              <td colspan="3"><strong>Tooling / Fixturing ($)</strong></td>
-              <td class="num input-cell">${bind({label:'Tooling',value:p.tooling, type:'number', onChange:v=>{p.tooling=v;}, attrs:'step="any" min="0"'})}</td>
-              <td colspan="5"></td>
-            </tr>
-            <tr class="nre">
-              <td colspan="3"><strong>TOTAL ONE-TIME / NRE</strong></td>
-              <td class="num"><strong>${fmtMoney(totalNRE(p))}</strong></td>
-              <td colspan="3"></td>
-              <td colspan="2" class="text-mute small">setup costs + tooling</td>
-            </tr>
-            <tr class="total">
-              <td colspan="7"><strong>TOTAL RUN COST PER PART</strong></td>
-              <td class="num"><strong>${fmtMoney(totalRunPerPart(p))}</strong></td>
-              <td></td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
+    ${renderSetupsCard(q, p, machineOpts)}
+    ${q.kind === 'welding' ? renderWeldOpsCard(q, p, machineOpts) : ''}
 
     ${renderOutsideServicesCard(q, p)}
 
@@ -11158,6 +11721,122 @@ function renderQuoteSummary(q) {
           <tr class="unit"><td><strong>QUOTE TOTAL</strong></td>${totals.map(t => `<td class="num"><strong>${fmtMoney(t)}</strong></td>`).join('')}</tr>
         </tbody>
       </table></div>
+    </div>
+  `;
+}
+
+// v7.47: BOM tree editor for machine-build quotes
+const BOM_SOURCES = [
+  { id: 'purchased', label: 'Purchased',     color: '#1E5BAE' },
+  { id: 'machined',  label: 'Machined',      color: '#7A8C3C' },
+  { id: 'subassy',   label: 'Sub-assembly',  color: '#C56B1C' },
+  { id: 'csm',       label: 'Customer-sup.', color: '#9333EA' },
+];
+function renderBomItemRow(item, depth, pathIds) {
+  const isSubassy = item.source === 'subassy';
+  const total = bomItemTotal(item);
+  const hasChildren = Array.isArray(item.children) && item.children.length > 0;
+  const path = pathIds.concat(item.id).join('/');
+  // Closure-captured path threaded into each bind callback
+  const setField = (field) => (v) => App.bomSetField(path, field, v);
+  return `
+    <div class="bom-row ${isSubassy?'bom-subassy':''}" style="${depth > 0 ? 'padding-left:' + (depth * 14 + 8) + 'px;' : ''}">
+      <div>${isSubassy ? `<button class="bom-toggle" title="Add child item" onclick="App.bomAddChild('${path}')">+</button>` : ''}</div>
+      <div>${bind({value:item.partNum||'', type:'text', placeholder:'Part #', onChange:setField('partNum')})}</div>
+      <div>${bind({value:item.description||'', type:'text', placeholder:isSubassy?'Sub-assembly name':'Description', onChange:setField('description')})}</div>
+      <div>${bind({value:item.qty, type:'number', onChange:setField('qty'), attrs:'step="any" min="0"'})}</div>
+      <div>${bind({value:item.source||'purchased', type:'select', options:BOM_SOURCES.map(s=>({value:s.id,label:s.label})), onChange:setField('source')})}</div>
+      <div>${isSubassy ? '' : bind({value:item.costEach, type:'number', onChange:setField('costEach'), attrs:'step="any" min="0"'})}</div>
+      <div class="bom-cost"><strong>${fmtMoney(total)}</strong></div>
+      <div><button class="btn btn-sm btn-danger" onclick="App.bomRemove('${path}')">×</button></div>
+    </div>
+    ${hasChildren ? `<div class="bom-children">${item.children.map(c => renderBomItemRow(c, depth+1, pathIds.concat(item.id))).join('')}</div>` : ''}
+  `;
+}
+function renderBomEditor(q) {
+  if (!q.bom) q.bom = newQuoteBom();
+  const items = q.bom.items || [];
+  const subtotal = bomTotal(q);
+  const assembly = bomAssemblyCost(q);
+  const grand = bomGrandTotal(q);
+  const machineOpts = state.settings.rates.map(r => r.name);
+  return `
+    <div class="page-header" style="border:none; padding-bottom:0;">
+      <div>
+        <div class="page-subtitle">Bill of Materials — machine build · ${bomItemCount(items)} item${bomItemCount(items)!==1?'s':''}</div>
+      </div>
+      <div class="header-actions">
+        <button class="btn btn-sm" onclick="App.bomAddItem('purchased')">+ Purchased</button>
+        <button class="btn btn-sm" onclick="App.bomAddItem('machined')">+ Machined</button>
+        <button class="btn btn-sm" onclick="App.bomAddItem('subassy')">+ Sub-assembly</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><span>BOM Items</span></div>
+      <div class="card-body" style="padding:0;">
+        <div class="bom-tree">
+          <div class="bom-row bom-header">
+            <div></div>
+            <div>Part #</div>
+            <div>Description</div>
+            <div style="text-align:right;">Qty</div>
+            <div>Source</div>
+            <div style="text-align:right;">$ each</div>
+            <div style="text-align:right;">Extended</div>
+            <div></div>
+          </div>
+          ${items.length === 0
+            ? `<div class="text-mute" style="text-align:center; padding:36px 12px;">
+                 No BOM items yet. Add purchased parts, machined parts, or sub-assemblies above.
+                 Sub-assemblies can contain child items — click the + button next to a sub-assembly to nest items inside.
+               </div>`
+            : items.map(it => renderBomItemRow(it, 0, [])).join('')
+          }
+        </div>
+        <div class="bom-footer">
+          <span>BOM materials subtotal</span>
+          <strong>${fmtMoney(subtotal)}</strong>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><span>Assembly Labor</span></div>
+      <div class="card-body">
+        <div class="form-grid cols-3">
+          <div class="field">
+            <label>Assembly machine / station (for rate)</label>
+            ${bind({value:q.bom.assemblyMachine||'', type:'select', options:machineOpts, placeholder:'— select —', onChange:v=>{ q.bom.assemblyMachine = v; }})}
+          </div>
+          <div class="field">
+            <label>Assembly hours <span class="text-mute small">@ ${fmtMoney(runRateFor(q.bom.assemblyMachine))}/hr</span></label>
+            ${bind({value:q.bom.assemblyHrs, type:'number', onChange:v=>{ q.bom.assemblyHrs = v; }, attrs:'step="any" min="0"'})}
+          </div>
+          <div class="field">
+            <label>Assembly cost</label>
+            <div class="value-cell" style="padding:8px; font-family:var(--font-mono); font-weight:700; color:var(--navy);">${fmtMoney(assembly)}</div>
+          </div>
+          <div class="field" style="grid-column:span 3;">
+            <label>BOM notes</label>
+            ${bind({value:q.bom.notes||'', type:'textarea', onChange:v=>{ q.bom.notes = v; }, placeholder:'Sourcing notes, alternate vendors, kit instructions…'})}
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header" style="background:var(--green); color:white;">
+        <span>BUILD COST TOTAL</span>
+        <strong style="font-family:var(--font-mono); font-size:18px;">${fmtMoney(grand)}</strong>
+      </div>
+      <div class="card-body">
+        <div class="form-grid cols-3">
+          <div class="field"><label>Materials</label><div style="font-family:var(--font-mono); font-size:16px; color:var(--navy);"><strong>${fmtMoney(subtotal)}</strong></div></div>
+          <div class="field"><label>Assembly labor</label><div style="font-family:var(--font-mono); font-size:16px; color:var(--navy);"><strong>${fmtMoney(assembly)}</strong></div></div>
+          <div class="field"><label>Total cost</label><div style="font-family:var(--font-mono); font-size:16px; color:var(--green);"><strong>${fmtMoney(grand)}</strong></div></div>
+        </div>
+        <div class="hint" style="margin-top:8px;">
+          ℹ️ This is the build-cost calculation. Markup, lead time, and customer-facing quote total are configured on the Summary tab.
+        </div>
+      </div>
     </div>
   `;
 }
@@ -11780,7 +12459,11 @@ function renderPartTemplateModal() {
               <thead><tr><th>Part #</th><th>Description</th><th>Material</th><th>Customer</th><th>Date</th><th></th></tr></thead>
               <tbody>
                 ${results.map(r => {
-                  const machineNames = r.part.machineOps.map(o => o.machine).filter(Boolean).join(', ');
+                  // v7.47: pull machine names from setups[] first, fall back to flat machineOps[]
+                  const setups = Array.isArray(r.part.setups) ? r.part.setups : [];
+                  const machineNames = setups.length > 0
+                    ? setups.map(s => s.machine).filter(Boolean).join(', ')
+                    : (r.part.machineOps || []).map(o => o.machine).filter(Boolean).join(', ');
                   return `
                     <tr>
                       <td><strong>${esc(r.part.partNum||'—')}</strong>${r.part.customerPN?`<div class="small text-mute">CPN: ${esc(r.part.customerPN)}</div>`:''}</td>
@@ -12279,19 +12962,59 @@ function msgParseEmailFields(text) {
   return { sender, senderEmail, subject, sentDate, body };
 }
 
+// v7.48: generic mail-provider domains shouldn't trigger a "domain match" — those
+// are personal/shared inboxes, not company identifiers. Only matters for Strategy 1b.
+const GENERIC_EMAIL_DOMAINS = new Set([
+  'gmail.com', 'googlemail.com', 'yahoo.com', 'ymail.com', 'rocketmail.com',
+  'outlook.com', 'hotmail.com', 'live.com', 'msn.com',
+  'icloud.com', 'me.com', 'mac.com',
+  'aol.com', 'protonmail.com', 'proton.me', 'pm.me',
+  'comcast.net', 'sbcglobal.net', 'verizon.net', 'att.net', 'cox.net',
+  'mail.com', 'gmx.com', 'gmx.net',
+  'fastmail.com', 'fastmail.fm', 'zoho.com',
+]);
+function isGenericEmailDomain(domain) {
+  return !domain || GENERIC_EMAIL_DOMAINS.has(domain.toLowerCase());
+}
+
 function msgFuzzyMatchCustomer(senderName, senderEmail, customers) {
   const matches = [];
 
-  // Strategy 1: email domain match (highest confidence)
-  if (senderEmail) {
-    const domain = (senderEmail.split('@')[1] || '').toLowerCase();
-    if (domain) {
+  // Strategy 1: exact email match against any contact under any customer (highest confidence)
+  // v7.48: walks customer.contacts[] (new multi-contact array) AND falls back to c.email
+  const senderLower = (senderEmail || '').toLowerCase().trim();
+  if (senderLower) {
+    customers.forEach(c => {
+      const allEmails = [];
+      if (c.email) allEmails.push({ email: c.email.toLowerCase().trim(), label: 'primary' });
+      if (Array.isArray(c.contacts)) {
+        c.contacts.forEach(ct => {
+          if (ct.email) allEmails.push({ email: ct.email.toLowerCase().trim(), label: ct.name || ct.role || 'contact' });
+        });
+      }
+      // Exact email = ~99
+      const exact = allEmails.find(e => e.email === senderLower);
+      if (exact) {
+        matches.push({ customer: c, score: 99, reason: `Email matches ${esc(exact.label)} (${exact.email})` });
+        return;  // already a perfect hit for this customer, skip domain fallback
+      }
+    });
+  }
+
+  // Strategy 1b: email domain match against any stored email (high confidence)
+  if (senderLower) {
+    const domain = (senderLower.split('@')[1] || '').toLowerCase();
+    if (domain && !isGenericEmailDomain(domain)) {
       customers.forEach(c => {
-        if (c.email) {
-          const cdomain = (c.email.split('@')[1] || '').toLowerCase();
-          if (cdomain === domain) {
-            matches.push({ customer: c, score: 95, reason: `Email domain @${domain}` });
-          }
+        // Skip if we already pushed a perfect-match for this customer above
+        if (matches.some(m => m.customer.id === c.id && m.score >= 99)) return;
+        const allDomains = new Set();
+        if (c.email) allDomains.add((c.email.split('@')[1] || '').toLowerCase());
+        if (Array.isArray(c.contacts)) {
+          c.contacts.forEach(ct => { if (ct.email) allDomains.add((ct.email.split('@')[1] || '').toLowerCase()); });
+        }
+        if (allDomains.has(domain)) {
+          matches.push({ customer: c, score: 95, reason: `Email domain @${domain}` });
         }
       });
     }
@@ -12335,7 +13058,7 @@ function msgFuzzyMatchCustomer(senderName, senderEmail, customers) {
 }
 
 function msgExtractPartHints(body) {
-  const hints = { qty: null, description: null, dimensions: null };
+  const hints = { qty: null, description: null, dimensions: null, partNumbers: [] };
   if (!body) return hints;
 
   // Quantity: NN pcs. / NN pieces / NN ea / qty: NN
@@ -12348,6 +13071,9 @@ function msgExtractPartHints(body) {
   const dimRegex = /(\d+(?:\/\d+)?(?:\.\d+)?["']?\s*[Xx]\s*){2,}\d+(?:\/\d+)?(?:\.\d+)?["']?/;
   const dimMatch = body.match(dimRegex);
   if (dimMatch) hints.dimensions = dimMatch[0].replace(/\s+/g, ' ').trim();
+
+  // v7.48: part numbers — collect every plausible candidate, dedupe, rank by signal strength
+  hints.partNumbers = msgExtractPartNumbers(body);
 
   // Description — find the line containing the qty + dimensions
   const lines = body.split(/[\r\n]+/);
@@ -12364,6 +13090,52 @@ function msgExtractPartHints(body) {
     }
   }
   return hints;
+}
+
+// v7.48: part-number extraction. We look for several patterns:
+//   1. Labeled: "Part #", "P/N", "PN:", "Item #", "Drawing #/Dwg", "REV"
+//   2. Tabular: "PartNum" / "Part Number" column-style rows
+//   3. Bare alphanumeric tokens that LOOK like part numbers (4+ chars, mix of letters/digits/dashes)
+// Returns deduped array of { value, label, confidence: 'high'|'medium'|'low' }, max 10.
+function msgExtractPartNumbers(body) {
+  if (!body) return [];
+  const found = [];
+  const seen = new Set();
+  function push(value, label, confidence) {
+    // Trim trailing punctuation (periods, commas, slashes) that often hitch a ride from the regex
+    const v = String(value || '').trim().replace(/[.,;:!?\/\-_]+$/, '');
+    if (!v || v.length < 3 || v.length > 40) return;
+    // Reject pure-numeric tokens shorter than 4 digits — they're probably qtys, not part numbers
+    if (/^\d+$/.test(v) && v.length < 4) return;
+    const key = v.toUpperCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    found.push({ value: v, label, confidence });
+  }
+  // Labeled patterns (high confidence)
+  const labeled = [
+    { re: /(?:^|\b)(?:part\s*(?:no\.?|#|num(?:ber)?|nbr))\s*[:#.]?\s*([A-Z0-9][A-Z0-9\-_\/\.]{2,30})/gi, label: 'Part #' },
+    { re: /(?:^|\b)(?:p\/n|pn)\s*[:#.]?\s*([A-Z0-9][A-Z0-9\-_\/\.]{2,30})/gi, label: 'P/N' },
+    { re: /(?:^|\b)(?:drawing|dwg)\s*(?:no\.?|#|num(?:ber)?)?\s*[:#.]?\s*([A-Z0-9][A-Z0-9\-_\/\.]{2,30})/gi, label: 'Drawing #' },
+    { re: /(?:^|\b)(?:item)\s*(?:no\.?|#|num(?:ber)?)?\s*[:#.]?\s*([A-Z0-9][A-Z0-9\-_\/\.]{2,30})/gi, label: 'Item #' },
+    { re: /(?:^|\b)(?:customer\s*part|cust\.?\s*pn|cust\.?\s*part)\s*[:#.]?\s*([A-Z0-9][A-Z0-9\-_\/\.]{2,30})/gi, label: 'Customer P/N' },
+    { re: /(?:^|\b)(?:model)\s*(?:no\.?|#|num(?:ber)?)?\s*[:#.]?\s*([A-Z0-9][A-Z0-9\-_\/\.]{2,30})/gi, label: 'Model #' },
+  ];
+  for (const { re, label } of labeled) {
+    re.lastIndex = 0;
+    let m;
+    while ((m = re.exec(body)) !== null) push(m[1], label, 'high');
+  }
+  // Filename references in attachments list — common in RFQ emails: "BRACKET-1234-A.pdf"
+  // Strip the extension and the surrounding noise so the bare stem makes it into the candidates.
+  const fileRe = /\b([A-Z][A-Z0-9\-_]{3,30})\.(?:pdf|dxf|dwg|step|stp|igs|sldprt)\b/gi;
+  let fm;
+  while ((fm = fileRe.exec(body)) !== null) push(fm[1], 'Attachment filename', 'medium');
+  // Revision-tagged tokens — "BRACKET-1234 Rev A" suggests the token before Rev is a part #
+  const revRe = /\b([A-Z0-9][A-Z0-9\-_\/\.]{3,30})\s+(?:rev|revision)\s*[A-Z0-9]/gi;
+  let rm;
+  while ((rm = revRe.exec(body)) !== null) push(rm[1], 'Rev-tagged token', 'medium');
+  return found.slice(0, 10);
 }
 
 // =================================================================
@@ -12434,16 +13206,38 @@ function renderMsgImportModal() {
   }).join('');
 
   // Part hints section
-  const hasHints = partHints.qty || partHints.description || partHints.dimensions;
+  const pnList = Array.isArray(partHints.partNumbers) ? partHints.partNumbers : [];
+  const hasHints = partHints.qty || partHints.description || partHints.dimensions || pnList.length > 0;
+  const selectedPN = (m.selectedPartNumber != null && pnList[m.selectedPartNumber]) ? pnList[m.selectedPartNumber].value : '';
+  const pnChips = pnList.length === 0 ? '' : `
+      <div style="margin-bottom:8px;">
+        <div class="text-mute small" style="margin-bottom:4px;">Part numbers detected — click one to use as the new part's Part #:</div>
+        <div style="display:flex; flex-wrap:wrap; gap:6px;">
+          ${pnList.map((pn, i) => `
+            <button class="chip ${m.selectedPartNumber === i ? 'chip-selected' : ''}"
+                    onclick="App.msgPickPartNumber(${i})"
+                    title="${esc(pn.label)} (${pn.confidence} confidence)"
+                    style="cursor:pointer; padding:4px 10px; border:1px solid ${pn.confidence==='high'?'var(--navy)':'var(--line-dark)'}; background:${m.selectedPartNumber === i ? 'var(--navy)' : pn.confidence==='high' ? '#EAF1FA' : 'var(--bg)'}; color:${m.selectedPartNumber === i ? 'white' : 'inherit'};">
+              <span class="mono" style="font-size:12px;">${esc(pn.value)}</span>
+              <span style="font-size:10px; opacity:0.7; margin-left:4px;">${esc(pn.label)}</span>
+            </button>
+          `).join('')}
+        </div>
+      </div>
+  `;
   const partSection = !hasHints ? `
-    <div class="text-mute small">No clear quantity/dimensions detected in the email body. You can still create a part manually below, or copy text from the body preview.</div>
+    <div class="text-mute small">No part numbers, quantities, or dimensions detected in the email body. You can still create a part manually below, or copy text from the body preview.</div>
     <button class="btn btn-sm" style="margin-top:6px;" onclick="App.msgAddBlankPart()">+ Add blank part</button>
   ` : `
-    <div style="background:var(--bg); border:1px solid var(--line); padding:10px 12px; border-radius:2px; margin-bottom:8px;">
-      ${partHints.qty != null ? `<div><strong>Qty:</strong> ${partHints.qty}</div>` : ''}
-      ${partHints.dimensions ? `<div><strong>Dimensions:</strong> <span class="mono">${esc(partHints.dimensions)}</span></div>` : ''}
-      ${partHints.description ? `<div style="margin-top:4px;"><strong>Description:</strong> ${esc(partHints.description)}</div>` : ''}
-    </div>
+    ${pnChips}
+    ${(partHints.qty != null || partHints.dimensions || partHints.description) ? `
+      <div style="background:var(--bg); border:1px solid var(--line); padding:10px 12px; border-radius:2px; margin-bottom:8px;">
+        ${selectedPN ? `<div><strong>Part #:</strong> <span class="mono">${esc(selectedPN)}</span></div>` : ''}
+        ${partHints.qty != null ? `<div><strong>Qty:</strong> ${partHints.qty}</div>` : ''}
+        ${partHints.dimensions ? `<div><strong>Dimensions:</strong> <span class="mono">${esc(partHints.dimensions)}</span></div>` : ''}
+        ${partHints.description ? `<div style="margin-top:4px;"><strong>Description:</strong> ${esc(partHints.description)}</div>` : ''}
+      </div>
+    ` : selectedPN ? `<div style="background:var(--bg); border:1px solid var(--line); padding:10px 12px; border-radius:2px; margin-bottom:8px;"><strong>Part #:</strong> <span class="mono">${esc(selectedPN)}</span></div>` : ''}
     <button class="btn btn-sm btn-primary" onclick="App.msgApplyPart()">+ Create part with these values</button>
     <button class="btn btn-sm" onclick="App.msgAddBlankPart()">+ Add blank part instead</button>
   `;
@@ -12993,10 +13787,9 @@ const App = {
       copy.quoteNum = (orig.quoteNum || '') + ' (copy)';
       copy.date = new Date().toISOString().slice(0,10);
       copy.status = 'draft';
-      copy.parts.forEach(p => {
-        p.id = uid();
-        p.machineOps.forEach(o => o.id = uid());
-      });
+      copy.parts.forEach(reidPartInPlace);
+      // v7.47: re-ID BOM tree on duplicate so children get fresh ids
+      if (copy.bom && Array.isArray(copy.bom.items)) copy.bom.items.forEach(reidBomItemInPlace);
       s.quotes.unshift(copy);
       logActivity('Duplicated quote', orig.quoteNum, '→ ' + copy.quoteNum);
       s.ui.view = 'quote'; s.ui.activeQuoteId = copy.id; s.ui.activeQuoteTab = 'info';
@@ -13029,11 +13822,7 @@ const App = {
       if (!cur || !src) return;
       const cloned = JSON.parse(JSON.stringify(src));
       // Preserve identity fields on the current quote
-      cur.parts = (cloned.parts || []).map(p => {
-        p.id = uid();
-        if (Array.isArray(p.machineOps)) p.machineOps.forEach(o => { o.id = uid(); });
-        return p;
-      });
+      cur.parts = (cloned.parts || []).map(p => { reidPartInPlace(p); return p; });
       cur.notes = cloned.notes || '';
       cur.qtyTiers = cloned.qtyTiers;
       cur.leadTime = cloned.leadTime || cur.leadTime;
@@ -13057,11 +13846,7 @@ const App = {
       const src = s.quotes.find(q => q.id === sourceId);
       if (!cur || !src) return;
       if (!Array.isArray(cur.parts)) cur.parts = [];
-      const cloned = JSON.parse(JSON.stringify(src.parts || [])).map(p => {
-        p.id = uid();
-        if (Array.isArray(p.machineOps)) p.machineOps.forEach(o => { o.id = uid(); });
-        return p;
-      });
+      const cloned = JSON.parse(JSON.stringify(src.parts || [])).map(p => { reidPartInPlace(p); return p; });
       cur.parts.push(...cloned);
       logActivity('Appended parts from quote', src.quoteNum || sourceId, `+${cloned.length} part(s) → ` + (cur.quoteNum || currentId));
     });
@@ -13099,6 +13884,28 @@ const App = {
     update(s => { s.customers = s.customers.filter(c => c.id !== id); });
   },
 
+  // v7.48: multi-contact customer handlers
+  addContact(customerId) {
+    update(s => {
+      const c = s.customers.find(x => x.id === customerId); if (!c) return;
+      if (!Array.isArray(c.contacts)) c.contacts = [];
+      c.contacts.push(newContact());
+    });
+  },
+  removeContact(customerId, contactId) {
+    update(s => {
+      const c = s.customers.find(x => x.id === customerId); if (!c) return;
+      c.contacts = (c.contacts || []).filter(ct => ct.id !== contactId);
+    });
+  },
+  setContactField(customerId, contactId, field, value) {
+    update(s => {
+      const c = s.customers.find(x => x.id === customerId); if (!c) return;
+      const ct = (c.contacts || []).find(x => x.id === contactId); if (!ct) return;
+      ct[field] = value;
+    });
+  },
+
   addPart() {
     update(s => {
       const q = getActiveQuote(); if (!q) return;
@@ -13112,7 +13919,7 @@ const App = {
       const copy = JSON.parse(JSON.stringify(orig));
       copy.id = uid();
       copy.partNum = (orig.partNum || '') + ' (copy)';
-      copy.machineOps.forEach(o => o.id = uid());
+      reidPartInPlace(copy);
       const idx = q.parts.findIndex(x => x.id === partId);
       q.parts.splice(idx + 1, 0, copy);
       s.ui.activeQuoteTab = 'part-' + copy.id;
@@ -13178,6 +13985,136 @@ const App = {
       const q = getActiveQuote(); if (!q) return;
       const p = q.parts.find(x => x.id === partId); if (!p) return;
       p.machineOps.splice(idx, 1);
+    });
+  },
+
+  // v7.47: Structured setups
+  addSetup(partId) {
+    update(s => {
+      const q = getActiveQuote(); if (!q) return;
+      const p = q.parts.find(x => x.id === partId); if (!p) return;
+      if (!Array.isArray(p.setups)) p.setups = [];
+      const st = newSetup(p.setups.length + 1);
+      st.ops.push(newSetupOp()); // start with one blank op for convenience
+      p.setups.push(st);
+    });
+  },
+  removeSetup(partId, setupId) {
+    if (!confirm('Remove this setup and all its operations?')) return;
+    update(s => {
+      const q = getActiveQuote(); if (!q) return;
+      const p = q.parts.find(x => x.id === partId); if (!p) return;
+      p.setups = (p.setups || []).filter(st => st.id !== setupId);
+    });
+  },
+  setSetupField(partId, setupId, field, value) {
+    update(s => {
+      const q = getActiveQuote(); if (!q) return;
+      const p = q.parts.find(x => x.id === partId); if (!p) return;
+      const st = (p.setups || []).find(x => x.id === setupId); if (!st) return;
+      st[field] = value;
+    });
+  },
+  addSetupOp(partId, setupId) {
+    update(s => {
+      const q = getActiveQuote(); if (!q) return;
+      const p = q.parts.find(x => x.id === partId); if (!p) return;
+      const st = (p.setups || []).find(x => x.id === setupId); if (!st) return;
+      if (!Array.isArray(st.ops)) st.ops = [];
+      st.ops.push(newSetupOp());
+    });
+  },
+  removeSetupOp(partId, setupId, opId) {
+    update(s => {
+      const q = getActiveQuote(); if (!q) return;
+      const p = q.parts.find(x => x.id === partId); if (!p) return;
+      const st = (p.setups || []).find(x => x.id === setupId); if (!st) return;
+      st.ops = (st.ops || []).filter(op => op.id !== opId);
+    });
+  },
+  setSetupOpField(partId, setupId, opId, field, value) {
+    update(s => {
+      const q = getActiveQuote(); if (!q) return;
+      const p = q.parts.find(x => x.id === partId); if (!p) return;
+      const st = (p.setups || []).find(x => x.id === setupId); if (!st) return;
+      const op = (st.ops || []).find(x => x.id === opId); if (!op) return;
+      op[field] = value;
+    });
+  },
+
+  // v7.47: BOM tree (machine-build quotes) — path is slash-joined ids: "a/b/c"
+  _bomFindAt(items, ids) {
+    if (!Array.isArray(items) || ids.length === 0) return { parent: items, item: null, idx: -1 };
+    const id = ids[0];
+    const idx = items.findIndex(it => it.id === id);
+    if (idx < 0) return { parent: items, item: null, idx: -1 };
+    if (ids.length === 1) return { parent: items, item: items[idx], idx };
+    if (!Array.isArray(items[idx].children)) items[idx].children = [];
+    return App._bomFindAt(items[idx].children, ids.slice(1));
+  },
+  bomAddItem(source) {
+    update(s => {
+      const q = getActiveQuote(); if (!q) return;
+      if (!q.bom) q.bom = newQuoteBom();
+      q.bom.items.push(newBomItem({ source }));
+    });
+  },
+  bomAddChild(path) {
+    update(s => {
+      const q = getActiveQuote(); if (!q) return;
+      if (!q.bom) q.bom = newQuoteBom();
+      const ids = path.split('/');
+      const found = App._bomFindAt(q.bom.items, ids);
+      if (!found.item) return;
+      if (!Array.isArray(found.item.children)) found.item.children = [];
+      found.item.children.push(newBomItem({ source: 'purchased' }));
+    });
+  },
+  bomSetField(path, field, value) {
+    update(s => {
+      const q = getActiveQuote(); if (!q) return;
+      if (!q.bom) q.bom = newQuoteBom();
+      const ids = path.split('/');
+      const found = App._bomFindAt(q.bom.items, ids);
+      if (!found.item) return;
+      found.item[field] = value;
+    });
+  },
+  bomRemove(path) {
+    if (!confirm('Remove this BOM item and any children?')) return;
+    update(s => {
+      const q = getActiveQuote(); if (!q) return;
+      if (!q.bom) return;
+      const ids = path.split('/');
+      const found = App._bomFindAt(q.bom.items, ids);
+      if (!found.item) return;
+      found.parent.splice(found.idx, 1);
+    });
+  },
+
+  // v7.47: Weld ops (welding-kind quotes)
+  addWeldOp(partId) {
+    update(s => {
+      const q = getActiveQuote(); if (!q) return;
+      const p = q.parts.find(x => x.id === partId); if (!p) return;
+      if (!Array.isArray(p.weldOps)) p.weldOps = [];
+      p.weldOps.push(newWeldOp());
+    });
+  },
+  removeWeldOp(partId, opId) {
+    if (!confirm('Remove this weld operation?')) return;
+    update(s => {
+      const q = getActiveQuote(); if (!q) return;
+      const p = q.parts.find(x => x.id === partId); if (!p) return;
+      p.weldOps = (p.weldOps || []).filter(op => op.id !== opId);
+    });
+  },
+  setWeldOpField(partId, opId, field, value) {
+    update(s => {
+      const q = getActiveQuote(); if (!q) return;
+      const p = q.parts.find(x => x.id === partId); if (!p) return;
+      const op = (p.weldOps || []).find(x => x.id === opId); if (!op) return;
+      op[field] = value;
     });
   },
 
@@ -13983,10 +14920,18 @@ const App = {
     update(s => {
       const q = getActiveQuote(); if (!q) return;
       const target = q.parts.find(p => p.id === targetPartId); if (!target) return;
-      // Copy stock setup, machine ops, outside services, material costs, tooling, qtyTiers
+      // Copy stock setup, machine ops/setups, outside services, material costs, tooling, qtyTiers
       target.stock = JSON.parse(JSON.stringify(srcPart.stock));
-      target.machineOps = JSON.parse(JSON.stringify(srcPart.machineOps));
+      target.machineOps = JSON.parse(JSON.stringify(srcPart.machineOps || []));
       target.machineOps.forEach(o => o.id = uid());
+      // v7.47: copy structured setups + weld ops with fresh ids
+      target.setups = JSON.parse(JSON.stringify(srcPart.setups || []));
+      target.setups.forEach(st => {
+        st.id = uid();
+        if (Array.isArray(st.ops)) st.ops.forEach(op => op.id = uid());
+      });
+      target.weldOps = JSON.parse(JSON.stringify(srcPart.weldOps || []));
+      target.weldOps.forEach(op => op.id = uid());
       target.outsideServices = JSON.parse(JSON.stringify(srcPart.outsideServices));
       target.materialCost = JSON.parse(JSON.stringify(srcPart.materialCost));
       target.tooling = srcPart.tooling;
@@ -16287,6 +17232,14 @@ Online Metals,Brass,Round,1.25 dia,per_lb,5.20`;
       render();
     }
   },
+  // v7.48: user picks one of the extracted part numbers to apply on commit
+  msgPickPartNumber(idx) {
+    const m = state.ui.msgImport;
+    if (!m || !m.parsed) return;
+    // Toggle off if clicking the already-selected chip
+    m.selectedPartNumber = (m.selectedPartNumber === idx) ? null : idx;
+    renderMsgImportModal();
+  },
   msgApplyPart() {
     const m = state.ui.msgImport;
     if (!m || !m.parsed) return;
@@ -16297,6 +17250,14 @@ Online Metals,Brass,Round,1.25 dia,per_lb,5.20`;
       const quote = s.quotes.find(x => x.id === q.id);
       if (!quote) return;
       const p = newPart();
+      // v7.48: selected part number from the chip row, if any
+      const pnList = Array.isArray(hints.partNumbers) ? hints.partNumbers : [];
+      if (m.selectedPartNumber != null && pnList[m.selectedPartNumber]) {
+        p.partNum = pnList[m.selectedPartNumber].value;
+      } else if (pnList.length > 0 && pnList[0].confidence === 'high') {
+        // Auto-pick the first high-confidence hit if user didn't manually choose
+        p.partNum = pnList[0].value;
+      }
       // Fill in extracted fields
       if (hints.qty) {
         p.qtyTiers = [hints.qty];
@@ -16309,7 +17270,10 @@ Online Metals,Brass,Round,1.25 dia,per_lb,5.20`;
       if (quote.parts.length === 1) {
         const first = quote.parts[0];
         const isBlank = !first.partNum && !first.description && !first.material &&
-          (first.qtyTiers || []).length <= 1 && (!first.machineOps || first.machineOps.length === 0);
+          (first.qtyTiers || []).length <= 1 &&
+          (!first.machineOps || first.machineOps.length === 0) &&
+          (!first.setups || first.setups.length === 0) &&
+          (!first.weldOps || first.weldOps.length === 0);
         if (isBlank) {
           quote.parts = [p];
           showToast('Part created from email.', 2500);
