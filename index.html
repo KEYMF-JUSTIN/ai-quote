@@ -570,7 +570,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.48.0';
+const APP_VERSION = '7.49.0';
 
 // v7.34.1: Pre-baked Firebase config for the Keystone shop's keystone-quoting
 // project. Users still need to enter their own email + password, but the
@@ -3967,6 +3967,45 @@ function effectiveMaterialPerPiece(part, qtyIdx) {
   const perPiece = Array.isArray(part.materialCost.perPiece) ? part.materialCost.perPiece : [];
   return num(perPiece[qtyIdx]);
 }
+// v7.49: actual cash spend on material for a given qty tier — what KMF
+// pays the supplier, BEFORE markup. Honors whole-bar / whole-pack pricing so
+// "buying one bar to cut 3 parts" reports the bar cost, not 3 × perPiece.
+// CSM (customer-supplied material) is $0 out of pocket — customer hands us
+// the stock and we charge a handling fee against their declared value (the
+// fee is revenue, not cost).
+function materialOutOfPocketAt(part, qtyIdx) {
+  if (!part || !part.materialCost) return 0;
+  if (part.customerSuppliedMaterial) return 0;
+  const tiers = Array.isArray(part.qtyTiers) ? part.qtyTiers : [];
+  const qty = num(tiers[qtyIdx]);
+  if (qty <= 0) return 0;
+  // Off-the-shelf component (McMaster pack pricing)
+  if (part.materialCost.isComponent) {
+    const ps = num(part.materialCost.packSize);
+    const pp = num(part.materialCost.perPack);
+    if (ps > 0 && pp > 0) return Math.ceil(qty / ps) * pp;
+    const perPiece = Array.isArray(part.materialCost.perPiece) ? part.materialCost.perPiece : [];
+    return num(perPiece[qtyIdx]) * qty;
+  }
+  // Raw stock — buy whole bars/sheets, not pieces
+  const stock = part.stock || {};
+  if (stock.form === 'Sheet' && part.materialCost.perSheet != null) {
+    const u = unitsNeeded(part, qty);
+    return u != null ? num(part.materialCost.perSheet) * u : 0;
+  }
+  if ((stock.form === 'Bar/Block' || stock.form === 'Round') && part.materialCost.perBar != null) {
+    const u = unitsNeeded(part, qty);
+    return u != null ? num(part.materialCost.perBar) * u : 0;
+  }
+  // Fallback when no whole-stock pricing — straight perPiece × qty
+  const perPiece = Array.isArray(part.materialCost.perPiece) ? part.materialCost.perPiece : [];
+  return num(perPiece[qtyIdx]) * qty;
+}
+function quoteMaterialOutOfPocketAt(quote, qtyIdx) {
+  if (!quote || !Array.isArray(quote.parts)) return 0;
+  return quote.parts.reduce((s, p) => s + materialOutOfPocketAt(p, qtyIdx), 0);
+}
+
 function unitPriceAt(part, qtyIdx) {
   const run = totalRunPerPart(part, qtyIdx);
   const mat = effectiveMaterialPerPiece(part, qtyIdx) * (1 + num(state.settings.markups.material));
@@ -11721,6 +11760,24 @@ function renderQuoteSummary(q) {
           <tr class="unit"><td><strong>QUOTE TOTAL</strong></td>${totals.map(t => `<td class="num"><strong>${fmtMoney(t)}</strong></td>`).join('')}</tr>
         </tbody>
       </table></div>
+    </div>
+    <div class="card no-print"><div class="card-header" style="background:#5a6470;"><span>Internal — Material Out of Pocket  <span style="opacity:0.7; font-weight:normal; letter-spacing:0; text-transform:none;">(supplier spend, not customer-facing)</span></span></div>
+      <div class="card-body tight"><table class="tbl">
+        <thead><tr><th>Part #</th><th>Description</th><th>Material</th>${tiers.map(t => `<th class="num">Qty ${fmtInt(t)}</th>`).join('')}</tr></thead>
+        <tbody>${q.parts.map(p => `
+          <tr>
+            <td>${esc(p.partNum)}</td>
+            <td>${esc(p.description)}</td>
+            <td>${esc(materialLabelFor(p))}${p.customerSuppliedMaterial ? ' <span class="text-mute small">(CSM — $0 out of pocket)</span>' : p.materialCost && p.materialCost.isComponent ? ` <span class="text-mute small">(pack of ${fmtInt(num(p.materialCost.packSize))})</span>` : ''}</td>
+            ${p.qtyTiers.map((qt, i) => `<td class="num">${fmtMoney(materialOutOfPocketAt(p, i))}</td>`).join('')}
+          </tr>`).join('')}
+          <tr class="total"><td colspan="3"><strong>TOTAL MATERIAL CASH OUT</strong></td>${tiers.map((_, i) => `<td class="num"><strong>${fmtMoney(quoteMaterialOutOfPocketAt(q, i))}</strong></td>`).join('')}</tr>
+        </tbody>
+      </table>
+      <div class="hint" style="margin-top:6px;">
+        Shows the actual cash KMF spends on raw stock / components to fulfill this order at each quantity tier. Honors whole-bar and whole-pack pricing — buying one bar to cut 3 parts reports the bar cost, not <span class="mono">3 × perPiece</span>. Customer-supplied material is excluded.
+      </div>
+      </div>
     </div>
   `;
 }
