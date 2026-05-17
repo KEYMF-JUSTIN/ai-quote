@@ -1,0 +1,15 @@
+{
+  "name": "ai-quote-worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cloudflare Worker proxy for AI Quote — brokers Anthropic API + future McMaster integration. Browser calls this Worker; Worker holds all secrets server-side.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "secret:anthropic": "wrangler secret put ANTHROPIC_API_KEY"
+  },
+  "devDependencies": {
+    "wrangler": "^3.80.0"
+  }
+}

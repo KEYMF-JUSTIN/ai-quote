@@ -1,0 +1,16 @@
+name = "ai-quote-worker"
+main = "src/index.js"
+compatibility_date = "2026-05-15"
+account_id = "9854ffe60b54cf2a470c9225cf9a47dc"
+
+# Public vars (non-secret). The Anthropic API key is set via:
+#   wrangler secret put ANTHROPIC_API_KEY
+[vars]
+ALLOWED_ORIGIN = "https://keymf-justin.github.io"
+CLAUDE_MODEL = "claude-sonnet-4-6"
+CLAUDE_MODEL_FAST = "claude-haiku-4-5-20251001"
+
+# Observability — keep logs for debugging during early life of the Worker.
+[observability]
+enabled = true
+head_sampling_rate = 1

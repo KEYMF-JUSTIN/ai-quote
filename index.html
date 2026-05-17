@@ -586,7 +586,71 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.50.0';
+const APP_VERSION = '7.51.0';
+
+// =================================================================
+// v7.51: Cloudflare Worker bridge — powers all Claude-backed features
+// (RFQ email extraction with vision, document parsing, future quote review).
+// The Worker holds the Anthropic API key server-side so the browser never
+// sees it. CORS is locked at the Worker to this app's origin only.
+// To swap to a different Worker (test/staging/etc.), only this constant changes.
+// =================================================================
+const WORKER_URL = 'https://ai-quote-worker.keymf.workers.dev';
+const WORKER_HEALTH_TTL_MS = 5 * 60 * 1000;   // re-check Worker reachability every 5 minutes
+let _workerHealthCache = null;                // { ok, time, info }
+async function workerHealthCheck(force) {
+  if (!force && _workerHealthCache && (Date.now() - _workerHealthCache.time < WORKER_HEALTH_TTL_MS)) {
+    return _workerHealthCache;
+  }
+  try {
+    const res = await fetch(WORKER_URL + '/api/health', { method: 'GET', cache: 'no-store' });
+    const info = await res.json();
+    _workerHealthCache = { ok: res.ok && info && info.ok === true, time: Date.now(), info };
+  } catch (e) {
+    _workerHealthCache = { ok: false, time: Date.now(), error: String(e && e.message || e) };
+  }
+  return _workerHealthCache;
+}
+function workerHealthCached() { return _workerHealthCache; }   // synchronous read for renderers
+async function workerCall(path, body, opts) {
+  opts = opts || {};
+  const url = WORKER_URL + path;
+  const ctl = new AbortController();
+  const timeoutMs = opts.timeoutMs || 60000;   // 60s — vision calls can take 15-30s
+  const t = setTimeout(() => ctl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-aiq-client-version': APP_VERSION },
+      body: JSON.stringify(body),
+      signal: ctl.signal,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const err = new Error(data.error || ('Worker HTTP ' + res.status));
+      err.status = res.status;
+      err.upstream = data.upstream_detail;
+      throw err;
+    }
+    return data;
+  } finally {
+    clearTimeout(t);
+  }
+}
+// Read a Blob/File as base64 (without the data:URL prefix). Used to send
+// PDF/image attachments to the Worker.
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result || '';
+      const i = result.indexOf(',');
+      resolve(i >= 0 ? result.slice(i + 1) : result);
+    };
+    reader.onerror = () => reject(reader.error || new Error('FileReader failed'));
+    reader.readAsDataURL(blob);
+  });
+}
 
 // v7.34.1: Pre-baked Firebase config for the Keystone shop's keystone-quoting
 // project. Users still need to enter their own email + password, but the
@@ -4887,11 +4951,33 @@ function renderHeaderConnPill() {
     label = 'Connect Cloud';
     title = 'Not connected. Click to set up Cloud Sync.';
   }
+  // v7.51: AI pill — second pill in the header showing Worker reachability.
+  // Synchronous read of cached health (workerHealthCheck refreshes in background).
+  const wh = workerHealthCached();
+  let aiBg, aiFg, aiDot, aiLabel, aiTitle;
+  if (!wh) {
+    aiBg='rgba(148,163,184,0.18)'; aiFg='#94a3b8'; aiDot='#64748b';
+    aiLabel='AI ?'; aiTitle='Worker health check has not run yet';
+  } else if (wh.ok && wh.info && wh.info.has_anthropic_key) {
+    aiBg='rgba(99,102,241,0.18)'; aiFg='#6366f1'; aiDot='#818cf8';
+    aiLabel='AI Online'; aiTitle='Cloudflare Worker reachable, Anthropic API key configured. Model: ' + (wh.info.model || '?');
+  } else if (wh.ok) {
+    aiBg='rgba(245,158,11,0.18)'; aiFg='#d97706'; aiDot='#f59e0b';
+    aiLabel='AI Key Missing'; aiTitle='Worker is reachable but ANTHROPIC_API_KEY is not configured. Run: wrangler secret put ANTHROPIC_API_KEY';
+  } else {
+    aiBg='rgba(220,38,38,0.18)'; aiFg='#dc2626'; aiDot='#ef4444';
+    aiLabel='AI Offline'; aiTitle='Cloudflare Worker unreachable: ' + (wh.error || 'unknown');
+  }
   el.innerHTML = `
     <button class="btn btn-ghost" onclick="App.gotoSyncCard()" title="${title}"
       style="display:inline-flex; align-items:center; gap:6px; padding:4px 10px; background:${bg}; color:${fg}; border:none; border-radius:14px; font-size:11px; font-weight:700; letter-spacing:0.04em;">
       <span style="display:inline-block; width:7px; height:7px; border-radius:50%; background:${dot}; ${state==='connected' ? 'box-shadow:0 0 0 0 rgba(34,197,94,0.6); animation:pulseDot 2s infinite;' : ''}"></span>
       ${esc(label)}
+    </button>
+    <button class="btn btn-ghost" onclick="App.refreshWorkerHealth()" title="${esc(aiTitle)}"
+      style="display:inline-flex; align-items:center; gap:6px; padding:4px 10px; margin-left:6px; background:${aiBg}; color:${aiFg}; border:none; border-radius:14px; font-size:11px; font-weight:700; letter-spacing:0.04em;">
+      <span style="display:inline-block; width:7px; height:7px; border-radius:50%; background:${aiDot};"></span>
+      ✨ ${esc(aiLabel)}
     </button>
   `;
 }
@@ -14097,6 +14183,71 @@ function renderMsgImportModal() {
       </div>
     `).join('');
 
+  // v7.51: Claude enrichment section — shows status while pending, content when arrived
+  const claude = m.claude || null;
+  const claudeSection = !claude ? '' : `
+    <div class="msg-modal-section claude-section" style="background:${claude.state === 'ok' ? '#EAF1FA' : claude.state === 'pending' ? '#FEF6E7' : '#F4F5F7'}; padding:14px; border-radius:6px; border-left:4px solid ${claude.state === 'ok' ? '#1E5BAE' : claude.state === 'pending' ? '#D97706' : '#94A3B8'};">
+      <h3 style="margin-top:0;">
+        ${claude.state === 'pending' ? '⏳ Claude is reading the email + attachments…' :
+          claude.state === 'ok'      ? '✨ AI Analysis (Claude Vision)' :
+          claude.state === 'error'   ? '⚠ Claude analysis failed' :
+                                       '○ AI not available'}
+      </h3>
+      ${claude.state === 'pending' ? `
+        <div class="text-mute small">Vision parses PDFs and images, extracts customer, parts, qty, dims, materials, due dates. Usually 5-15 seconds.</div>
+      ` : claude.state === 'error' ? `
+        <div style="color:#C73E1D;">${esc(claude.error || 'unknown error')}</div>
+        <div class="text-mute small" style="margin-top:4px;">Regex-parsed data above is still usable.</div>
+      ` : claude.state === 'unavailable' ? `
+        <div class="text-mute small">${esc(claude.reason || 'Worker not configured')}. Regex-parsed data above is still usable.</div>
+      ` : claude.state === 'ok' && claude.parsed ? `
+        ${claude.parsed.summary ? `<div style="margin-bottom:10px; padding:8px 10px; background:white; border-radius:4px; font-size:13px; line-height:1.5;"><strong>Summary:</strong> ${esc(claude.parsed.summary)}</div>` : ''}
+        ${(claude.parsed.redFlags && claude.parsed.redFlags.length > 0) ? `
+          <div style="margin-bottom:10px; padding:8px 10px; background:#FDEDEA; border-left:3px solid #C73E1D; border-radius:0 4px 4px 0;">
+            <strong style="color:#C73E1D;">⚠ Things to check:</strong>
+            <ul style="margin:4px 0 0 18px; padding:0;">${claude.parsed.redFlags.map(f => `<li>${esc(f)}</li>`).join('')}</ul>
+          </div>
+        ` : ''}
+        ${claude.parsed.customer ? `
+          <div style="margin-bottom:8px;">
+            <strong>Customer (AI-identified):</strong>
+            ${esc(claude.parsed.customer.companyName || '(unknown)')}
+            ${claude.parsed.customer.contactName ? ` · ${esc(claude.parsed.customer.contactName)}` : ''}
+            ${claude.parsed.customer.role ? ` (${esc(claude.parsed.customer.role)})` : ''}
+            ${claude.parsed.customer.confidence ? `<span class="pill" style="margin-left:6px; font-size:10px; background:${claude.parsed.customer.confidence === 'high' ? '#16A34A' : claude.parsed.customer.confidence === 'medium' ? '#D97706' : '#94A3B8'}; color:white;">${esc(claude.parsed.customer.confidence)}</span>` : ''}
+          </div>
+        ` : ''}
+        ${(claude.parsed.dueDate || claude.parsed.urgency || claude.parsed.rfqRef) ? `
+          <div style="margin-bottom:8px; font-size:13px;">
+            ${claude.parsed.rfqRef ? `<strong>RFQ #:</strong> <span class="mono">${esc(claude.parsed.rfqRef)}</span> · ` : ''}
+            ${claude.parsed.dueDate ? `<strong>Due:</strong> ${esc(claude.parsed.dueDate)} · ` : ''}
+            ${claude.parsed.urgency ? `<strong>Urgency:</strong> <span class="pill" style="background:${claude.parsed.urgency === 'urgent' ? '#C73E1D' : claude.parsed.urgency === 'high' ? '#D97706' : '#1E5BAE'}; color:white; font-size:10px;">${esc(claude.parsed.urgency)}</span>` : ''}
+          </div>
+        ` : ''}
+        ${(claude.parsed.parts && claude.parsed.parts.length > 0) ? `
+          <div style="margin-top:10px;">
+            <strong>Parts (${claude.parsed.parts.length}):</strong>
+            ${claude.parsed.parts.map((pt, i) => `
+              <div style="margin-top:6px; padding:8px 10px; background:white; border-radius:4px; font-size:13px;">
+                <div style="font-weight:600;">${esc(pt.partNum || `Part ${i+1}`)}${pt.description ? ` — ${esc(pt.description)}` : ''}</div>
+                <div style="font-size:12px; color:var(--text-mute); margin-top:2px;">
+                  ${pt.material ? `<span style="margin-right:10px;"><strong>Mat:</strong> ${esc(pt.material)}</span>` : ''}
+                  ${pt.dimensions ? `<span style="margin-right:10px;"><strong>Dim:</strong> <span class="mono">${esc(pt.dimensions)}</span></span>` : ''}
+                  ${(pt.qtyBreaks && pt.qtyBreaks.length > 0) ? `<span style="margin-right:10px;"><strong>Qty:</strong> ${pt.qtyBreaks.join(', ')}</span>` : ''}
+                  ${pt.finish ? `<span style="margin-right:10px;"><strong>Finish:</strong> ${esc(pt.finish)}</span>` : ''}
+                  ${pt.tolerances ? `<span style="margin-right:10px;"><strong>Tol:</strong> ${esc(pt.tolerances)}</span>` : ''}
+                </div>
+                ${pt.notes ? `<div style="font-size:12px; color:var(--text-mute); margin-top:2px; font-style:italic;">${esc(pt.notes)}</div>` : ''}
+                <div style="margin-top:6px;"><button class="btn btn-sm btn-primary" onclick="App.msgApplyClaudePart(${i})">+ Create part from AI extraction</button></div>
+              </div>
+            `).join('')}
+          </div>
+        ` : ''}
+        <div class="text-mute small" style="margin-top:8px;">Model: ${esc(claude.model || '?')}${claude.usage ? ` · ${claude.usage.input_tokens || 0}→${claude.usage.output_tokens || 0} tokens` : ''}</div>
+      ` : ''}
+    </div>
+  `;
+
   host.innerHTML = `
     <div class="msg-modal">
       <div class="msg-modal-inner">
@@ -14105,6 +14256,7 @@ function renderMsgImportModal() {
           <button class="btn btn-sm" onclick="App.closeMsgImport()">✕ Close</button>
         </div>
         <div class="msg-modal-body">
+          ${claudeSection}
           <div class="msg-modal-section">
             <h3>Email</h3>
             <div><strong>From:</strong> ${esc(p.sender || '(unknown)')}${p.senderEmail ? ` &lt;${esc(p.senderEmail)}&gt;` : ''}</div>
@@ -14112,11 +14264,11 @@ function renderMsgImportModal() {
             ${p.subject ? `<div><strong>Subject:</strong> ${esc(p.subject)}</div>` : ''}
           </div>
           <div class="msg-modal-section">
-            <h3>Customer match</h3>
+            <h3>Customer match (regex)</h3>
             ${matchRows}
           </div>
           <div class="msg-modal-section">
-            <h3>Detected part info</h3>
+            <h3>Detected part info (regex)</h3>
             ${partSection}
           </div>
           <div class="msg-modal-section">
@@ -18133,6 +18285,11 @@ Online Metals,Brass,Round,1.25 dia,per_lb,5.20`;
   },
 
   // === v7.31: RFQ-from-email actions ===
+  // v7.51: regex parse stays as the instant-feedback path, then if the
+  // Worker is reachable we fire Claude Vision in parallel to enrich the
+  // modal with multi-part extraction + drawing reads. Claude result replaces
+  // regex partHints on arrival; everything else (matches, pdfs, raw body)
+  // stays from the regex pass so the modal keeps working if Claude fails.
   async openMsgImport(file) {
     if (!file) return;
     if (!/\.msg$/i.test(file.name)) {
@@ -18143,12 +18300,77 @@ Online Metals,Brass,Round,1.25 dia,per_lb,5.20`;
     render();
     try {
       const parsed = await parseOutlookMsg(file);
-      state.ui.msgImport = { filename: file.name, loading: false, parsed };
+      state.ui.msgImport = { filename: file.name, loading: false, parsed, claude: { state: 'pending' } };
       render();
+      // Fire Claude enrichment async — no await. The user sees the regex
+      // result immediately, then the modal updates when Claude returns.
+      App._enrichMsgWithClaude(file.name, parsed).catch(e => {
+        const m = state.ui.msgImport;
+        if (!m || m.filename !== file.name) return;  // user closed/replaced modal
+        m.claude = { state: 'error', error: e.message || String(e) };
+        render();
+      });
     } catch (e) {
       state.ui.msgImport = { filename: file.name, loading: false, error: e.message || String(e) };
       render();
     }
+  },
+  // v7.51: async Claude enrichment of the parsed .msg. Sends email body +
+  // attached PDFs as base64 to the Worker; merges structured response into
+  // state.ui.msgImport.claude when it lands.
+  async _enrichMsgWithClaude(filename, parsed) {
+    const health = await workerHealthCheck();
+    if (!health.ok || !health.info || !health.info.has_anthropic_key) {
+      const m = state.ui.msgImport;
+      if (!m || m.filename !== filename) return;
+      m.claude = {
+        state: 'unavailable',
+        reason: !health.ok ? 'Worker unreachable' : 'Anthropic API key not configured on Worker'
+      };
+      render();
+      return;
+    }
+    // Convert PDF blobs to base64 for the Worker payload. Cap each at ~30MB
+    // to stay under Claude's per-attachment ceiling.
+    const attachments = [];
+    for (const pdf of (parsed.pdfs || [])) {
+      try {
+        const resp = await fetch(pdf.blobUrl);
+        const blob = await resp.blob();
+        if (blob.size > 30 * 1024 * 1024) continue;  // skip oversized
+        const data = await blobToBase64(blob);
+        attachments.push({ name: pdf.filename, mimeType: blob.type || 'application/pdf', data });
+      } catch (e) { /* skip unreadable attachments */ }
+    }
+    const requestBody = {
+      sender:      parsed.sender || '',
+      senderEmail: parsed.senderEmail || '',
+      subject:     parsed.subject || '',
+      sentDate:    parsed.sentDate || '',
+      body:        parsed.body || '',
+      attachments
+    };
+    const response = await workerCall('/api/claude/extract-rfq', requestBody);
+    const m = state.ui.msgImport;
+    if (!m || m.filename !== filename) return;  // user closed mid-flight
+    m.claude = {
+      state: 'ok',
+      parsed: response.parsed,
+      model:  response.model,
+      usage:  response.usage,
+    };
+    // Re-run customer matching with Claude's identified company name (broader signal than email alone)
+    if (response.parsed && response.parsed.customer && response.parsed.customer.companyName) {
+      const enrichedMatches = msgFuzzyMatchCustomer(
+        response.parsed.customer.companyName,
+        response.parsed.customer.contactEmail || parsed.senderEmail,
+        state.customers
+      );
+      if (enrichedMatches.length > 0 && (!parsed.matches || enrichedMatches[0].score > (parsed.matches[0] && parsed.matches[0].score || 0))) {
+        m.parsed.matches = enrichedMatches;
+      }
+    }
+    render();
   },
   closeMsgImport() {
     const m = state.ui.msgImport;
@@ -18219,6 +18441,72 @@ Online Metals,Brass,Round,1.25 dia,per_lb,5.20`;
       render();
     }
   },
+  // v7.51: force a fresh Worker health check (user-clickable on the AI pill)
+  async refreshWorkerHealth() {
+    showToast('Checking AI Worker…', 1500);
+    await workerHealthCheck(true);
+    render();
+    const wh = workerHealthCached();
+    if (wh && wh.ok && wh.info && wh.info.has_anthropic_key) showToast('✨ AI Online · ' + (wh.info.model || ''), 2500);
+    else if (wh && wh.ok) showToast('⚠ Worker OK but Anthropic key not configured', 3500);
+    else showToast('AI Worker unreachable', 3500);
+  },
+
+  // v7.51: create a part from Claude's structured extraction. Reuses the existing
+  // newPart shape; maps the AI-extracted fields onto it. Same blank-placeholder
+  // replacement logic as msgApplyPart so the first AI part lands cleanly in a
+  // fresh quote without leaving a stub behind.
+  msgApplyClaudePart(idx) {
+    const m = state.ui.msgImport;
+    if (!m || !m.claude || !m.claude.parsed) return;
+    const claudePart = (m.claude.parsed.parts || [])[idx];
+    if (!claudePart) return;
+    const q = getActiveQuote();
+    if (!q) { alert('No active quote — open or create a quote first.'); return; }
+    update(s => {
+      const quote = s.quotes.find(x => x.id === q.id);
+      if (!quote) return;
+      const p = newPart();
+      if (claudePart.partNum)     p.partNum     = claudePart.partNum;
+      if (claudePart.customerPN)  p.customerPN  = claudePart.customerPN;
+      if (claudePart.description) p.description = claudePart.description;
+      if (claudePart.material)    p.material    = claudePart.material;
+      // Build a richer notes field from anything Claude flagged but we don't have a column for
+      const noteBits = [];
+      if (claudePart.finish)     noteBits.push('Finish: ' + claudePart.finish);
+      if (claudePart.tolerances) noteBits.push('Tolerances: ' + claudePart.tolerances);
+      if (claudePart.certs)      noteBits.push('Certs: ' + claudePart.certs);
+      if (claudePart.dueDate)    noteBits.push('Due: ' + claudePart.dueDate);
+      if (claudePart.notes)      noteBits.push(claudePart.notes);
+      if (noteBits.length)       p.notes = noteBits.join('\n');
+      // Stock dims
+      if (claudePart.form && ['Bar/Block','Round','Sheet'].includes(claudePart.form)) p.stock.form = claudePart.form;
+      if (claudePart.partLengthIn) p.stock.partLength = claudePart.partLengthIn;
+      if (claudePart.partWidthIn)  p.stock.partWidth  = claudePart.partWidthIn;
+      if (claudePart.partHeightIn) p.stock.partHeight = claudePart.partHeightIn;
+      // Qty breaks
+      if (Array.isArray(claudePart.qtyBreaks) && claudePart.qtyBreaks.length > 0) {
+        p.qtyTiers = claudePart.qtyBreaks.map(n => Math.max(1, Math.round(num(n))));
+        p.materialCost.perPiece = p.qtyTiers.map(() => null);
+      }
+      // Replace the blank default part if the quote is still empty
+      if (quote.parts.length === 1) {
+        const first = quote.parts[0];
+        const isBlank = !first.partNum && !first.description && !first.material &&
+          (first.qtyTiers || []).length <= 1 &&
+          (!first.setups || first.setups.length === 0) &&
+          (!first.weldOps || first.weldOps.length === 0);
+        if (isBlank) {
+          quote.parts = [p];
+          showToast('Part created from AI extraction.', 2500);
+          return;
+        }
+      }
+      quote.parts.push(p);
+      showToast('AI-extracted part added.', 2500);
+    });
+  },
+
   // v7.48: user picks one of the extracted part numbers to apply on commit
   msgPickPartNumber(idx) {
     const m = state.ui.msgImport;
@@ -18752,6 +19040,15 @@ render();
   const el = document.getElementById('app-version-pill');
   if (el) el.textContent = 'v' + APP_VERSION;
 })();
+
+// v7.51: kick off the Worker health check after the first paint so the AI pill
+// shows reachability state without blocking initial render. Re-checks every 5min
+// via the TTL cache in workerHealthCheck.
+setTimeout(() => {
+  workerHealthCheck().then(() => {
+    try { if (typeof renderHeaderConnPill === 'function') renderHeaderConnPill(); } catch (_) {}
+  }).catch(() => {});
+}, 800);
 
 // Wire up the supplier-quote PDF file picker
 (function setupQuotePdfPicker() {
