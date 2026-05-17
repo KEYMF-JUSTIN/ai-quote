@@ -208,6 +208,22 @@
   table.tbl input[type=number] { font-family:var(--font-mono); }
   table.tbl td.action { width:30px; text-align:center; }
 
+  /* v7.50: Similar Parts analytics grid */
+  .similar-analytics { display:grid; grid-template-columns:repeat(6, 1fr); gap:8px; padding:8px; background:var(--bg); border:1px solid var(--line); border-radius:3px; }
+  .similar-analytics > div { display:flex; flex-direction:column; gap:2px; }
+  .similar-analytics .label { font-size:10px; text-transform:uppercase; letter-spacing:0.08em; color:var(--text-mute); font-weight:600; }
+  .similar-analytics strong { font-family:var(--font-mono); color:var(--navy); font-size:14px; }
+  @media (max-width: 900px) { .similar-analytics { grid-template-columns:repeat(3, 1fr); } }
+
+  /* v7.50: Quote Health Check rows */
+  .hc-row { display:flex; gap:8px; padding:4px 0; font-size:13px; align-items:flex-start; }
+  .hc-bullet { flex:0 0 18px; text-align:center; font-weight:bold; line-height:1.4; }
+  .hc-msg { flex:1; line-height:1.4; }
+  .hc-hint { font-size:11px; color:var(--text-mute); margin-top:2px; font-style:italic; }
+  .hc-row.hc-fail .hc-bullet { color:#C73E1D; }
+  .hc-row.hc-warn .hc-bullet { color:#D97706; }
+  .hc-row.hc-ok   .hc-bullet { color:#16A34A; }
+
   /* v7.47: Structured setup blocks */
   .setup-block { border:1px solid var(--line-dark); border-radius:6px; margin-bottom:14px; background:var(--paper); overflow:hidden; }
   .setup-block-header { display:flex; align-items:center; gap:8px; padding:8px 12px; background:var(--bg); border-bottom:1px solid var(--line-dark); }
@@ -570,7 +586,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.49.0';
+const APP_VERSION = '7.50.0';
 
 // v7.34.1: Pre-baked Firebase config for the Keystone shop's keystone-quoting
 // project. Users still need to enter their own email + password, but the
@@ -703,6 +719,7 @@ const state = {
   archivedInvoices: [], // v7.24: historical invoices imported from JobBOSS2 (customer revenue history)
   archivedQuotes: [],   // v7.38: historical quotes imported from JobBOSS2 (estimating/win-rate history)
   rfqInbox: [],         // v7.33: RFQ daily-review queue — parsed .msg files awaiting action
+  purchases: [],        // v7.50: vendor purchase records (orders TO suppliers, multi-item with job allocations)
   activity: [],
   priceBook: [],
   ui: {
@@ -728,6 +745,10 @@ const state = {
     partSections: {},           // per-part collapsible state: {partId: {services:bool, dxf:bool, tooling:bool}}
     pdfDock: null,              // v7.27: { quoteId, filename, blobUrl, sizeBytes, generatedAt } — drag-to-attach PDF panel
     msgImport: null,            // v7.31: { filename, parsed, matches, partHints, pdfUrls } — RFQ-from-email import modal
+    healthCheckOpen: {},        // v7.50: per-quote expand state for the Health Check card, keyed 'hc_'+quoteId
+    similarPartsOpen: {},       // v7.50: per-part expand state for the Similar Parts card, keyed 'sim_'+partId
+    activePurchaseId: null,     // v7.50: currently-open purchase in the Purchasing workspace
+    purchaseFilters: { search:'', hiddenStatuses:[], vendor:'all' },
     activeInboxEntryId: null,   // v7.33: which RFQ Inbox entry is expanded
     inboxStatusFilter: 'new',   // v7.33: 'all' | 'new' | 'reviewing' | 'quoted' | 'dismissed'
     quoteParser: { open: false, partId: null, loading: false, error: '', filename: '', lines: [], snippets: null, targetField: null },
@@ -811,6 +832,8 @@ function migrateState() {
   if (!Array.isArray(state.archivedInvoices)) state.archivedInvoices = [];
   // v7.38: Quote history archive
   if (!Array.isArray(state.archivedQuotes)) state.archivedQuotes = [];
+  // v7.50: Purchasing workspace — vendor purchase records
+  if (!Array.isArray(state.purchases)) state.purchases = [];
   // v7.45: quote kind — default existing quotes to multi-part machining
   (state.quotes || []).forEach(q => { if (!q.kind) q.kind = 'multipart'; });
   // v7.41: filter chips — hiddenStatuses semantics (default: nothing hidden)
@@ -2538,6 +2561,87 @@ function newBomItem(opts) {
 function newQuoteBom() {
   return { items: [], assemblyHrs: null, assemblyMachine: '', notes: '' };
 }
+// =================================================================
+// v7.50: PURCHASING — first-class purchase records.
+// Each Purchase = one transaction with a vendor (Amazon, Alro, McMaster,
+// walk-in, anything). Items[] hold the line items. Allocations[] under
+// each item link the cost to a job/quote/order (or 'stock' / 'overhead').
+// The "keyword" field is the user's hand-typed routing hint — they put
+// it in the vendor's PO-ref or notes field at order time so Claude (v7.51+)
+// can auto-allocate when the confirmation/invoice email arrives.
+// =================================================================
+const PURCHASE_STATUSES = ['draft', 'ordered', 'shipped', 'received', 'invoiced', 'closed', 'cancelled'];
+const PURCHASE_SOURCES  = ['Amazon', 'Alro', 'McMaster', 'Grainger', 'MSC', 'Fastenal', 'Online Metals', 'Walk-in', 'Other'];
+const ALLOCATION_TARGETS = [
+  { id: 'job',      label: 'Job / Order' },
+  { id: 'quote',    label: 'Open Quote' },
+  { id: 'stock',    label: 'Stock' },
+  { id: 'overhead', label: 'Overhead' },
+];
+function newPurchase() {
+  return {
+    id: uid(),
+    purchaseNum: '',                  // user-typed or auto-generated reference (their PO# to the vendor)
+    vendor: '',                       // vendor name (free text or matches state.settings.vendors)
+    vendorId: null,                   // if matched to a vendor record
+    vendorContact: '',
+    source: '',                       // e.g. 'Amazon', 'Alro' — coarse channel tag
+    orderDate: new Date().toISOString().slice(0,10),
+    expectedDate: '',
+    receivedDate: '',
+    status: 'draft',
+    keyword: '',                      // user-typed routing hint (job#, RFQ#, part description)
+    notes: '',
+    sourceDocs: [],                   // {id, type:'email'|'pdf'|'receipt'|'image', filename, url, addedAt}
+    items: [ newPurchaseItem() ],
+    invoiceNum: '',                   // vendor's invoice once received
+    invoiceTotal: null,
+    paid: false,
+    paidDate: '',
+    createdAt: new Date().toISOString(),
+  };
+}
+function newPurchaseItem() {
+  return {
+    id: uid(),
+    description: '',
+    partNum: '',
+    vendorPartNum: '',
+    qty: null,
+    unitPrice: null,
+    extended: null,                   // computed from qty*unitPrice unless explicitly overridden
+    allocations: [],                  // {id, targetType:'job'|'quote'|'stock'|'overhead', targetId, amount, notes}
+    notes: ''
+  };
+}
+function newAllocation(opts) {
+  opts = opts || {};
+  return {
+    id: uid(),
+    targetType: opts.targetType || 'job',
+    targetId:   opts.targetId   || '',
+    amount:     opts.amount     != null ? opts.amount : null,
+    notes:      opts.notes      || ''
+  };
+}
+// Helpers
+function purchaseItemExtended(item) {
+  if (!item) return 0;
+  if (item.extended != null && isFinite(item.extended)) return num(item.extended);
+  return num(item.qty) * num(item.unitPrice);
+}
+function purchaseTotal(purchase) {
+  if (!purchase || !Array.isArray(purchase.items)) return 0;
+  return purchase.items.reduce((s, it) => s + purchaseItemExtended(it), 0);
+}
+function purchaseAllocatedTotal(purchase) {
+  if (!purchase || !Array.isArray(purchase.items)) return 0;
+  return purchase.items.reduce((s, it) =>
+    s + (Array.isArray(it.allocations) ? it.allocations.reduce((s2, a) => s2 + num(a.amount), 0) : 0), 0);
+}
+function purchaseUnallocated(purchase) {
+  return purchaseTotal(purchase) - purchaseAllocatedTotal(purchase);
+}
 // v7.47: deep re-ID a cloned part — setups + nested ops + weldOps + legacy machineOps
 function reidPartInPlace(p) {
   if (!p) return;
@@ -4033,6 +4137,247 @@ function quoteTotalAt(quote, qtyIdx) {
   return quoteSubtotalAt(quote, qtyIdx) + quoteNREtotal(quote);
 }
 
+// =================================================================
+// v7.50: QUOTE HEALTH CHECK — rule-based completeness validator.
+// Runs locally (no Claude needed) on every quote render. Returns a flat
+// list of checks { id, level, message, fixHint } where level is one of:
+//   'ok'   — passing check, useful to show what's already good
+//   'warn' — soft issue, won't break anything but worth flagging
+//   'fail' — hard problem, quote shouldn't ship until this is resolved
+// The UI groups by level and shows a score (passing/total).
+// =================================================================
+function quoteHealthCheck(quote) {
+  const checks = [];
+  if (!quote) return checks;
+  const k = quote.kind || 'multipart';
+  const cust = quote.customerId ? getCustomer(quote.customerId) : null;
+  const parts = Array.isArray(quote.parts) ? quote.parts : [];
+
+  // ---------- Customer-level ----------
+  if (!cust) {
+    checks.push({ id:'cust', level:'fail', message:'No customer selected', fixHint:'Pick a customer on the Quote Info tab' });
+  } else {
+    checks.push({ id:'cust', level:'ok', message:`Customer: ${cust.name}` });
+    if (!cust.email && !(cust.contacts||[]).some(c=>c.email)) {
+      checks.push({ id:'cust-email', level:'warn', message:`No email on file for ${cust.name}`, fixHint:'Add a primary email on the customer editor — needed to send the quote PDF' });
+    }
+    if (!cust.oneDriveFolder) {
+      checks.push({ id:'cust-folder', level:'warn', message:`No OneDrive folder set for ${cust.name}`, fixHint:'Set the customer’s OneDrive folder so job folders auto-create in the right place' });
+    }
+  }
+
+  // ---------- Quote-level ----------
+  if (!quote.quoteNum) checks.push({ id:'quoteNum', level:'fail', message:'No quote number', fixHint:'Set Quote # on the Info tab' });
+  if (!quote.date) checks.push({ id:'date', level:'warn', message:'No quote date', fixHint:'Set the quote date' });
+  if (!quote.quotedBy) checks.push({ id:'quotedBy', level:'warn', message:'No estimator (Quoted by) set', fixHint:'Fill in who did the estimate' });
+  if (!quote.leadTime) checks.push({ id:'lead', level:'warn', message:'No lead time specified', fixHint:'Pick a lead time on the Info tab' });
+
+  // ---------- BOM kind has different rules ----------
+  if (k === 'build') {
+    const bomItems = (quote.bom && Array.isArray(quote.bom.items)) ? quote.bom.items : [];
+    if (bomItems.length === 0) {
+      checks.push({ id:'bom-empty', level:'fail', message:'BOM is empty', fixHint:'Add items to the BOM Tree' });
+    } else {
+      const total = bomTotal(quote);
+      if (total <= 0) checks.push({ id:'bom-total', level:'warn', message:'BOM total is $0 — cost-each missing on items?', fixHint:'Fill in $ each on BOM items' });
+      else checks.push({ id:'bom-ok', level:'ok', message:`BOM: ${bomItemCount(bomItems)} item(s), subtotal ${fmtMoney(total)}` });
+      if (!quote.bom.assemblyHrs || num(quote.bom.assemblyHrs) <= 0) {
+        checks.push({ id:'bom-assy', level:'warn', message:'No assembly labor hours — build cost may be incomplete', fixHint:'Set assembly hours + machine on the BOM tab' });
+      }
+    }
+  } else {
+    // Parts-driven kinds: multipart, machining, welding
+    if (parts.length === 0) {
+      checks.push({ id:'parts-empty', level:'fail', message:'No parts on quote', fixHint:'Add at least one part' });
+    } else {
+      parts.forEach((p, i) => {
+        const label = `Part ${i+1}${p.partNum?` (${p.partNum})`:''}`;
+        if (!p.partNum) checks.push({ id:`p${i}-num`, level:'warn', message:`${label}: no part number`, fixHint:'Add a part number for traceability' });
+        if (!p.description) checks.push({ id:`p${i}-desc`, level:'warn', message:`${label}: no description`, fixHint:'Add a description so the customer PDF reads cleanly' });
+        if (!p.material) checks.push({ id:`p${i}-mat`, level:'fail', message:`${label}: no material set`, fixHint:'Pick a material so costs compute' });
+        // Cost completeness
+        const mp = effectiveMaterialPerPiece(p, 0);
+        if (!p.customerSuppliedMaterial && mp <= 0) {
+          checks.push({ id:`p${i}-matcost`, level:'fail', message:`${label}: material cost is $0`, fixHint:'Set $/bar, $/sheet, $/piece, or pack pricing in the Material section' });
+        }
+        // Kind-specific work content
+        const setups = Array.isArray(p.setups) ? p.setups : [];
+        const weldOps = Array.isArray(p.weldOps) ? p.weldOps : [];
+        if (k === 'welding') {
+          if (weldOps.length === 0) {
+            checks.push({ id:`p${i}-weld`, level:'fail', message:`${label}: welding quote with no weld operations`, fixHint:'Add at least one weld op (or change quote type)' });
+          }
+        } else {
+          if (setups.length === 0) {
+            checks.push({ id:`p${i}-setups`, level:'fail', message:`${label}: no machining setups`, fixHint:'Add at least one setup in the Machine Setups card' });
+          } else {
+            // Each setup should have a machine + setup hrs + at least one op with run time
+            setups.forEach((st, si) => {
+              if (!st.machine) checks.push({ id:`p${i}-st${si}-mach`, level:'warn', message:`${label} ${st.name||('Setup '+(si+1))}: no machine selected`, fixHint:'Pick a machine so the rate looks up' });
+              if (!st.setupHrs || num(st.setupHrs) <= 0) checks.push({ id:`p${i}-st${si}-hrs`, level:'warn', message:`${label} ${st.name||('Setup '+(si+1))}: 0 setup hours`, fixHint:'Set realistic setup hours' });
+              if (!Array.isArray(st.ops) || st.ops.length === 0) {
+                checks.push({ id:`p${i}-st${si}-ops`, level:'warn', message:`${label} ${st.name||('Setup '+(si+1))}: no operations`, fixHint:'Add at least one op with run time' });
+              } else if (!st.ops.some(op => num(op.runTime) > 0)) {
+                checks.push({ id:`p${i}-st${si}-runtime`, level:'warn', message:`${label} ${st.name||('Setup '+(si+1))}: no operation has run time`, fixHint:'Fill in run time on at least one op' });
+              }
+            });
+          }
+        }
+        // Pricing: every qty tier should produce a non-zero unit price
+        const tiers = Array.isArray(p.qtyTiers) ? p.qtyTiers : [];
+        tiers.forEach((qt, qi) => {
+          if (unitPriceAt(p, qi) <= 0) {
+            checks.push({ id:`p${i}-q${qi}-price`, level:'warn', message:`${label}: unit price is $0 at qty ${fmtInt(qt)}`, fixHint:'Check material cost, machine rates, and markup settings' });
+          }
+        });
+      });
+    }
+  }
+
+  // ---------- Markup sanity ----------
+  const mu = state.settings && state.settings.markups;
+  if (mu) {
+    if (num(mu.material) > 1) checks.push({ id:'markup-mat', level:'warn', message:`Material markup is ${(num(mu.material)*100).toFixed(0)}% — looks unusually high`, fixHint:'Check Settings → Markups' });
+    if (num(mu.outside) > 1) checks.push({ id:'markup-out', level:'warn', message:`Outside-services markup is ${(num(mu.outside)*100).toFixed(0)}% — looks unusually high`, fixHint:'Check Settings → Markups' });
+  }
+
+  // Sort: fail first, then warn, then ok
+  const order = { fail: 0, warn: 1, ok: 2 };
+  checks.sort((a, b) => order[a.level] - order[b.level]);
+  return checks;
+}
+// =================================================================
+// v7.50: SIMILAR PARTS SEARCH — local, no Claude needed.
+// Scans state.quotes (and optionally state.orders) for parts similar to
+// the given source part. Returns top N matches sorted by score, with
+// per-match analytics (last quoted, customer, unit price at qty 1).
+// Scoring weights tuned for "would I bid this the same way?" matching.
+// =================================================================
+function findSimilarParts(srcPart, opts) {
+  opts = opts || {};
+  const maxResults = opts.maxResults || 10;
+  const excludeQuoteId = opts.excludeQuoteId || null;
+  if (!srcPart) return [];
+
+  const srcMat   = (srcPart.material || '').toLowerCase().trim();
+  const srcDesc  = (srcPart.description || '').toLowerCase();
+  const srcForm  = (srcPart.stock && srcPart.stock.form) || '';
+  const srcDims  = srcPart.stock ? {
+    L: num(srcPart.stock.partLength),
+    W: num(srcPart.stock.partWidth),
+    H: num(srcPart.stock.partHeight)
+  } : { L:0, W:0, H:0 };
+  const srcCustomerId = opts.customerId || null;
+  // Pre-tokenize source description (words >=4 chars to avoid noise)
+  const srcDescTokens = new Set(srcDesc.split(/[^a-z0-9]+/).filter(t => t.length >= 4));
+
+  const matches = [];
+  (state.quotes || []).forEach(q => {
+    if (excludeQuoteId && q.id === excludeQuoteId) return;
+    // Skip header-only imports — they have no real part data to compare
+    if (q.imported && (!q.parts || q.parts.length === 0 || !q.parts.some(p => p.material))) return;
+    (q.parts || []).forEach((p, partIdx) => {
+      if (p === srcPart) return;
+      if (!p.material) return;  // can't score without a material
+      let score = 0;
+      const reasons = [];
+      // Material match — strongest signal
+      const pMat = (p.material || '').toLowerCase().trim();
+      if (srcMat && pMat) {
+        if (pMat === srcMat) { score += 50; reasons.push('material match'); }
+        else if (pMat.includes(srcMat) || srcMat.includes(pMat)) { score += 25; reasons.push('material partial'); }
+        else {
+          // Token overlap on material strings (e.g. "304 SS" vs "304 stainless")
+          const a = new Set(pMat.split(/[^a-z0-9]+/).filter(Boolean));
+          const b = new Set(srcMat.split(/[^a-z0-9]+/).filter(Boolean));
+          let hits = 0; b.forEach(t => { if (a.has(t)) hits++; });
+          if (hits > 0) { score += Math.min(20, hits * 8); reasons.push('material tokens'); }
+        }
+      }
+      // Form match
+      const pForm = (p.stock && p.stock.form) || '';
+      if (srcForm && pForm && srcForm === pForm) { score += 20; reasons.push('same form'); }
+      // Dimensions — compare each axis with ratio tolerance
+      const pDims = p.stock ? { L: num(p.stock.partLength), W: num(p.stock.partWidth), H: num(p.stock.partHeight) } : { L:0,W:0,H:0 };
+      function dimScore(srcV, pV) {
+        if (srcV <= 0 || pV <= 0) return 0;
+        const ratio = Math.min(srcV, pV) / Math.max(srcV, pV);
+        if (ratio >= 0.95) return 12;   // within 5%
+        if (ratio >= 0.80) return 8;    // within 20%
+        if (ratio >= 0.50) return 3;    // within 50%
+        return 0;
+      }
+      const dimHits = dimScore(srcDims.L, pDims.L) + dimScore(srcDims.W, pDims.W) + dimScore(srcDims.H, pDims.H);
+      if (dimHits > 0) { score += dimHits; reasons.push('dimensions'); }
+      // Description token overlap
+      const pDescTokens = new Set((p.description || '').toLowerCase().split(/[^a-z0-9]+/).filter(t => t.length >= 4));
+      let descHits = 0; srcDescTokens.forEach(t => { if (pDescTokens.has(t)) descHits++; });
+      if (descHits > 0) { score += Math.min(20, descHits * 4); reasons.push(`${descHits} desc word${descHits===1?'':'s'}`); }
+      // Customer match — small bonus for same customer
+      if (srcCustomerId && q.customerId === srcCustomerId) { score += 10; reasons.push('same customer'); }
+      // Part number / customer part number echo
+      if (srcPart.partNum && p.partNum && srcPart.partNum.toLowerCase() === p.partNum.toLowerCase()) {
+        score += 30; reasons.push('part # match');
+      }
+      if (srcPart.customerPN && p.customerPN && srcPart.customerPN.toLowerCase() === p.customerPN.toLowerCase()) {
+        score += 30; reasons.push('customer PN match');
+      }
+      // Threshold — anything under 20 isn't really "similar"
+      if (score < 20) return;
+      matches.push({
+        score,
+        reasons,
+        part: p,
+        quote: q,
+        customer: getCustomer(q.customerId),
+        unitPrice: unitPriceAt(p, 0),
+        extended: extendedAt(p, 0),
+        qty: (p.qtyTiers && p.qtyTiers[0]) || 1,
+        date: q.date || '',
+        quoteNum: q.quoteNum || ''
+      });
+    });
+  });
+
+  matches.sort((a, b) => b.score - a.score);
+  return matches.slice(0, maxResults);
+}
+// Aggregate analytics across a similar-parts result set
+function similarPartsAnalytics(matches) {
+  if (!matches || matches.length === 0) return null;
+  const prices = matches.map(m => num(m.unitPrice)).filter(p => p > 0);
+  if (prices.length === 0) return null;
+  prices.sort((a, b) => a - b);
+  const sum = prices.reduce((s, p) => s + p, 0);
+  const avg = sum / prices.length;
+  const median = prices[Math.floor(prices.length / 2)];
+  const lastDate = matches.map(m => m.date).filter(Boolean).sort().slice(-1)[0] || '';
+  // Per-customer breakdown
+  const byCustomer = {};
+  matches.forEach(m => {
+    const k = m.customer ? m.customer.name : 'Unknown';
+    if (!byCustomer[k]) byCustomer[k] = { n: 0, sum: 0 };
+    byCustomer[k].n++; byCustomer[k].sum += num(m.unitPrice);
+  });
+  const topCustomers = Object.entries(byCustomer)
+    .map(([name, v]) => ({ name, n: v.n, avg: v.n > 0 ? v.sum / v.n : 0 }))
+    .sort((a, b) => b.n - a.n)
+    .slice(0, 5);
+  return { count: matches.length, avg, median, min: prices[0], max: prices[prices.length-1], lastDate, topCustomers };
+}
+
+function quoteHealthSummary(quote) {
+  const checks = quoteHealthCheck(quote);
+  return {
+    checks,
+    fail: checks.filter(c => c.level === 'fail').length,
+    warn: checks.filter(c => c.level === 'warn').length,
+    ok:   checks.filter(c => c.level === 'ok').length,
+    total: checks.length,
+    pct: checks.length === 0 ? 100 : Math.round((checks.filter(c => c.level === 'ok').length / checks.length) * 100)
+  };
+}
+
 // ----- Pricing memory -----
 // Record a price point for a (customer, material) combo.  Called when user
 // confirms the material cost section on a part, or when a quote is converted
@@ -4563,6 +4908,8 @@ function render() {
     case 'orders': main.innerHTML = renderOrders(); break;
     case 'order': main.innerHTML = renderOrder(); break;
     case 'pos': main.innerHTML = renderPosList(); break;
+    case 'purchases': main.innerHTML = renderPurchases(); break;
+    case 'purchase': main.innerHTML = renderPurchase(); break;
     case 'po': main.innerHTML = renderPo(); break;
     case 'packingSlips': main.innerHTML = renderPackingSlipsList(); break;
     case 'packingSlip': main.innerHTML = renderPackingSlip(); break;
@@ -4656,6 +5003,9 @@ function renderNav() {
       <div class="nav-section-title">Accounting</div>
       <div class="nav-item ${v==='pos'||v==='po'?'active':''}" onclick="App.go('pos')">
         <span>Purchase Orders</span><span class="badge">${(state.purchaseOrders||[]).length}</span>
+      </div>
+      <div class="nav-item ${v==='purchases'||v==='purchase'?'active':''}" onclick="App.go('purchases')">
+        <span>🛒 Purchasing</span><span class="badge">${(state.purchases||[]).length}</span>
       </div>
       <div class="nav-item ${v==='packingSlips'||v==='packingSlip'?'active':''}" onclick="App.go('packingSlips')">
         <span>Packing Slips</span><span class="badge">${(state.packingSlips||[]).length}</span>
@@ -6310,6 +6660,281 @@ const PO_STATUS_LABELS = {
   draft: 'Draft', sent: 'Sent', acknowledged: 'Acknowledged',
   received: 'Received', closed: 'Closed', void: 'Void'
 };
+
+// =================================================================
+// v7.50: PURCHASING WORKSPACE — list + detail views.
+// First-class purchase records distinct from formal Purchase Orders (POs).
+// Catches the informal "I bought stuff at Home Depot for the job" workflow
+// that the existing PO system was too heavy for.
+// =================================================================
+function applyPurchaseFilters(purchases) {
+  const f = state.ui.purchaseFilters || { search:'', hiddenStatuses:[], vendor:'all' };
+  const q = (f.search || '').toLowerCase().trim();
+  let out = purchases;
+  const hidden = Array.isArray(f.hiddenStatuses) ? f.hiddenStatuses : [];
+  if (hidden.length > 0) out = out.filter(p => !hidden.includes(p.status));
+  if (f.vendor && f.vendor !== 'all') out = out.filter(p => (p.vendor || '').toLowerCase() === f.vendor.toLowerCase());
+  if (q) {
+    out = out.filter(p => {
+      const blob = [
+        p.purchaseNum, p.vendor, p.source, p.keyword, p.notes, p.invoiceNum,
+        ...(p.items || []).map(it => `${it.description} ${it.partNum} ${it.vendorPartNum} ${it.notes}`)
+      ].join(' ').toLowerCase();
+      return blob.includes(q);
+    });
+  }
+  return out;
+}
+function renderPurchases() {
+  const f = state.ui.purchaseFilters || { search:'', hiddenStatuses:[], vendor:'all' };
+  const all = (state.purchases || []).slice().sort((a, b) => (b.orderDate || '').localeCompare(a.orderDate || ''));
+  const filtered = applyPurchaseFilters(all);
+  const totalCommitted = filtered.reduce((s, p) => s + purchaseTotal(p), 0);
+  const totalUnalloc   = filtered.reduce((s, p) => s + purchaseUnallocated(p), 0);
+  // Distinct vendor list for the vendor chip filter
+  const vendors = Array.from(new Set(all.map(p => p.vendor).filter(Boolean))).sort();
+  const statusChip = (s) => {
+    const isHidden = (f.hiddenStatuses || []).includes(s);
+    return `<span class="chip status-${s} ${isHidden?'hidden':''}" onclick="App.togglePurchaseStatusFilter('${s}')" title="${isHidden?'Click to show':'Click to hide'} ${s}">${esc(s.charAt(0).toUpperCase()+s.slice(1))}</span>`;
+  };
+  return `
+    <div class="page-header">
+      <div>
+        <div class="page-title">Purchasing</div>
+        <div class="page-subtitle">${all.length} purchase${all.length===1?'':'s'} · ${fmtMoney(totalCommitted)} total${totalUnalloc > 0 ? ` · <span style="color:#D97706;">${fmtMoney(totalUnalloc)} unallocated</span>` : ''}</div>
+      </div>
+      <div class="header-actions">
+        <button class="btn btn-primary" onclick="App.newPurchase()">+ New Purchase</button>
+      </div>
+    </div>
+    <div class="card no-print" style="padding:14px 16px; margin-bottom:16px;">
+      <div class="chip-row">
+        <span class="chip-row-label">Showing:</span>
+        ${PURCHASE_STATUSES.map(statusChip).join('')}
+        <span style="flex:1;"></span>
+        ${vendors.length > 0 ? `
+          <select onchange="App.setPurchaseVendorFilter(this.value)" style="font-size:12px; padding:3px 6px;">
+            <option value="all">All vendors</option>
+            ${vendors.map(v => `<option value="${esc(v)}" ${f.vendor===v?'selected':''}>${esc(v)}</option>`).join('')}
+          </select>
+        ` : ''}
+        <input type="search" placeholder="Search purchases…" value="${esc(f.search||'')}"
+               oninput="App.setPurchaseSearch(this.value)"
+               style="font-size:13px; padding:4px 8px; width:240px;">
+      </div>
+    </div>
+    ${filtered.length === 0 ? `
+      <div class="empty-state">
+        <h3>${all.length === 0 ? 'No purchases yet' : 'No matches'}</h3>
+        <p>${all.length === 0
+          ? `Click "+ New Purchase" to log your first vendor purchase. Drop email confirmations, receipts, or scan paper receipts into the detail view (full Claude parsing lands in v7.51).`
+          : 'Adjust the chip filters or search to find what you\'re looking for.'}</p>
+      </div>
+    ` : `
+      <div class="card"><div class="card-body" style="padding:0;">
+        <table class="tbl">
+          <thead><tr>
+            <th>Date</th>
+            <th>Vendor</th>
+            <th>Source</th>
+            <th>Ref / PO#</th>
+            <th>Keyword</th>
+            <th>Items</th>
+            <th class="num">Total</th>
+            <th>Allocations</th>
+            <th>Status</th>
+          </tr></thead>
+          <tbody>
+            ${filtered.map(p => {
+              const total = purchaseTotal(p);
+              const alloc = purchaseAllocatedTotal(p);
+              const unalloc = total - alloc;
+              const allocSummary = unalloc > 0.01
+                ? `<span style="color:#D97706;">${fmtMoney(alloc)}/${fmtMoney(total)}</span>`
+                : `<span style="color:#16A34A;">Fully allocated</span>`;
+              const itemCount = (p.items || []).length;
+              return `
+                <tr style="cursor:pointer;" onclick="App.openPurchase('${p.id}')">
+                  <td>${esc(p.orderDate || '—')}</td>
+                  <td><strong>${esc(p.vendor || '—')}</strong></td>
+                  <td>${p.source ? `<span class="pill" style="font-size:11px;">${esc(p.source)}</span>` : ''}</td>
+                  <td><span class="mono">${esc(p.purchaseNum || '—')}</span></td>
+                  <td>${p.keyword ? `<span class="mono" style="background:#FEF6E7; padding:1px 6px; border-radius:3px;">${esc(p.keyword)}</span>` : '<span class="text-mute">—</span>'}</td>
+                  <td>${itemCount} item${itemCount===1?'':'s'}</td>
+                  <td class="num"><strong>${fmtMoney(total)}</strong></td>
+                  <td>${allocSummary}</td>
+                  <td><span class="pill status-${esc(p.status)}">${esc(p.status)}</span></td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+      </div></div>
+    `}
+  `;
+}
+
+function renderPurchase() {
+  const p = (state.purchases || []).find(x => x.id === state.ui.activePurchaseId);
+  if (!p) return `<p>Purchase not found. <button class="btn btn-sm" onclick="App.go('purchases')">← Back to Purchasing</button></p>`;
+  const total = purchaseTotal(p);
+  const alloc = purchaseAllocatedTotal(p);
+  const unalloc = total - alloc;
+  const liveJobs = (state.orders || []).map(o => {
+    const c = getCustomer(o.customerId);
+    return { id: o.id, label: `${o.orderNum || '(no#)'} — ${c?.name || 'Unknown'}${o.notes ? ' · ' + o.notes.slice(0,30) : ''}` };
+  });
+  const liveQuotes = (state.quotes || []).filter(q => !q.imported).map(q => {
+    const c = getCustomer(q.customerId);
+    return { id: q.id, label: `${q.quoteNum || '(no#)'} — ${c?.name || 'Unknown'}` };
+  });
+  const targetOpts = (targetType) => {
+    if (targetType === 'job') return liveJobs;
+    if (targetType === 'quote') return liveQuotes;
+    return [];
+  };
+  return `
+    <div class="page-header">
+      <div>
+        <div class="page-title">
+          Purchase ${esc(p.purchaseNum || '(unsaved)')}
+          <span class="pill status-${esc(p.status)}" style="vertical-align:middle; margin-left:8px;">${esc(p.status)}</span>
+        </div>
+        <div class="page-subtitle">${esc(p.vendor || 'No vendor')} · ${esc(p.orderDate || '—')} · ${fmtMoney(total)}${unalloc > 0.01 ? ` · <span style="color:#D97706;">${fmtMoney(unalloc)} unallocated</span>` : ` · <span style="color:#16A34A;">fully allocated</span>`}</div>
+      </div>
+      <div class="header-actions">
+        <button class="btn btn-sm btn-danger" onclick="App.deletePurchase('${p.id}')">Delete</button>
+        <button class="btn" onclick="App.go('purchases')">← Back to Purchasing</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span>Purchase Information</span></div>
+      <div class="card-body">
+        <div class="form-grid cols-4">
+          <div class="field"><label>Vendor</label>${bind({value:p.vendor||'', type:'text', placeholder:'Alro / Amazon / McMaster', onChange:v=>{ App.setPurchaseField(p.id,'vendor',v); }})}</div>
+          <div class="field"><label>Source channel</label>${bind({value:p.source||'', type:'select', options:PURCHASE_SOURCES, placeholder:'— select —', onChange:v=>{ App.setPurchaseField(p.id,'source',v); }})}</div>
+          <div class="field"><label>Reference / Vendor PO#</label>${bind({value:p.purchaseNum||'', type:'text', placeholder:'their order #', onChange:v=>{ App.setPurchaseField(p.id,'purchaseNum',v); }})}</div>
+          <div class="field"><label>Status</label>${bind({value:p.status||'draft', type:'select', options:PURCHASE_STATUSES, onChange:v=>{ App.setPurchaseField(p.id,'status',v||'draft'); }})}</div>
+          <div class="field"><label>Order date</label>${bind({value:p.orderDate||'', type:'date', onChange:v=>{ App.setPurchaseField(p.id,'orderDate',v); }})}</div>
+          <div class="field"><label>Expected date</label>${bind({value:p.expectedDate||'', type:'date', onChange:v=>{ App.setPurchaseField(p.id,'expectedDate',v); }})}</div>
+          <div class="field"><label>Received date</label>${bind({value:p.receivedDate||'', type:'date', onChange:v=>{ App.setPurchaseField(p.id,'receivedDate',v); }})}</div>
+          <div class="field"><label>Vendor contact</label>${bind({value:p.vendorContact||'', type:'text', placeholder:'rep name/email', onChange:v=>{ App.setPurchaseField(p.id,'vendorContact',v); }})}</div>
+          <div class="field" style="grid-column:span 4;">
+            <label>Keyword <span class="text-mute small">(routing hint you put in the vendor's order notes — Claude uses this in v7.51+ to auto-allocate)</span></label>
+            ${bind({value:p.keyword||'', type:'text', placeholder:'e.g. JOB-9876 or RFQ-3501 or BRACKET-1234', onChange:v=>{ App.setPurchaseField(p.id,'keyword',v); }})}
+          </div>
+          <div class="field" style="grid-column:span 4;">
+            <label>Notes</label>
+            ${bind({value:p.notes||'', type:'textarea', placeholder:'Sourcing notes, why this vendor, sub for original, anything…', onChange:v=>{ App.setPurchaseField(p.id,'notes',v); }})}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span>Line Items <span style="font-weight:normal; letter-spacing:0; text-transform:none; opacity:0.7;">— what was bought</span></span>
+        <button class="btn btn-sm" onclick="App.addPurchaseItem('${p.id}')">+ Add Item</button>
+      </div>
+      <div class="card-body" style="padding:0;">
+        ${(p.items || []).length === 0
+          ? `<div class="text-mute" style="padding:24px; text-align:center;">No items yet — click "+ Add Item" to log line items.</div>`
+          : (p.items || []).map((it, ii) => {
+              const ext = purchaseItemExtended(it);
+              const itemAlloc = (it.allocations || []).reduce((s, a) => s + num(a.amount), 0);
+              const itemUnalloc = ext - itemAlloc;
+              return `
+                <div class="purchase-item" style="border-top:${ii===0?'none':'1px solid var(--line)'}; padding:12px 16px;">
+                  <div style="display:grid; grid-template-columns:2fr 1fr 80px 100px 100px 30px; gap:8px; align-items:end;">
+                    <div><div class="label">Description</div>${bind({value:it.description||'', type:'text', placeholder:'what was bought', onChange:v=>{ App.setPurchaseItemField(p.id, it.id, 'description', v); }})}</div>
+                    <div><div class="label">Vendor Part #</div>${bind({value:it.vendorPartNum||'', type:'text', placeholder:'optional', onChange:v=>{ App.setPurchaseItemField(p.id, it.id, 'vendorPartNum', v); }})}</div>
+                    <div><div class="label">Qty</div>${bind({value:it.qty, type:'number', onChange:v=>{ App.setPurchaseItemField(p.id, it.id, 'qty', v); }, attrs:'step="any" min="0"'})}</div>
+                    <div><div class="label">$ each</div>${bind({value:it.unitPrice, type:'number', onChange:v=>{ App.setPurchaseItemField(p.id, it.id, 'unitPrice', v); }, attrs:'step="any" min="0"'})}</div>
+                    <div><div class="label">Extended</div><div class="value-cell" style="padding:5px 7px; font-family:var(--font-mono); font-weight:700;">${fmtMoney(ext)}</div></div>
+                    <div><button class="btn btn-sm btn-danger" onclick="App.removePurchaseItem('${p.id}','${it.id}')" title="Remove item">×</button></div>
+                  </div>
+                  <div style="margin-top:10px; padding:10px 12px; background:var(--bg); border-radius:3px;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                      <span class="label">Allocations <span class="text-mute" style="font-weight:normal; letter-spacing:0; text-transform:none;">— where this cost goes</span></span>
+                      <button class="btn btn-sm" onclick="App.addAllocation('${p.id}','${it.id}')">+ Allocate</button>
+                    </div>
+                    ${(it.allocations || []).length === 0
+                      ? `<div class="text-mute small" style="padding:4px 0;">Not allocated yet · ${fmtMoney(ext)} unassigned</div>`
+                      : `<table class="tbl tight" style="background:white;">
+                          <thead><tr>
+                            <th style="width:130px;">Target type</th>
+                            <th>Job / Quote</th>
+                            <th class="num" style="width:110px;">Amount</th>
+                            <th>Notes</th>
+                            <th class="action"></th>
+                          </tr></thead>
+                          <tbody>
+                            ${it.allocations.map(a => {
+                              const opts = targetOpts(a.targetType);
+                              return `<tr>
+                                <td>${bind({value:a.targetType||'job', type:'select', options:ALLOCATION_TARGETS.map(t => ({value:t.id, label:t.label})), onChange:v=>{ App.setAllocationField(p.id, it.id, a.id, 'targetType', v||'job'); App.setAllocationField(p.id, it.id, a.id, 'targetId', ''); }})}</td>
+                                <td>${(a.targetType === 'stock' || a.targetType === 'overhead')
+                                      ? `<span class="text-mute small">(no target needed)</span>`
+                                      : bind({value:a.targetId||'', type:'select', options:opts.map(o => ({value:o.id, label:o.label})), placeholder:'— pick —', onChange:v=>{ App.setAllocationField(p.id, it.id, a.id, 'targetId', v); }})}</td>
+                                <td>${bind({value:a.amount, type:'number', onChange:v=>{ App.setAllocationField(p.id, it.id, a.id, 'amount', v); }, attrs:'step="any" min="0"'})}</td>
+                                <td>${bind({value:a.notes||'', type:'text', placeholder:'optional', onChange:v=>{ App.setAllocationField(p.id, it.id, a.id, 'notes', v); }})}</td>
+                                <td class="action"><button class="btn btn-sm btn-danger" onclick="App.removeAllocation('${p.id}','${it.id}','${a.id}')">×</button></td>
+                              </tr>`;
+                            }).join('')}
+                            <tr>
+                              <td colspan="2" class="text-mute small" style="text-align:right;">${itemUnalloc > 0.01 ? `<button class="btn btn-sm" onclick="App.allocateRemainder('${p.id}','${it.id}')" title="Add a new allocation for the unallocated remainder">Allocate remaining ${fmtMoney(itemUnalloc)}</button>` : itemUnalloc < -0.01 ? `<span style="color:#C73E1D;">Over-allocated by ${fmtMoney(-itemUnalloc)}</span>` : '<span style="color:#16A34A;">Fully allocated</span>'}</td>
+                              <td class="num"><strong>${fmtMoney(itemAlloc)}</strong></td>
+                              <td colspan="2"></td>
+                            </tr>
+                          </tbody>
+                        </table>`}
+                  </div>
+                </div>
+              `;
+            }).join('')
+        }
+        <div style="padding:12px 16px; background:var(--bg); border-top:2px solid var(--line-dark); display:flex; justify-content:space-between; align-items:center;">
+          <strong>Purchase total</strong>
+          <strong style="font-family:var(--font-mono); font-size:16px; color:var(--navy);">${fmtMoney(total)}</strong>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span>Invoice & Payment <span style="font-weight:normal; letter-spacing:0; text-transform:none; opacity:0.7;">— once the vendor invoices us</span></span></div>
+      <div class="card-body">
+        <div class="form-grid cols-4">
+          <div class="field"><label>Vendor invoice #</label>${bind({value:p.invoiceNum||'', type:'text', placeholder:'their invoice #', onChange:v=>{ App.setPurchaseField(p.id,'invoiceNum',v); }})}</div>
+          <div class="field"><label>Invoice total <span class="text-mute small">(if differs from PO)</span></label>${bind({value:p.invoiceTotal, type:'number', onChange:v=>{ App.setPurchaseField(p.id,'invoiceTotal',v); }, attrs:'step="any" min="0"'})}</div>
+          <div class="field"><label>Paid?</label>
+            <label style="display:flex; gap:6px; align-items:center; cursor:pointer; padding-top:6px;">
+              <input type="checkbox" ${p.paid?'checked':''} onchange="App.setPurchaseField('${p.id}','paid',this.checked)" style="width:auto; padding:0;">
+              <span>Marked paid</span>
+            </label>
+          </div>
+          <div class="field"><label>Paid date</label>${bind({value:p.paidDate||'', type:'date', onChange:v=>{ App.setPurchaseField(p.id,'paidDate',v); }})}</div>
+        </div>
+        ${p.invoiceTotal != null && Math.abs(num(p.invoiceTotal) - total) > 0.01 ? `
+          <div class="hint" style="margin-top:8px; color:#D97706;">
+            ⚠ Invoice total (${fmtMoney(num(p.invoiceTotal))}) differs from line-item total (${fmtMoney(total)}) by ${fmtMoney(num(p.invoiceTotal) - total)}. Reconcile before marking paid.
+          </div>
+        ` : ''}
+      </div>
+    </div>
+
+    <div class="card no-print">
+      <div class="card-header" style="background:#5a6470; color:white;"><span>📎 Source Documents</span></div>
+      <div class="card-body">
+        <div class="text-mute small" style="padding:8px 0;">
+          ${(p.sourceDocs || []).length === 0
+            ? `No docs attached yet. In v7.51+ you'll be able to drag-drop email confirmations, scanned receipts, and photos directly here — Claude will parse them and pre-fill line items + allocations.`
+            : `${p.sourceDocs.length} document${p.sourceDocs.length===1?'':'s'} attached (full attachment UI lands in v7.51).`}
+        </div>
+      </div>
+    </div>
+  `;
+}
 
 function renderPosList() {
   const all = state.purchaseOrders.slice().sort((a,b) => (b.poDate||'').localeCompare(a.poDate||''));
@@ -10457,12 +11082,81 @@ function renderQuote() {
   `;
 }
 
+// v7.50: Quote Health Check card — shown at top of the Info tab.
+// Collapsed by default if everything's passing; expanded if there are fails/warns.
+function renderQuoteHealthCheckCard(q) {
+  const summary = quoteHealthSummary(q);
+  const { checks, fail, warn, ok, total, pct } = summary;
+  if (total === 0) return '';
+  // Auto-expand if any fail, OR if user explicitly toggled it open
+  const uiKey = 'hc_' + q.id;
+  const explicitOpen = state.ui.healthCheckOpen && state.ui.healthCheckOpen[uiKey];
+  const isOpen = explicitOpen != null ? explicitOpen : (fail > 0);
+  // Status pill color
+  const status = fail > 0 ? 'fail' : warn > 0 ? 'warn' : 'ok';
+  const statusColor = status === 'fail' ? '#C73E1D' : status === 'warn' ? '#D97706' : '#16A34A';
+  const statusBg    = status === 'fail' ? '#FDEDEA' : status === 'warn' ? '#FEF6E7' : '#ECFDF3';
+  const statusLabel = status === 'fail' ? `${fail} blocker${fail===1?'':'s'}` : status === 'warn' ? `${warn} warning${warn===1?'':'s'}` : 'All clear';
+  const statusIcon  = status === 'fail' ? '✕' : status === 'warn' ? '⚠' : '✓';
+  return `
+    <div class="card no-print" style="margin-bottom:14px; border-left:4px solid ${statusColor};">
+      <div class="card-header" style="cursor:pointer; background:${statusBg}; color:${statusColor};" onclick="App.toggleHealthCheck('${q.id}')">
+        <span>
+          <span style="font-size:14px; margin-right:6px;">${statusIcon}</span>
+          Quote Health Check
+          <span style="margin-left:10px; font-weight:normal; letter-spacing:0; text-transform:none; font-size:12px; opacity:0.85;">
+            ${statusLabel} · ${ok}/${total} passing (${pct}%)
+          </span>
+        </span>
+        <span style="font-size:14px;">${isOpen ? '▾' : '▸'}</span>
+      </div>
+      ${isOpen ? `
+        <div class="card-body tight">
+          ${fail > 0 ? `
+            <div style="margin-bottom:10px;">
+              <div class="label" style="color:#C73E1D;">⛔ Blockers (${fail})</div>
+              ${checks.filter(c => c.level === 'fail').map(c => `
+                <div class="hc-row hc-fail">
+                  <span class="hc-bullet">✕</span>
+                  <div class="hc-msg">${esc(c.message)}${c.fixHint ? `<div class="hc-hint">→ ${esc(c.fixHint)}</div>` : ''}</div>
+                </div>
+              `).join('')}
+            </div>
+          ` : ''}
+          ${warn > 0 ? `
+            <div style="margin-bottom:10px;">
+              <div class="label" style="color:#D97706;">⚠ Warnings (${warn})</div>
+              ${checks.filter(c => c.level === 'warn').map(c => `
+                <div class="hc-row hc-warn">
+                  <span class="hc-bullet">⚠</span>
+                  <div class="hc-msg">${esc(c.message)}${c.fixHint ? `<div class="hc-hint">→ ${esc(c.fixHint)}</div>` : ''}</div>
+                </div>
+              `).join('')}
+            </div>
+          ` : ''}
+          ${ok > 0 ? `
+            <div>
+              <div class="label" style="color:#16A34A;">✓ Passing (${ok})</div>
+              ${checks.filter(c => c.level === 'ok').map(c => `
+                <div class="hc-row hc-ok">
+                  <span class="hc-bullet">✓</span>
+                  <div class="hc-msg">${esc(c.message)}</div>
+                </div>
+              `).join('')}
+            </div>
+          ` : ''}
+        </div>
+      ` : ''}
+    </div>
+  `;
+}
 function renderQuoteInfo(q) {
   const showInactive = !!(state.ui.showInactiveInPicker && state.ui.showInactiveInPicker.quoteEditor);
   const sourceList = showInactive ? state.customers : activeCustomers(q.customerId);
   const customerOpts = sourceList.map(c => ({ value:c.id, label: customerLabel(c) }));
   const inactiveCount = state.customers.length - state.customers.filter(isActiveCustomer).length;
   return `
+    ${renderQuoteHealthCheckCard(q)}
     <div class="msg-dropzone" id="msg-dropzone">
       <strong>📧 Drop an Outlook .msg file here</strong> to auto-fill customer + part info from a customer RFQ email
       <button class="pickbtn" onclick="App.pickMsgFile()">or pick a file…</button>
@@ -11409,6 +12103,93 @@ function renderSpecialtyToolingCard(q, p) {
   `;
 }
 
+// v7.50: Similar Parts panel — finds historical parts that resemble the current
+// one (material, form, dims, description, customer signals) and surfaces
+// analytics so the estimator can spot-check pricing against history.
+function renderSimilarPartsCard(q, p) {
+  // Need at least a material to score meaningfully
+  if (!p || !p.material) return '';
+  const matches = findSimilarParts(p, { excludeQuoteId: q.id, customerId: q.customerId, maxResults: 10 });
+  // Per-part collapse state, persisted via state.ui.similarPartsOpen
+  if (!state.ui.similarPartsOpen) state.ui.similarPartsOpen = {};
+  const uiKey = 'sim_' + p.id;
+  const explicit = state.ui.similarPartsOpen[uiKey];
+  // Default: expand if 2+ matches, otherwise collapsed
+  const isOpen = explicit != null ? explicit : (matches.length >= 2);
+  if (matches.length === 0) {
+    // Quiet empty state — collapsed, just a hint that the search ran
+    return `
+      <div class="card no-print" style="margin-bottom:14px;">
+        <div class="card-header" style="cursor:default; background:#F4F5F7; color:var(--steel);">
+          <span>🔎 Similar Parts <span style="font-weight:normal; letter-spacing:0; text-transform:none; font-size:12px; opacity:0.85; margin-left:10px;">No close matches in history — this looks like a new one</span></span>
+        </div>
+      </div>
+    `;
+  }
+  const analytics = similarPartsAnalytics(matches);
+  return `
+    <div class="card no-print" style="margin-bottom:14px;">
+      <div class="card-header" style="cursor:pointer; background:#EAF1FA; color:var(--navy);" onclick="App.toggleSimilarParts('${p.id}')">
+        <span>
+          🔎 Similar Parts
+          <span style="font-weight:normal; letter-spacing:0; text-transform:none; font-size:12px; opacity:0.85; margin-left:10px;">
+            ${matches.length} match${matches.length===1?'':'es'}${analytics ? ` · avg ${fmtMoney(analytics.avg)} · range ${fmtMoney(analytics.min)}–${fmtMoney(analytics.max)}` : ''}
+          </span>
+        </span>
+        <span style="font-size:14px;">${isOpen ? '▾' : '▸'}</span>
+      </div>
+      ${isOpen ? `
+        <div class="card-body tight">
+          ${analytics ? `
+            <div class="similar-analytics">
+              <div><span class="label">Matches</span><strong>${analytics.count}</strong></div>
+              <div><span class="label">Avg unit $</span><strong>${fmtMoney(analytics.avg)}</strong></div>
+              <div><span class="label">Median</span><strong>${fmtMoney(analytics.median)}</strong></div>
+              <div><span class="label">Range</span><strong>${fmtMoney(analytics.min)}–${fmtMoney(analytics.max)}</strong></div>
+              <div><span class="label">Last quoted</span><strong>${esc(analytics.lastDate || '—')}</strong></div>
+              <div>
+                <span class="label">Top customer${analytics.topCustomers.length>1?'s':''}</span>
+                <strong style="font-size:12px; line-height:1.3; display:block;">${analytics.topCustomers.slice(0,2).map(c => `${esc(c.name)} (${c.n})`).join('<br>') || '—'}</strong>
+              </div>
+            </div>
+          ` : ''}
+          <table class="tbl tight" style="margin-top:8px;">
+            <thead><tr>
+              <th>Customer</th>
+              <th>Quote #</th>
+              <th>Date</th>
+              <th>Part #</th>
+              <th>Material</th>
+              <th class="num">Qty</th>
+              <th class="num">$/ea</th>
+              <th>Match</th>
+              <th class="action"></th>
+            </tr></thead>
+            <tbody>
+              ${matches.map(m => `
+                <tr>
+                  <td>${esc((m.customer && m.customer.name) || '—')}</td>
+                  <td><span class="mono">${esc(m.quoteNum || '—')}</span></td>
+                  <td>${esc(m.date)}</td>
+                  <td><span class="mono">${esc(m.part.partNum || '—')}</span><div class="small text-mute">${esc((m.part.description||'').slice(0,40))}${(m.part.description||'').length>40?'…':''}</div></td>
+                  <td>${esc(m.part.material || '—')}</td>
+                  <td class="num">${fmtInt(m.qty)}</td>
+                  <td class="num"><strong>${fmtMoney(m.unitPrice)}</strong></td>
+                  <td><span class="small text-mute" title="${esc(m.reasons.join(', '))}">${m.score}% · ${esc(m.reasons.slice(0,2).join(', '))}</span></td>
+                  <td class="action"><button class="btn btn-sm" onclick="App.openQuote('${m.quote.id}')" title="Open this quote">↗</button></td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+          <div class="hint" style="margin-top:6px;">
+            Local search across your live quote history (imported header-only records excluded). Scoring weighs material, form, dimensions, description tokens, and customer signals. Click ↗ to open the source quote in a new tab.
+          </div>
+        </div>
+      ` : ''}
+    </div>
+  `;
+}
+
 function renderPartEditor(q, p) {
   const matOpts = state.settings.materials.map(m => m.name);
   const machineOpts = state.settings.rates.map(r => r.name);
@@ -11446,6 +12227,7 @@ function renderPartEditor(q, p) {
       <span class="label">Part Definition</span>
       <span class="hint-text">what we're making</span>
     </div>
+    ${renderSimilarPartsCard(q, p)}
     <div class="card">
       <div class="card-header">
         <span>Part Information</span>
@@ -13855,6 +14637,154 @@ const App = {
   // ----- v7.37 Customer History panel handlers -----
   toggleCustHist() {
     update(s => { s.ui.custHist.open = !s.ui.custHist.open; });
+  },
+  // v7.50: Health Check card expand/collapse — explicit user toggle overrides
+  // the default open-when-failing behavior
+  // v7.50: Similar Parts panel toggle
+  toggleSimilarParts(partId) {
+    update(s => {
+      if (!s.ui.similarPartsOpen) s.ui.similarPartsOpen = {};
+      const key = 'sim_' + partId;
+      // Find part to determine the auto-open default (match count >= 2)
+      let autoOpen = false;
+      for (const q of (s.quotes || [])) {
+        const p = (q.parts || []).find(x => x.id === partId);
+        if (p) {
+          const matches = findSimilarParts(p, { excludeQuoteId: q.id, customerId: q.customerId, maxResults: 10 });
+          autoOpen = matches.length >= 2;
+          break;
+        }
+      }
+      const explicit = s.ui.similarPartsOpen[key];
+      const currentlyOpen = (explicit != null) ? explicit : autoOpen;
+      s.ui.similarPartsOpen[key] = !currentlyOpen;
+    });
+  },
+  // v7.50: Purchasing workspace handlers
+  newPurchase() {
+    update(s => {
+      const p = newPurchase();
+      s.purchases.unshift(p);
+      s.ui.view = 'purchase';
+      s.ui.activePurchaseId = p.id;
+      logActivity('Created purchase', '(new)');
+    });
+  },
+  openPurchase(id) {
+    update(s => { s.ui.view = 'purchase'; s.ui.activePurchaseId = id; });
+  },
+  deletePurchase(id) {
+    if (!confirm('Delete this purchase record? This cannot be undone.')) return;
+    update(s => {
+      const p = s.purchases.find(x => x.id === id);
+      if (p) logActivity('Deleted purchase', p.purchaseNum || '(no#)', p.vendor || '');
+      s.purchases = s.purchases.filter(x => x.id !== id);
+      s.ui.view = 'purchases';
+      s.ui.activePurchaseId = null;
+    });
+  },
+  setPurchaseField(purchaseId, field, value) {
+    update(s => {
+      const p = s.purchases.find(x => x.id === purchaseId); if (!p) return;
+      p[field] = value;
+    });
+  },
+  addPurchaseItem(purchaseId) {
+    update(s => {
+      const p = s.purchases.find(x => x.id === purchaseId); if (!p) return;
+      if (!Array.isArray(p.items)) p.items = [];
+      p.items.push(newPurchaseItem());
+    });
+  },
+  removePurchaseItem(purchaseId, itemId) {
+    if (!confirm('Remove this line item and its allocations?')) return;
+    update(s => {
+      const p = s.purchases.find(x => x.id === purchaseId); if (!p) return;
+      p.items = (p.items || []).filter(it => it.id !== itemId);
+    });
+  },
+  setPurchaseItemField(purchaseId, itemId, field, value) {
+    update(s => {
+      const p = s.purchases.find(x => x.id === purchaseId); if (!p) return;
+      const it = (p.items || []).find(x => x.id === itemId); if (!it) return;
+      it[field] = value;
+      // Auto-recompute extended unless user explicitly set it
+      if (field === 'qty' || field === 'unitPrice') {
+        it.extended = num(it.qty) * num(it.unitPrice);
+      }
+    });
+  },
+  addAllocation(purchaseId, itemId) {
+    update(s => {
+      const p = s.purchases.find(x => x.id === purchaseId); if (!p) return;
+      const it = (p.items || []).find(x => x.id === itemId); if (!it) return;
+      if (!Array.isArray(it.allocations)) it.allocations = [];
+      it.allocations.push(newAllocation());
+    });
+  },
+  removeAllocation(purchaseId, itemId, allocId) {
+    update(s => {
+      const p = s.purchases.find(x => x.id === purchaseId); if (!p) return;
+      const it = (p.items || []).find(x => x.id === itemId); if (!it) return;
+      it.allocations = (it.allocations || []).filter(a => a.id !== allocId);
+    });
+  },
+  setAllocationField(purchaseId, itemId, allocId, field, value) {
+    update(s => {
+      const p = s.purchases.find(x => x.id === purchaseId); if (!p) return;
+      const it = (p.items || []).find(x => x.id === itemId); if (!it) return;
+      const a = (it.allocations || []).find(x => x.id === allocId); if (!a) return;
+      a[field] = value;
+    });
+  },
+  // Convenience: add a single allocation that absorbs the remaining unallocated $
+  allocateRemainder(purchaseId, itemId) {
+    update(s => {
+      const p = s.purchases.find(x => x.id === purchaseId); if (!p) return;
+      const it = (p.items || []).find(x => x.id === itemId); if (!it) return;
+      const ext = purchaseItemExtended(it);
+      const used = (it.allocations || []).reduce((s, a) => s + num(a.amount), 0);
+      const remaining = ext - used;
+      if (remaining < 0.01) return;
+      if (!Array.isArray(it.allocations)) it.allocations = [];
+      it.allocations.push(newAllocation({ amount: Math.round(remaining * 100) / 100 }));
+    });
+  },
+  // Purchasing list filter handlers
+  setPurchaseSearch(v) {
+    state.ui.purchaseFilters = state.ui.purchaseFilters || { search:'', hiddenStatuses:[], vendor:'all' };
+    state.ui.purchaseFilters.search = v;
+    clearTimeout(window._purSearchT);
+    window._purSearchT = setTimeout(() => render(), 150);
+  },
+  togglePurchaseStatusFilter(status) {
+    update(s => {
+      const f = s.ui.purchaseFilters = s.ui.purchaseFilters || { search:'', hiddenStatuses:[], vendor:'all' };
+      if (!Array.isArray(f.hiddenStatuses)) f.hiddenStatuses = [];
+      const i = f.hiddenStatuses.indexOf(status);
+      if (i >= 0) f.hiddenStatuses.splice(i, 1);
+      else f.hiddenStatuses.push(status);
+    });
+  },
+  setPurchaseVendorFilter(v) {
+    update(s => {
+      s.ui.purchaseFilters = s.ui.purchaseFilters || { search:'', hiddenStatuses:[], vendor:'all' };
+      s.ui.purchaseFilters.vendor = v;
+    });
+  },
+
+  toggleHealthCheck(quoteId) {
+    update(s => {
+      if (!s.ui.healthCheckOpen) s.ui.healthCheckOpen = {};
+      const key = 'hc_' + quoteId;
+      // Read current effective state to flip it
+      const q = s.quotes.find(x => x.id === quoteId);
+      const summary = q ? quoteHealthSummary(q) : null;
+      const wasAutoOpen = summary && summary.fail > 0;
+      const explicit = s.ui.healthCheckOpen[key];
+      const currentlyOpen = (explicit != null) ? explicit : wasAutoOpen;
+      s.ui.healthCheckOpen[key] = !currentlyOpen;
+    });
   },
   setCustHistFilter(field, value) {
     update(s => { s.ui.custHist[field] = value; });
