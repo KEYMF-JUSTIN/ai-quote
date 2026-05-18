@@ -244,6 +244,27 @@
   .part-card-add { min-width:120px; max-width:140px; background:transparent; }
   .part-card-add:hover:not(:disabled) { background:#FFF7ED; }
 
+  /* v7.63: PDF viewer (Mozilla PDF.js wrapper) — used in training wizard,
+     RFQ import modal, vendor/customer cards. Toolbar + scrollable canvas. */
+  .pdf-viewer-embed { display:flex; flex-direction:column; background:#2a2f36; border:1px solid var(--line-dark); border-radius:4px; overflow:hidden; height:100%; min-height:480px; }
+  .pdf-viewer-toolbar { display:flex; align-items:center; gap:6px; padding:6px 10px; background:#1c2026; color:#e5e7eb; border-bottom:1px solid #444; }
+  .pdf-viewer-toolbar .btn { background:#374151; color:white; border:1px solid #4b5563; padding:2px 8px; }
+  .pdf-viewer-toolbar .btn:hover { background:#4b5563; border-color:#6b7280; }
+  .pdf-viewer-pageinfo { font-size:12px; font-family:var(--font-mono); padding:0 8px; color:#cbd5e1; }
+  .pdf-viewer-zoomlevel { font-size:12px; font-family:var(--font-mono); padding:0 4px; color:#cbd5e1; min-width:42px; text-align:center; }
+  .pdf-viewer-scroll { flex:1; overflow:auto; padding:12px; background:#3a3f47; display:flex; justify-content:center; align-items:flex-start; }
+  .pdf-viewer-canvas { background:white; box-shadow:0 4px 12px rgba(0,0,0,0.4); display:block; }
+  .pdf-viewer-loading { padding:40px; color:#cbd5e1; font-size:14px; text-align:center; }
+
+  /* v7.63: Training wizard layout — full screen with left/right split */
+  .training-modal-wide { width:95vw !important; max-width:none !important; height:90vh; max-height:none !important; display:flex; flex-direction:column; }
+  .training-modal-wide .modal-body { flex:1; min-height:0; padding:0; }
+  .training-split { display:grid; grid-template-columns:62% 38%; gap:0; height:100%; min-height:0; }
+  .training-split-left { padding:14px; background:#2a2f36; overflow:hidden; display:flex; flex-direction:column; min-height:0; }
+  .training-split-right { padding:14px 18px; overflow-y:auto; background:white; border-left:1px solid var(--line-dark); }
+  .training-no-preview { display:flex; align-items:center; justify-content:center; height:100%; color:#cbd5e1; font-style:italic; padding:40px; text-align:center; }
+  .training-img-preview { max-width:100%; max-height:100%; object-fit:contain; background:white; box-shadow:0 4px 12px rgba(0,0,0,0.4); }
+
   /* v7.61: Type picker modal cards */
   .type-picker-card { display:flex; align-items:stretch; padding:0; background:var(--paper); border:1px solid var(--line-dark); border-radius:5px; cursor:pointer; text-align:left; font:inherit; color:var(--text); overflow:hidden; transition:all 0.12s ease; min-height:80px; }
   .type-picker-card:hover { border-color:var(--type-color, var(--orange)); box-shadow:0 4px 10px rgba(0,0,0,0.08); transform:translateY(-1px); }
@@ -644,7 +665,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.62.0';
+const APP_VERSION = '7.63.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -2612,6 +2633,191 @@ function loadScript(src) {
     s.onerror = () => reject(new Error('Failed to load ' + src));
     document.head.appendChild(s);
   });
+}
+
+// =================================================================
+// v7.63: PDF VIEWER — reusable component wrapping PDF.js (Mozilla).
+// Lazy-loads ~300KB on first use, then PDFs render to canvas with full
+// fidelity (vs. iframe which is browser-dependent and not interactive).
+// Used by: training wizard (big viewer), RFQ import modal (preview),
+// vendor/customer cards (thumbnails), future job folder browser.
+// =================================================================
+const PDFJS_VERSION = '4.0.379';
+const PDFJS_CDN     = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${PDFJS_VERSION}`;
+let _pdfjsLoaded = false;
+const _pdfDocCache = new Map();   // blobUrl → PDFDocumentProxy (cache so opening the same file twice is instant)
+
+async function ensurePdfJs() {
+  if (_pdfjsLoaded && typeof window.pdfjsLib !== 'undefined') return window.pdfjsLib;
+  await loadScript(`${PDFJS_CDN}/pdf.min.js`);
+  if (typeof window.pdfjsLib === 'undefined') throw new Error('PDF.js failed to load');
+  // Set worker source — PDF.js does parsing in a worker for performance
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc = `${PDFJS_CDN}/pdf.worker.min.js`;
+  _pdfjsLoaded = true;
+  return window.pdfjsLib;
+}
+
+const PdfViewer = {
+  // Load a PDF document and return the PDFDocumentProxy. Cached by URL.
+  async loadPdf(blobUrl) {
+    if (_pdfDocCache.has(blobUrl)) return _pdfDocCache.get(blobUrl);
+    const lib = await ensurePdfJs();
+    const loadingTask = lib.getDocument(blobUrl);
+    const pdf = await loadingTask.promise;
+    _pdfDocCache.set(blobUrl, pdf);
+    return pdf;
+  },
+
+  // Render page N (1-indexed) of an already-loaded PDF onto a canvas.
+  // `scale` is a multiplier; 1.5 is a good default for crisp on-screen rendering.
+  async renderPage(pdf, pageNum, canvas, scale) {
+    scale = scale || 1.5;
+    const page = await pdf.getPage(pageNum);
+    const viewport = page.getViewport({ scale });
+    canvas.width  = viewport.width;
+    canvas.height = viewport.height;
+    canvas.style.width  = viewport.width + 'px';
+    canvas.style.height = viewport.height + 'px';
+    const ctx = canvas.getContext('2d');
+    await page.render({ canvasContext: ctx, viewport }).promise;
+    return { width: viewport.width, height: viewport.height };
+  },
+
+  // Render the first page of a PDF as a thumbnail at the given max-width (px).
+  // Returns a promise that resolves when the canvas is painted.
+  async renderThumbnail(blobUrl, canvas, maxWidth) {
+    maxWidth = maxWidth || 160;
+    const pdf = await this.loadPdf(blobUrl);
+    const page = await pdf.getPage(1);
+    const baseViewport = page.getViewport({ scale: 1 });
+    const scale = maxWidth / baseViewport.width;
+    const viewport = page.getViewport({ scale });
+    canvas.width  = viewport.width;
+    canvas.height = viewport.height;
+    canvas.style.width  = viewport.width + 'px';
+    canvas.style.height = viewport.height + 'px';
+    const ctx = canvas.getContext('2d');
+    await page.render({ canvasContext: ctx, viewport }).promise;
+  },
+
+  // Free a cached document — call when blob URLs are revoked
+  release(blobUrl) {
+    const pdf = _pdfDocCache.get(blobUrl);
+    if (pdf && typeof pdf.destroy === 'function') {
+      try { pdf.destroy(); } catch (_) {}
+    }
+    _pdfDocCache.delete(blobUrl);
+  },
+};
+
+// v7.63: Helper to build a full-fidelity PDF viewer embed in the DOM.
+// Returns the HTML markup with a unique container id; once the markup is
+// in the page, call PdfViewer._mountEmbed(containerId, blobUrl, opts) to
+// kick off async rendering. Provides page nav + zoom buttons.
+function renderPdfViewerEmbed(blobUrl, opts) {
+  opts = opts || {};
+  const containerId = 'pdfv_' + uid();
+  const initialScale = opts.scale || 1.4;
+  // Schedule async mount after the container is in the DOM
+  setTimeout(() => PdfViewer._mountEmbed(containerId, blobUrl, { ...opts, scale: initialScale }), 30);
+  return `
+    <div class="pdf-viewer-embed" id="${containerId}" data-blob-url="${esc(blobUrl)}" data-scale="${initialScale}">
+      <div class="pdf-viewer-toolbar">
+        <button class="btn btn-sm" onclick="PdfViewer._prevPage('${containerId}')" title="Previous page">◀</button>
+        <span class="pdf-viewer-pageinfo">Page <span class="pdf-viewer-curpage">…</span> / <span class="pdf-viewer-totpages">…</span></span>
+        <button class="btn btn-sm" onclick="PdfViewer._nextPage('${containerId}')" title="Next page">▶</button>
+        <span style="flex:1;"></span>
+        <button class="btn btn-sm" onclick="PdfViewer._zoomOut('${containerId}')" title="Zoom out">−</button>
+        <span class="pdf-viewer-zoomlevel">100%</span>
+        <button class="btn btn-sm" onclick="PdfViewer._zoomIn('${containerId}')" title="Zoom in">＋</button>
+        <button class="btn btn-sm" onclick="PdfViewer._fitWidth('${containerId}')" title="Fit width">⇔</button>
+      </div>
+      <div class="pdf-viewer-scroll">
+        <div class="pdf-viewer-loading">⏳ Loading PDF…</div>
+        <canvas class="pdf-viewer-canvas" style="display:none;"></canvas>
+      </div>
+    </div>
+  `;
+}
+
+// PdfViewer instance helpers — operate on a mounted embed container by id
+PdfViewer._instances = {};
+PdfViewer._mountEmbed = async function(containerId, blobUrl, opts) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  try {
+    const pdf = await this.loadPdf(blobUrl);
+    const inst = { pdf, curPage: 1, scale: opts.scale || 1.4, blobUrl };
+    this._instances[containerId] = inst;
+    container.querySelector('.pdf-viewer-totpages').textContent = pdf.numPages;
+    container.querySelector('.pdf-viewer-loading').style.display = 'none';
+    container.querySelector('.pdf-viewer-canvas').style.display = 'block';
+    await this._renderCurrentInstance(containerId);
+  } catch (e) {
+    container.querySelector('.pdf-viewer-loading').innerHTML =
+      '⚠ Couldn\'t render PDF: ' + esc(e.message || 'unknown error');
+  }
+};
+PdfViewer._renderCurrentInstance = async function(containerId) {
+  const inst = this._instances[containerId];
+  const container = document.getElementById(containerId);
+  if (!inst || !container) return;
+  const canvas = container.querySelector('.pdf-viewer-canvas');
+  await this.renderPage(inst.pdf, inst.curPage, canvas, inst.scale);
+  container.querySelector('.pdf-viewer-curpage').textContent = inst.curPage;
+  container.querySelector('.pdf-viewer-zoomlevel').textContent = Math.round(inst.scale * 100 / 1.5) + '%';
+};
+PdfViewer._prevPage = function(containerId) {
+  const inst = this._instances[containerId]; if (!inst) return;
+  if (inst.curPage > 1) { inst.curPage--; this._renderCurrentInstance(containerId); }
+};
+PdfViewer._nextPage = function(containerId) {
+  const inst = this._instances[containerId]; if (!inst) return;
+  if (inst.curPage < inst.pdf.numPages) { inst.curPage++; this._renderCurrentInstance(containerId); }
+};
+PdfViewer._zoomIn = function(containerId) {
+  const inst = this._instances[containerId]; if (!inst) return;
+  inst.scale = Math.min(4.0, inst.scale * 1.25);
+  this._renderCurrentInstance(containerId);
+};
+PdfViewer._zoomOut = function(containerId) {
+  const inst = this._instances[containerId]; if (!inst) return;
+  inst.scale = Math.max(0.4, inst.scale / 1.25);
+  this._renderCurrentInstance(containerId);
+};
+PdfViewer._fitWidth = function(containerId) {
+  const inst = this._instances[containerId]; if (!inst) return;
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  const scrollPane = container.querySelector('.pdf-viewer-scroll');
+  const availWidth = scrollPane.clientWidth - 32;
+  // Compute base width via a scale=1 viewport
+  inst.pdf.getPage(inst.curPage).then(page => {
+    const baseW = page.getViewport({ scale: 1 }).width;
+    inst.scale = availWidth / baseW;
+    this._renderCurrentInstance(containerId);
+  });
+};
+
+// Mount a thumbnail (first page only) into a canvas placeholder.
+// Use: html includes `<canvas data-pdf-thumb="blobUrl" data-max-width="160">`
+// and call PdfViewer._mountAllThumbnails() after the DOM is attached.
+PdfViewer._mountAllThumbnails = function(root) {
+  root = root || document;
+  const canvases = root.querySelectorAll('canvas[data-pdf-thumb]:not([data-pdf-thumb-mounted])');
+  canvases.forEach(canvas => {
+    canvas.dataset.pdfThumbMounted = '1';
+    const url = canvas.dataset.pdfThumb;
+    const w = parseInt(canvas.dataset.maxWidth || '160', 10);
+    PdfViewer.renderThumbnail(url, canvas, w).catch(e => {
+      console.warn('thumb render failed', url, e);
+      canvas.style.display = 'none';
+    });
+  });
+};
+function renderPdfThumbnail(blobUrl, maxWidth) {
+  maxWidth = maxWidth || 160;
+  return `<canvas data-pdf-thumb="${esc(blobUrl)}" data-max-width="${maxWidth}" style="max-width:${maxWidth}px; height:auto; border:1px solid var(--line-dark); background:white;"></canvas>`;
 }
 
 // =================================================================
@@ -5181,6 +5387,8 @@ function render() {
   renderNewQuoteKindPickerModal();
   renderPartTypePickerModal();
   renderTrainingModal();
+  // v7.63: paint any PDF thumbnails (<canvas data-pdf-thumb>) emitted in this render pass
+  try { if (typeof PdfViewer !== 'undefined') PdfViewer._mountAllThumbnails(); } catch (_) {}
   renderMsgImportModal();
   renderMissingCustFolderModal();
   // v7.34: user management dialogs
@@ -11533,72 +11741,89 @@ function renderTrainingModal() {
   const isEdit = !!p.sampleId;
   const parsedJson = p.parsed ? JSON.stringify(p.parsed, null, 2) : '';
 
+  // v7.63: blob URL for the dropped file so PdfViewer / <img> can render it
+  // directly. We park it on p so it's cleaned up when the modal closes.
+  if (p.file && !p._fileBlobUrl) {
+    try { p._fileBlobUrl = URL.createObjectURL(p.file); } catch (_) { p._fileBlobUrl = null; }
+  }
+  const isPdf = !!(p.file && (/pdf$/i.test(p.file.type || '') || /\.pdf$/i.test(p.file.name || '')));
+  const isImage = !!(p.file && /^image\//i.test(p.file.type || ''));
+  // Preview pane on the LEFT — switches by file type
+  const previewPane = (!p.file && !isEdit) ? `
+    <div class="msg-dropzone training-dropzone" style="height:100%; display:flex; flex-direction:column; justify-content:center; align-items:center; background:#3a3f47; color:#e5e7eb;">
+      <strong style="font-size:16px;">📄 Drop a sample document here</strong>
+      <div style="margin-top:8px; color:#cbd5e1;">PDF / image / text · Claude reads it and extracts structured fields</div>
+      <button class="pickbtn" onclick="App.pickTrainingFile()" style="margin-top:12px;">or pick a file…</button>
+      <div class="hint" style="margin-top:10px; font-size:11px; color:#94a3b8; max-width:400px; text-align:center;">
+        Drop the most recent Alro invoice on Alro, or the most recent Hannon Electric RFQ on Hannon. The richer the sample (more fields populated), the better future extractions get.
+      </div>
+    </div>
+  ` : isPdf && p._fileBlobUrl ? renderPdfViewerEmbed(p._fileBlobUrl)
+    : isImage && p._fileBlobUrl ? `<div class="training-split-left" style="padding:0; align-items:center; justify-content:center;"><img class="training-img-preview" src="${esc(p._fileBlobUrl)}" alt="${esc(p.file.name)}"></div>`
+    : p.file ? `<div class="training-no-preview">No preview available for ${esc(p.file.type || 'this file type')}.<br>Filename: <span class="mono" style="color:#fbbf24;">${esc(p.file.name)}</span><br>Claude can still extract fields from the raw bytes.</div>`
+    : `<div class="training-no-preview">Original document not stored.<br>Edit the fields on the right to update the labels.</div>`;
+
   modalHost.innerHTML = `
     <div class="modal-backdrop" onclick="App.closeTrainingPicker()">
-      <div class="modal" style="width:880px; max-width:96vw; max-height:90vh; display:flex; flex-direction:column;" onclick="event.stopPropagation()">
+      <div class="modal training-modal-wide" onclick="event.stopPropagation()">
         <div class="modal-header">
-          📚 ${isEdit ? 'Edit' : 'Add'} Training Sample — ${esc(entityLabel)}
+          📚 ${isEdit ? 'Edit' : 'Add'} Training Sample — ${esc(entityLabel)}${p.file ? ' · ' + esc(p.file.name) : ''}
         </div>
-        <div class="modal-body" style="flex:1; overflow-y:auto;">
-          <div style="margin-bottom:12px;">
-            <div class="label">Document type</div>
-            <div style="display:flex; flex-wrap:wrap; gap:6px; margin-top:4px;">
-              ${docTypes.map(d => `
-                <button class="chip ${p.docType === d.id ? 'chip-selected' : ''}"
-                        onclick="App.setTrainingDocType('${d.id}')"
-                        style="cursor:pointer; padding:4px 10px; border:1px solid ${p.docType===d.id?'var(--navy)':'var(--line-dark)'}; background:${p.docType===d.id?'var(--navy)':'var(--bg)'}; color:${p.docType===d.id?'white':'inherit'};">
-                  ${d.icon} ${esc(d.label)}
-                </button>
-              `).join('')}
+        <div class="modal-body">
+          <div class="training-split">
+            <div class="training-split-left">
+              ${previewPane}
             </div>
-          </div>
-          ${!p.file && !isEdit ? `
-            <div class="msg-dropzone training-dropzone" style="margin-bottom:14px;">
-              <strong>📄 Drop a sample document here</strong>
-              <div style="margin-top:4px;">PDF / image / text · Claude reads it and extracts structured fields</div>
-              <button class="pickbtn" onclick="App.pickTrainingFile()" style="margin-top:8px;">or pick a file…</button>
-              <div class="hint" style="margin-top:6px; font-size:11px;">Example: drop the most recent Alro invoice on Alro, or the most recent Hannon Electric RFQ on Hannon. The richer your sample (more fields populated), the better future extractions get.</div>
-            </div>
-          ` : ''}
-          ${p.loading ? `
-            <div style="text-align:center; padding:24px;">
-              <div style="font-size:14px;">⏳ Claude is reading ${esc(p.file ? p.file.name : 'the document')}…</div>
-              <div class="text-mute small" style="margin-top:4px;">Usually 5-15 seconds.</div>
-            </div>
-          ` : ''}
-          ${p.error ? `
-            <div style="background:#FDEDEA; border-left:3px solid #C73E1D; padding:10px 12px; margin-bottom:12px; color:#C73E1D;">
-              <strong>Couldn't extract:</strong> ${esc(p.error)}
-            </div>
-          ` : ''}
-          ${p.parsed && !p.loading ? `
-            <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px;">
-              <div>
+            <div class="training-split-right">
+              <div class="label">Document type</div>
+              <div style="display:flex; flex-wrap:wrap; gap:6px; margin:4px 0 14px;">
+                ${docTypes.map(d => `
+                  <button class="chip ${p.docType === d.id ? 'chip-selected' : ''}"
+                          onclick="App.setTrainingDocType('${d.id}')"
+                          style="cursor:pointer; padding:4px 10px; border:1px solid ${p.docType===d.id?'var(--navy)':'var(--line-dark)'}; background:${p.docType===d.id?'var(--navy)':'var(--bg)'}; color:${p.docType===d.id?'white':'inherit'};">
+                    ${d.icon} ${esc(d.label)}
+                  </button>
+                `).join('')}
+              </div>
+
+              ${p.loading ? `
+                <div style="background:#FEF6E7; border-left:3px solid #D97706; padding:10px 12px; margin-bottom:12px;">
+                  <strong>⏳ Claude is reading ${esc(p.file ? p.file.name : 'the document')}…</strong>
+                  <div class="text-mute small" style="margin-top:2px;">Usually 5-15 seconds. The preview is shown on the left.</div>
+                </div>
+              ` : ''}
+              ${p.error ? `
+                <div style="background:#FDEDEA; border-left:3px solid #C73E1D; padding:10px 12px; margin-bottom:12px; color:#C73E1D;">
+                  <strong>Couldn't extract:</strong> ${esc(p.error)}
+                </div>
+              ` : ''}
+
+              ${p.parsed ? `
                 <div class="label">Extracted fields <span class="text-mute small">— edit any values that aren't right</span></div>
                 <textarea id="training-parsed-textarea"
-                          style="width:100%; min-height:340px; font-family:var(--font-mono); font-size:12px; padding:8px;"
+                          style="width:100%; min-height:280px; font-family:var(--font-mono); font-size:12px; padding:8px;"
                           onchange="App.setTrainingParsedJson(this.value)">${esc(parsedJson)}</textarea>
-                <div class="text-mute small" style="margin-top:4px;">JSON format. The shape mirrors what the document-extract endpoint returns: detected_doc_type, vendor, references, dates, lineItems, totals, drawing, summary, redFlags.</div>
-              </div>
-              <div>
-                <div class="label">File metadata</div>
+                <div class="text-mute small" style="margin-top:4px;">JSON format. Mirrors the extract-document endpoint output: <span class="mono">detected_doc_type, vendor, references, dates, lineItems, totals, drawing, summary, redFlags</span>. <strong>v7.63.1 will replace this with a step-by-step wizard.</strong></div>
+
+                <div class="label" style="margin-top:14px;">File metadata</div>
                 <div style="background:var(--bg); padding:8px 10px; font-size:12px; line-height:1.6; margin-top:4px;">
                   <div><strong>Filename:</strong> <span class="mono">${esc(p.file ? p.file.name : (p.sampleFilename || '?'))}</span></div>
                   <div><strong>Type:</strong> ${esc(p.file ? (p.file.type || 'unknown') : (p.sampleMimeType || '?'))}</div>
                   <div><strong>Size:</strong> ${p.file ? Math.round(p.file.size / 1024) : (p.sampleSize || '?')} KB</div>
                 </div>
-                <div class="label" style="margin-top:10px;">Notes (optional)</div>
+
+                <div class="label" style="margin-top:14px;">Notes (optional)</div>
                 <textarea
                   style="width:100%; min-height:60px; font-size:13px; padding:6px;"
                   onchange="App.setTrainingNotes(this.value)"
                   placeholder="Anything special about this format? (e.g. 'old format pre-2024 — they redesigned the layout', 'this one had a typo we corrected')">${esc(p.notes || '')}</textarea>
-                <div class="label" style="margin-top:10px;">Usage</div>
-                <div class="text-mute small">
-                  This sample will be passed to Claude as a few-shot example when future ${p.entityType === 'vendor' ? 'vendor' : 'customer'} docs from ${esc(entityLabel)} arrive (v7.63+). The more samples and the more accurate the labels, the better future extractions get.
+              ` : !p.loading && !p.error ? `
+                <div class="text-mute small" style="padding:20px 0;">
+                  Drop a sample on the left to start training. Claude will read it and pre-fill the fields below for you to review and correct.
                 </div>
-              </div>
+              ` : ''}
             </div>
-          ` : ''}
+          </div>
         </div>
         <div class="modal-footer">
           <button class="btn" onclick="App.closeTrainingPicker()">Cancel</button>
@@ -11676,6 +11901,129 @@ const TRAINING_DOC_TYPES = [
   { id: 'spec_sheet',    label: 'Spec Sheet',           icon: '📄', for: 'both' },
   { id: 'other',         label: 'Other',                icon: '📎', for: 'both' },
 ];
+// v7.63: Per-doc-type question wizards. Each question has:
+//   - key: dotted path into the parsedFields object (e.g. 'vendor.name')
+//   - label: prompt shown to the user
+//   - hint: small description / where to look on the doc
+//   - type: text | number | currency | date | textarea | lineItems
+//   - section: 'header' | 'lineItems' | 'totals' | 'metadata' (for grouping)
+// The wizard walks these in order; user confirms / corrects each.
+const _COMMON_VENDOR_HEADER = [
+  { key:'vendor.name',         label:'Vendor name',     hint:'Usually top-left of the doc', type:'text',     section:'header' },
+  { key:'references.docNum',   label:'Document number', hint:'Quote #, Invoice #, Order # — the primary identifier for this doc', type:'text', section:'header' },
+  { key:'dates.docDate',       label:'Document date',   hint:'Date the doc was issued', type:'date', section:'header' },
+  { key:'references.customerPO', label:'Reference PO (their PO# or our reference)', hint:'Optional — only if this doc references one', type:'text', section:'header' },
+];
+const _COMMON_TOTALS = [
+  { key:'totals.subtotal', label:'Subtotal',  hint:'Sum of all line-item extended prices', type:'currency', section:'totals' },
+  { key:'totals.tax',      label:'Tax',       hint:'Sales tax amount', type:'currency', section:'totals' },
+  { key:'totals.shipping', label:'Shipping',  hint:'Freight / shipping charges if any', type:'currency', section:'totals' },
+  { key:'totals.total',    label:'Total',     hint:'Grand total — what they want paid', type:'currency', section:'totals' },
+];
+const _LINE_ITEMS_STEP = [
+  { key:'lineItems', label:'Line items',
+    hint:'Each row on the doc — what was bought, shipped, or quoted. Adjust quantities, descriptions, and prices below.',
+    type:'lineItems', section:'lineItems' },
+];
+const TRAINING_QUESTIONS_BY_DOC_TYPE = {
+  // ===== VENDOR DOCS =====
+  quote: [
+    ..._COMMON_VENDOR_HEADER,
+    { key:'dates.dueDate', label:'Valid until / expiration', hint:'Optional — when this quote expires', type:'date', section:'header' },
+    ..._LINE_ITEMS_STEP,
+    ..._COMMON_TOTALS,
+  ],
+  invoice: [
+    ..._COMMON_VENDOR_HEADER,
+    { key:'dates.dueDate', label:'Due date', hint:'When the invoice is due to be paid', type:'date', section:'header' },
+    ..._LINE_ITEMS_STEP,
+    ..._COMMON_TOTALS,
+  ],
+  packing_slip: [
+    { key:'vendor.name', label:'Vendor name', hint:'Top-left of the slip', type:'text', section:'header' },
+    { key:'references.packingNum', label:'Packing slip #', hint:'Their packing slip number', type:'text', section:'header' },
+    { key:'references.poNum',      label:'PO reference',   hint:'Our PO# or their order #', type:'text', section:'header' },
+    { key:'dates.shipDate', label:'Ship date', hint:'Date shipped', type:'date', section:'header' },
+    { key:'references.tracking', label:'Tracking #', hint:'Carrier tracking number (optional)', type:'text', section:'header' },
+    ..._LINE_ITEMS_STEP,
+  ],
+  po_confirm: [
+    ..._COMMON_VENDOR_HEADER,
+    { key:'dates.shipDate', label:'Estimated ship / lead time', hint:'When they expect to ship', type:'date', section:'header' },
+    ..._LINE_ITEMS_STEP,
+    ..._COMMON_TOTALS,
+  ],
+  receipt: [
+    { key:'vendor.name', label:'Merchant', hint:'Store name from the top of the receipt', type:'text', section:'header' },
+    { key:'dates.docDate', label:'Date', hint:'Date + time of purchase', type:'date', section:'header' },
+    { key:'references.docNum', label:'Receipt / Transaction #', hint:'Receipt number if shown', type:'text', section:'header' },
+    ..._LINE_ITEMS_STEP,
+    ..._COMMON_TOTALS,
+  ],
+  // ===== CUSTOMER DOCS =====
+  rfq: [
+    { key:'vendor.name',    label:'Customer name',    hint:'Company that sent the RFQ', type:'text', section:'header' },
+    { key:'vendor.contact', label:'Contact person',   hint:'Who at the customer sent this', type:'text', section:'header' },
+    { key:'vendor.email',   label:'Contact email',    hint:'Their email address', type:'text', section:'header' },
+    { key:'dates.docDate',  label:'Date sent',        hint:'When the RFQ was sent', type:'date', section:'header' },
+    { key:'references.rfqNum', label:'Their RFQ #',  hint:'Customer\'s RFQ / inquiry reference (optional)', type:'text', section:'header' },
+    { key:'dates.dueDate',  label:'Quote needed by',  hint:'Their requested response deadline', type:'date', section:'header' },
+    ..._LINE_ITEMS_STEP,
+    { key:'summary', label:'One-line summary', hint:'What is the customer asking for in plain English?', type:'textarea', section:'metadata' },
+  ],
+  customer_po: [
+    { key:'vendor.name',    label:'Customer name',  hint:'Company sending the PO', type:'text', section:'header' },
+    { key:'references.poNum', label:'PO number',    hint:'Their purchase order number', type:'text', section:'header' },
+    { key:'dates.docDate',  label:'PO date',        hint:'When the PO was issued', type:'date', section:'header' },
+    { key:'dates.dueDate',  label:'Required ship date', hint:'When they need parts delivered', type:'date', section:'header' },
+    ..._LINE_ITEMS_STEP,
+    ..._COMMON_TOTALS,
+  ],
+  drawing: [
+    { key:'drawing.partNum',    label:'Part number',     hint:'From the title block, lower-right usually', type:'text', section:'header' },
+    { key:'drawing.revision',   label:'Revision',        hint:'Rev letter / number', type:'text', section:'header' },
+    { key:'drawing.title',      label:'Title / description', hint:'Part name from the title block', type:'text', section:'header' },
+    { key:'drawing.material',   label:'Material spec',   hint:'Material callout — usually in a note or title block', type:'text', section:'header' },
+    { key:'drawing.finish',     label:'Finish / coating', hint:'Anodize, paint, plating, etc. — optional', type:'text', section:'header' },
+    { key:'drawing.tolerances', label:'General tolerances', hint:'"±.005 unless noted" or similar block', type:'text', section:'header' },
+    { key:'drawing.dimensions', label:'Critical dimensions / overall size', hint:'Footprint or envelope dimensions', type:'textarea', section:'header' },
+    { key:'drawing.units',      label:'Units',           hint:'in or mm', type:'text', section:'header' },
+    { key:'summary',            label:'Notes / GD&T flags', hint:'Anything else the estimator needs to know', type:'textarea', section:'metadata' },
+  ],
+  // ===== FALLBACKS =====
+  spec_sheet: [
+    { key:'vendor.name', label:'Source', hint:'Who produced this spec sheet', type:'text', section:'header' },
+    { key:'references.docNum', label:'Spec / part #', hint:'Identifier shown on the doc', type:'text', section:'header' },
+    { key:'summary', label:'Summary', hint:'What does this spec describe?', type:'textarea', section:'metadata' },
+  ],
+  other: [
+    { key:'vendor.name', label:'Source', hint:'Who produced this doc', type:'text', section:'header' },
+    { key:'references.docNum', label:'Reference number', hint:'Any identifier shown', type:'text', section:'header' },
+    { key:'summary', label:'What is this doc?', hint:'One-paragraph plain-English description', type:'textarea', section:'metadata' },
+  ],
+};
+function questionsForDocType(docType) {
+  return TRAINING_QUESTIONS_BY_DOC_TYPE[docType] || TRAINING_QUESTIONS_BY_DOC_TYPE.other;
+}
+// v7.63: get/set a nested value by dotted key. Used by the wizard to map
+// question answers to the parsedFields tree (e.g. 'vendor.name' → parsedFields.vendor.name)
+function getByPath(obj, path) {
+  if (!obj || !path) return undefined;
+  const segs = path.split('.');
+  let cur = obj;
+  for (const s of segs) { if (cur == null) return undefined; cur = cur[s]; }
+  return cur;
+}
+function setByPath(obj, path, value) {
+  if (!obj || !path) return;
+  const segs = path.split('.');
+  let cur = obj;
+  for (let i = 0; i < segs.length - 1; i++) {
+    if (cur[segs[i]] == null || typeof cur[segs[i]] !== 'object') cur[segs[i]] = {};
+    cur = cur[segs[i]];
+  }
+  cur[segs[segs.length - 1]] = value;
+}
 function docTypesFor(entityType) {
   return TRAINING_DOC_TYPES.filter(d => d.for === entityType || d.for === 'both');
 }
@@ -15563,6 +15911,12 @@ const App = {
     render();
   },
   closeTrainingPicker() {
+    // v7.63: clean up blob URL + cached PDF doc to free memory
+    const p = state.ui.trainingPicker;
+    if (p && p._fileBlobUrl) {
+      try { PdfViewer.release(p._fileBlobUrl); } catch (_) {}
+      try { URL.revokeObjectURL(p._fileBlobUrl); } catch (_) {}
+    }
     state.ui.trainingPicker = null;
     render();
   },
