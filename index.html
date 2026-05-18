@@ -601,7 +601,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.56.0';
+const APP_VERSION = '7.57.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -826,6 +826,7 @@ const state = {
     msgImport: null,            // v7.31: { filename, parsed, matches, partHints, pdfUrls } — RFQ-from-email import modal
     healthCheckOpen: {},        // v7.50: per-quote expand state for the Health Check card, keyed 'hc_'+quoteId
     similarPartsOpen: {},       // v7.50: per-part expand state for the Similar Parts card, keyed 'sim_'+partId
+    partsExpanded: {},          // v7.57: per-part expand state for inline parts on Quote Info page, keyed partId
     activePurchaseId: null,     // v7.50: currently-open purchase in the Purchasing workspace
     purchaseFilters: { search:'', hiddenStatuses:[], vendor:'all' },
     activeInboxEntryId: null,   // v7.33: which RFQ Inbox entry is expanded
@@ -5175,8 +5176,8 @@ function renderActiveQuoteNav() {
       </div>
       <div class="nav-item ${t==='info'?'active':''}" onclick="App.goTab('info')">Quote Info</div>
       ${q.parts.map((p,i) => `
-        <div class="nav-item ${t==='part-'+p.id?'active':''}" onclick="App.goTab('part-${p.id}')">
-          <span>Part ${i+1}${p.partNum?' — '+esc(p.partNum):''}</span>
+        <div class="nav-item" style="padding-left:24px; font-size:12px;" onclick="App.scrollToPart('${p.id}')" title="Scroll to Part ${i+1} on the Info page">
+          <span>↓ Part ${i+1}${p.partNum?' — '+esc(p.partNum):''}</span>
         </div>
       `).join('')}
       ${(q.kind === 'machining' && q.parts.length >= 1) ? `
@@ -11380,7 +11381,64 @@ function renderQuoteInfo(q) {
       </div>
     </div>
     ${renderJobFolderDropCard(q)}
+    ${renderInlineParts(q)}
     ${renderCustomerHistoryPanel(q)}
+  `;
+}
+
+// v7.57: render every part on the quote as a collapsible card inline on the
+// Info page (instead of forcing a tab switch). First part defaults to expanded,
+// rest collapsed. Click header to toggle. The "+ Add Part" + per-part actions
+// (Duplicate / Remove) live in each card's header strip.
+function renderInlineParts(q) {
+  if (!q || !Array.isArray(q.parts) || q.parts.length === 0) {
+    return `
+      <div class="card" id="parts-section">
+        <div class="card-header"><span>Parts</span><button class="btn btn-primary btn-sm" onclick="App.addPart()">+ Add First Part</button></div>
+        <div class="card-body"><div class="text-mute" style="text-align:center; padding:24px;">No parts yet — add one to start quoting.</div></div>
+      </div>
+    `;
+  }
+  const lockedSingle = q.kind === 'machining' && q.parts.length >= 1;
+  if (!state.ui.partsExpanded) state.ui.partsExpanded = {};
+  return `
+    <div class="section-divider" id="parts-section">
+      <span class="label">Parts (${q.parts.length})</span>
+      <span class="hint-text">click a header to expand · ${q.parts.length === 1 ? 'one part' : 'all parts on this quote'}</span>
+    </div>
+    ${q.parts.map((p, i) => {
+      const explicit = state.ui.partsExpanded['part_' + p.id];
+      const isOpen = explicit != null ? explicit : (i === 0);  // first part open by default
+      const partNumLabel = p.partNum ? esc(p.partNum) : '(no part #)';
+      const descLabel    = p.description ? esc(p.description) : '(no description)';
+      const matLabel     = p.material ? esc(materialLabelFor(p)) : '';
+      const firstTierUnit = unitPriceAt(p, 0);
+      return `
+        <div class="card part-card" id="part-anchor-${p.id}" style="margin-bottom:14px; border-left:4px solid ${isOpen ? 'var(--orange)' : 'var(--line-dark)'};">
+          <div class="card-header" style="cursor:pointer; ${isOpen ? '' : 'background:#FAFAF7; color:var(--text);'}" onclick="App.togglePartExpanded('${p.id}')">
+            <span style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+              <span style="font-size:14px;">${isOpen ? '▾' : '▸'}</span>
+              <span style="font-family:var(--font-display); letter-spacing:0.04em;">PART ${i+1}</span>
+              <span class="mono" style="font-weight:600; ${isOpen ? '' : 'color:var(--text);'}">${partNumLabel}</span>
+              <span style="font-weight:normal; letter-spacing:0; text-transform:none; opacity:${isOpen?'0.85':'0.65'}; font-size:13px;">${descLabel}</span>
+              ${matLabel ? `<span class="pill" style="background:var(--bg); color:var(--steel); font-size:10px; border:1px solid var(--line-dark);">${matLabel}</span>` : ''}
+              ${firstTierUnit > 0 ? `<span class="text-mute small" style="font-size:11px;">$${fmtMoney(firstTierUnit).replace('$','')}/ea @ qty ${fmtInt((p.qtyTiers||[1])[0])}</span>` : ''}
+            </span>
+            <span class="header-actions" onclick="event.stopPropagation()">
+              <button class="btn btn-sm" title="Duplicate this part" onclick="App.duplicatePart('${p.id}')">⎘</button>
+              <button class="btn btn-sm btn-danger" title="Remove this part" onclick="App.deletePart('${p.id}')">×</button>
+            </span>
+          </div>
+          ${isOpen ? `<div class="card-body" style="padding:0;"><div style="padding:14px 16px;">${renderPartEditor(q, p)}</div></div>` : ''}
+        </div>
+      `;
+    }).join('')}
+    <div style="text-align:center; padding:12px 0;">
+      ${lockedSingle
+        ? `<button class="btn" disabled title="Single-part machining quote — change quote type if you want multiple parts">+ Add Part (locked — single-part kind)</button>`
+        : `<button class="btn btn-primary" onclick="App.addPart()">+ Add Part</button>`
+      }
+    </div>
   `;
 }
 
@@ -15045,6 +15103,38 @@ const App = {
   },
   // v7.50: Health Check card expand/collapse — explicit user toggle overrides
   // the default open-when-failing behavior
+  // v7.57: collapse/expand a part on the Quote Info page (inline parts layout)
+  togglePartExpanded(partId) {
+    update(s => {
+      if (!s.ui.partsExpanded) s.ui.partsExpanded = {};
+      const key = 'part_' + partId;
+      // Default-open logic mirrors the renderer: first part open, rest collapsed
+      let isFirst = false;
+      const q = s.quotes.find(qq => qq.id === s.ui.activeQuoteId);
+      if (q && q.parts && q.parts[0] && q.parts[0].id === partId) isFirst = true;
+      const explicit = s.ui.partsExpanded[key];
+      const currentlyOpen = (explicit != null) ? explicit : isFirst;
+      s.ui.partsExpanded[key] = !currentlyOpen;
+    });
+  },
+  // v7.57: scroll-to a specific part anchor on the Quote Info page. If we're
+  // not on Info tab, switch first; if the part is collapsed, expand it; then
+  // smooth-scroll its card into view. Used by the sidebar Part 1/2/3 links.
+  scrollToPart(partId) {
+    update(s => {
+      // Ensure we're on the Info tab (this is the only place parts render inline)
+      if (s.ui.activeQuoteTab !== 'info') s.ui.activeQuoteTab = 'info';
+      // Force-expand the target part so the card is visible to scroll to
+      if (!s.ui.partsExpanded) s.ui.partsExpanded = {};
+      s.ui.partsExpanded['part_' + partId] = true;
+    });
+    // Defer scroll until after the next render paint
+    setTimeout(() => {
+      const el = document.getElementById('part-anchor-' + partId);
+      if (el && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 60);
+  },
+
   // v7.50: Similar Parts panel toggle
   toggleSimilarParts(partId) {
     update(s => {
