@@ -601,7 +601,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.52.0';
+const APP_VERSION = '7.53.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -12051,13 +12051,24 @@ function renderDxfCard(q, p) {
                     !v.cutProcesses || v.cutProcesses.length === 0 || v.cutProcesses.includes(f.process)
                   );
                   const vendorOpts = matchingVendors.map(v => ({value:v.id, label:(v.favorite?'★ ':'') + (v.name || '(unnamed)')}));
+                  // v7.53: AI Estimate button — appears once process is set.
+                  // Pre-flight: needs material from the part + qty from the active tier.
+                  const canEstimate = !!f.process && !!p.material;
+                  const isEstimating = f._aiEstimating === true;
+                  const aiBadge = f._aiEstimate ? `<div class="text-mute small" style="font-size:10px; line-height:1.2; margin-top:2px;" title="${esc(f._aiEstimate.reasoning || '')}">✨ AI · ${esc(f._aiEstimate.confidence || '')}${f._aiEstimate.perPieceRangeLow != null && f._aiEstimate.perPieceRangeHigh != null ? ' · '+fmtMoney(f._aiEstimate.perPieceRangeLow)+'-'+fmtMoney(f._aiEstimate.perPieceRangeHigh) : ''}</div>` : '';
                   return `
                     <tr>
                       <td>${bind({label:'DXF filename',value:f.filename, onChange:v=>{p.dxfFiles[fi].filename=v;}, placeholder:'BRACKET-PLATE.dxf'})}</td>
                       <td>${bind({label:'Cut process',value:f.process, type:'select', options:procOpts, onChange:v=>{p.dxfFiles[fi].process=v;}})}</td>
                       <td>${bind({label:'Cut vendor',value:f.vendorId||'', type:'select', options:vendorOpts, placeholder:matchingVendors.length===0?'(no vendor for this process)':'— pick —', onChange:v=>{p.dxfFiles[fi].vendorId=v||null;}})}</td>
                       <td class="num">${bind({label:'Qty per part',value:f.qtyPerPart, type:'number', onChange:v=>{p.dxfFiles[fi].qtyPerPart=v;}, attrs:'step="1" min="1"'})}</td>
-                      <td class="num">${bind({label:'Price per piece',value:f.pricePerPiece, type:'number', onChange:v=>{p.dxfFiles[fi].pricePerPiece=v;}, attrs:'step="any" min="0"'})}</td>
+                      <td class="num">
+                        ${bind({label:'Price per piece',value:f.pricePerPiece, type:'number', onChange:v=>{p.dxfFiles[fi].pricePerPiece=v; p.dxfFiles[fi]._aiEstimate=null;}, attrs:'step="any" min="0"'})}
+                        ${aiBadge}
+                        <button class="btn btn-sm" style="margin-top:3px; font-size:10px; padding:2px 6px; white-space:nowrap;" ${(!canEstimate || isEstimating) ? 'disabled' : ''} onclick="App.estimateDxfRow('${p.id}',${fi})" title="${canEstimate ? 'Get an AI cost estimate based on process, material, and part dimensions' : 'Set Process and ensure the part has a Material first'}">
+                          ${isEstimating ? '⏳ Estimating…' : '✨ Get AI Estimate'}
+                        </button>
+                      </td>
                       <td class="num">${bind({label:'Setup',value:f.setupCost, type:'number', onChange:v=>{p.dxfFiles[fi].setupCost=v;}, attrs:'step="any" min="0"'})}</td>
                       <td>${bind({label:'Notes',value:f.notes, onChange:v=>{p.dxfFiles[fi].notes=v;}, placeholder:'optional'})}</td>
                       <td class="action"><button class="btn btn-sm btn-danger" onclick="App.removeDxfFile('${p.id}',${fi})">×</button></td>
@@ -14278,6 +14289,43 @@ function renderMsgImportModal() {
             ${claude.parsed.urgency ? `<strong>Urgency:</strong> <span class="pill" style="background:${claude.parsed.urgency === 'urgent' ? '#C73E1D' : claude.parsed.urgency === 'high' ? '#D97706' : '#1E5BAE'}; color:white; font-size:10px;">${esc(claude.parsed.urgency)}</span>` : ''}
           </div>
         ` : ''}
+        ${(claude.parsed.dxfSuggestions && claude.parsed.dxfSuggestions.length > 0) ? `
+          <div style="margin-top:10px; padding:8px 10px; background:#FFF7ED; border-left:3px solid #C56B1C; border-radius:0 4px 4px 0;">
+            <strong style="color:#C56B1C;">⚡ Outside cut suggested (${claude.parsed.dxfSuggestions.length}):</strong>
+            <div class="text-mute small" style="margin-top:2px;">Claude detected flat parts that need outside cutting. Click "+ Add to Part N" to push each into that part's DXF Cut Files list, then click "✨ Get AI Estimate" on the row to get a ballpark $/piece.</div>
+            ${claude.parsed.dxfSuggestions.map((dxf, di) => {
+              const partLabel = (typeof dxf.partIndex === 'number' && claude.parsed.parts && claude.parsed.parts[dxf.partIndex])
+                ? `Part ${dxf.partIndex + 1}${claude.parsed.parts[dxf.partIndex].partNum ? ' (' + esc(claude.parsed.parts[dxf.partIndex].partNum) + ')' : ''}`
+                : 'Part 1';
+              const partCount = (claude.parsed.parts || []).length || 1;
+              return `
+                <div style="margin-top:6px; padding:6px 8px; background:white; border-radius:3px; font-size:13px;">
+                  <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px;">
+                    <div style="flex:1; min-width:240px;">
+                      <span class="mono" style="font-weight:600;">${esc(dxf.filename || '(no filename)')}</span>
+                      ${dxf.suggestedProcess ? ` · <span class="pill" style="background:#C56B1C; color:white; font-size:10px;">${esc(dxf.suggestedProcess)}</span>` : ''}
+                      ${dxf.qtyPerPart ? ` · <strong>${dxf.qtyPerPart}</strong>/part` : ''}
+                      ${dxf.thicknessIn ? ` · ${dxf.thicknessIn}" thick` : ''}
+                    </div>
+                    <div>
+                      ${partCount > 1 ? `<select onchange="App._dxfTargetPartIdx[${di}]=parseInt(this.value)||0; renderMsgImportModal()" style="font-size:11px; padding:2px 4px; margin-right:4px;">
+                        ${(claude.parsed.parts || []).map((p, i) => `<option value="${i}" ${(App._dxfTargetPartIdx && App._dxfTargetPartIdx[di] === i) || (typeof dxf.partIndex === 'number' && App._dxfTargetPartIdx && App._dxfTargetPartIdx[di] == null && dxf.partIndex === i) ? 'selected' : ''}>Part ${i+1}${p.partNum ? ' ('+esc(p.partNum)+')' : ''}</option>`).join('')}
+                      </select>` : ''}
+                      <button class="btn btn-sm btn-primary" onclick="App.msgApplyClaudeDxf(${di})">+ Add to ${esc(partCount > 1 ? 'selected part' : partLabel)}</button>
+                    </div>
+                  </div>
+                  ${(dxf.materialNote || dxf.notes || dxf.reasoning) ? `
+                    <div class="text-mute small" style="margin-top:3px;">
+                      ${dxf.materialNote ? `<strong>Mat:</strong> ${esc(dxf.materialNote)} · ` : ''}
+                      ${dxf.notes ? esc(dxf.notes) + (dxf.reasoning ? ' · ' : '') : ''}
+                      ${dxf.reasoning ? `<em>"${esc(dxf.reasoning)}"</em>` : ''}
+                    </div>
+                  ` : ''}
+                </div>
+              `;
+            }).join('')}
+          </div>
+        ` : ''}
         ${(claude.parsed.parts && claude.parsed.parts.length > 0) ? `
           <div style="margin-top:10px;">
             <strong>Parts (${claude.parsed.parts.length}):</strong>
@@ -15340,6 +15388,71 @@ const App = {
       if (!Array.isArray(p.dxfFiles)) return;
       p.dxfFiles.splice(idx, 1);
     });
+  },
+  // v7.53: Call the Worker's estimate-outside-service endpoint for this DXF
+  // row. Inputs come from: the part's material + dimensions + qty[0] from the
+  // first tier, plus the DXF row's process + qtyPerPart + any thickness/material
+  // hints parked in the notes field. On success we populate pricePerPiece +
+  // setupCost and stash the full estimate as _aiEstimate (badge + tooltip in UI).
+  async estimateDxfRow(partId, idx) {
+    const q = getActiveQuote();
+    const part = q && (q.parts || []).find(x => x.id === partId);
+    const row = part && (part.dxfFiles || [])[idx];
+    if (!part || !row) return;
+    if (!row.process) { showToast('Set the Process first (laser / waterjet / plasma / etc.)', 3000); return; }
+    if (!part.material) { showToast('Set the part Material first', 3000); return; }
+    // Pull thickness/material override from notes if user (or Claude) parked it there
+    const noteThickMatch = (row.notes || '').match(/Thk[:\s]*([\d.]+)/i);
+    const noteMatMatch   = (row.notes || '').match(/Mat[:\s]*([^·\n]+)/i);
+    const thickness = noteThickMatch ? parseFloat(noteThickMatch[1]) : num(part.stock && part.stock.partHeight);
+    const materialOverride = noteMatMatch ? noteMatMatch[1].trim() : '';
+    const firstTierQty = (part.qtyTiers && part.qtyTiers[0]) || 1;
+    const totalQty = num(firstTierQty) * (num(row.qtyPerPart) || 1);
+    const vendor = (state.settings.vendors || []).find(v => v.id === row.vendorId);
+    const payload = {
+      process: row.process,
+      material: materialOverride || part.material,
+      thicknessIn: thickness || null,
+      lengthIn: num(part.stock && part.stock.partLength) || null,
+      widthIn: num(part.stock && part.stock.partWidth) || null,
+      qty: totalQty,
+      vendorName: vendor ? vendor.name : '',
+      notes: row.notes || '',
+    };
+    // Mark in-flight so the button shows a spinner and disables itself
+    update(s => {
+      const p = (s.quotes.find(x => x.id === q.id) || {}).parts || [];
+      const part = p.find(x => x.id === partId); if (!part) return;
+      if (part.dxfFiles && part.dxfFiles[idx]) part.dxfFiles[idx]._aiEstimating = true;
+    });
+    try {
+      const response = await workerCall('/api/claude/estimate-outside-service', payload, { timeoutMs: 60000 });
+      const est = response.estimate;
+      update(s => {
+        const p = (s.quotes.find(x => x.id === q.id) || {}).parts || [];
+        const part = p.find(x => x.id === partId); if (!part) return;
+        const r = part.dxfFiles && part.dxfFiles[idx]; if (!r) return;
+        r._aiEstimating = false;
+        r._aiEstimate = est;
+        // Only auto-fill if the user hasn't typed a value yet — never clobber a manual entry
+        if (r.pricePerPiece == null || r.pricePerPiece === '' || num(r.pricePerPiece) === 0) {
+          r.pricePerPiece = est.perPieceEstimate;
+        }
+        if (!r.setupCost || num(r.setupCost) === 0) {
+          if (est.setupEstimate != null) r.setupCost = est.setupEstimate;
+        }
+      });
+      const range = (est.perPieceRangeLow != null && est.perPieceRangeHigh != null) ? ` (${fmtMoney(est.perPieceRangeLow)}-${fmtMoney(est.perPieceRangeHigh)})` : '';
+      showToast(`✨ AI estimate: ${fmtMoney(est.perPieceEstimate)}/piece${range} · ${est.confidence} confidence`, 5000);
+    } catch (e) {
+      update(s => {
+        const p = (s.quotes.find(x => x.id === q.id) || {}).parts || [];
+        const part = p.find(x => x.id === partId); if (!part) return;
+        if (part.dxfFiles && part.dxfFiles[idx]) part.dxfFiles[idx]._aiEstimating = false;
+      });
+      const msg = (e && e.message) || String(e);
+      showToast('AI estimate failed: ' + msg, 5000);
+    }
   },
   addSpecialtyTool(partId) {
     update(s => {
@@ -18529,6 +18642,52 @@ Online Metals,Brass,Round,1.25 dia,per_lb,5.20`;
     // Re-render so the button disappears (alreadyKnown check now passes)
     if (typeof renderMsgImportModal === 'function') renderMsgImportModal();
   },
+  // v7.53: per-DXF-suggestion target part picker (transient, not persisted)
+  // keyed by suggestion index. Used when the modal has multiple parts and the
+  // user wants to override Claude's partIndex choice before clicking "Add".
+  _dxfTargetPartIdx: {},
+  // v7.53: push a Claude-suggested DXF entry into the chosen part's dxfFiles[].
+  // Uses the existing newDxfFile() schema so the row renders in the regular
+  // DXF Cut Files card without special-casing AI-sourced rows. The estimator
+  // (App.estimateDxfRow) can then fill the price/setup afterward.
+  msgApplyClaudeDxf(dxfIdx) {
+    const m = state.ui.msgImport;
+    if (!m || !m.claude || !m.claude.parsed) return;
+    const dxf = (m.claude.parsed.dxfSuggestions || [])[dxfIdx];
+    if (!dxf) return;
+    const q = getActiveQuote();
+    if (!q) { alert('No active quote — open or create a quote first.'); return; }
+    // Resolve target part: user-picked override > Claude's partIndex > 0
+    let targetIdx = (App._dxfTargetPartIdx && App._dxfTargetPartIdx[dxfIdx]);
+    if (targetIdx == null) targetIdx = (typeof dxf.partIndex === 'number') ? dxf.partIndex : 0;
+    if (targetIdx >= q.parts.length) targetIdx = q.parts.length - 1;
+    if (targetIdx < 0) targetIdx = 0;
+    update(s => {
+      const quote = s.quotes.find(x => x.id === q.id);
+      if (!quote) return;
+      const part = quote.parts[targetIdx];
+      if (!part) return;
+      if (!Array.isArray(part.dxfFiles)) part.dxfFiles = [];
+      const row = newDxfFile();
+      row.filename     = dxf.filename || '';
+      if (dxf.suggestedProcess) row.process = dxf.suggestedProcess;
+      if (dxf.qtyPerPart) row.qtyPerPart = num(dxf.qtyPerPart) || 1;
+      // Park material/thickness hints in notes so they're visible when estimating later
+      const noteBits = [];
+      if (dxf.materialNote) noteBits.push('Mat: ' + dxf.materialNote);
+      if (dxf.thicknessIn)  noteBits.push('Thk: ' + dxf.thicknessIn + '"');
+      if (dxf.notes)        noteBits.push(dxf.notes);
+      if (dxf.reasoning)    noteBits.push('From email: "' + dxf.reasoning + '"');
+      if (noteBits.length)  row.notes = noteBits.join(' · ');
+      part.dxfFiles.push(row);
+      // Make sure the DXF section is open so the user sees the row land
+      if (!s.ui.partSections) s.ui.partSections = {};
+      if (!s.ui.partSections[part.id]) s.ui.partSections[part.id] = {};
+      s.ui.partSections[part.id].dxf = true;
+    });
+    showToast(`DXF added to Part ${targetIdx + 1}. Click ✨ Get AI Estimate on the row to ballpark the cost.`, 4000);
+  },
+
   // v7.52: per-attachment include toggle on the RFQ import modal. Just flips
   // a flag on the parsed PDF object — the actual bundling into outbound quote
   // PDFs is wired in a later ship; this captures the user's intent today.

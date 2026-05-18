@@ -55,6 +55,13 @@ export default {
         return jsonResponse(result, 200, env, origin);
       }
 
+      // POST /api/claude/estimate-outside-service
+      if (request.method === 'POST' && path === '/api/claude/estimate-outside-service') {
+        const body = await request.json();
+        const result = await handleEstimateOutsideService(env, body);
+        return jsonResponse(result, 200, env, origin);
+      }
+
       return errorResponse(`Not found: ${request.method} ${path}`, 404, env, origin);
     } catch (err) {
       console.error('worker error', err && err.stack || err);
@@ -165,6 +172,23 @@ async function handleExtractRfq(env, body) {
         },
         summary: { type: 'string', description: 'One-paragraph (≤3 sentence) plain-English summary of what the customer is asking for — what the estimator will read first.' },
         redFlags: { type: 'array', items: { type: 'string' }, description: 'Things that warrant human attention: "no quantity stated", "drawing is unreadable", "material call-out is ambiguous", "competitor mentioned", "lead time impossible", etc.' },
+        dxfSuggestions: {
+          type: 'array',
+          description: 'When the email or attached drawings call out flat parts that need outside cutting (laser, waterjet, plasma, oxy-fuel, wire EDM, etc.) — e.g. "please quote 4 each of these plates, laser-cut from 1/4 plate steel" — surface one suggestion per distinct cut file/drawing. Each entry can later be one-click added to a part\'s DXF Cut Files list. Only populate if cutting is explicitly mentioned or strongly implied (e.g. drawing says "FLAME CUT" or "WATERJET FINISH").',
+          items: {
+            type: 'object',
+            properties: {
+              filename:        { type: 'string', description: 'Suggested filename for the DXF (use attachment name if a DXF was sent; otherwise infer from part #)' },
+              partIndex:       { type: 'number', description: '0-based index into parts[] for which part this DXF belongs to. If unsure, default to 0 (first part).' },
+              suggestedProcess:{ type: 'string', enum: ['laser','waterjet','plasma','wire_edm','sinker_edm','oxy_fuel','shear','turret','machining','other',''], description: 'Best-fit cut process from email/drawing language' },
+              qtyPerPart:      { type: 'number', description: 'How many copies of this DXF go into ONE finished part (default 1 — most parts have one blank cut per assembly)' },
+              materialNote:    { type: 'string', description: 'Material spec specific to this cut entry if differs from the part-level material (e.g. "1/4 A36 plate")' },
+              thicknessIn:     { type: 'number', description: 'Plate thickness in inches if mentioned' },
+              notes:           { type: 'string', description: 'Anything else the estimator needs (tolerance class, edge prep, post-cut treatment, single-side vs both, etc.)' },
+              reasoning:       { type: 'string', description: 'Why you suggested this (quote the email language or drawing call-out)' },
+            },
+          },
+        },
       },
       required: ['summary'],
     },
@@ -336,6 +360,110 @@ async function handleExtractDocument(env, body) {
     usage: result.usage,
     stop_reason: result.stop_reason,
   };
+}
+
+// =================================================================
+// /api/claude/estimate-outside-service
+// Industry-rule-of-thumb cost estimate for outside cutting/EDM/finishing.
+// Used by the DXF Cut Files card to populate a ballpark $/piece + setup
+// BEFORE the vendor returns a real quote — KMF can quote the customer
+// same-day instead of waiting on Alro/cut-house email turnaround.
+//
+// Input  : { process, material, thicknessIn, lengthIn, widthIn,
+//            cutLengthIn?, pierceCount?, qty, vendorName?, notes? }
+// Output : { perPieceEstimate, setupEstimate, leadTimeDays,
+//            confidence, reasoning, ruleOfThumb, redFlags }
+//
+// Be conservative — Claude's output is a SANITY-CHECK ballpark, not a
+// vendor commitment. UI surfaces it clearly as AI-estimated.
+// =================================================================
+async function handleEstimateOutsideService(env, body) {
+  if (!body || typeof body !== 'object') throw badRequest('Body must be JSON');
+  if (!body.process) throw badRequest('process is required');
+  if (!body.qty) throw badRequest('qty is required');
+
+  const inputs = {
+    process:      body.process,
+    material:     body.material || '',
+    thicknessIn:  num(body.thicknessIn),
+    lengthIn:     num(body.lengthIn),
+    widthIn:      num(body.widthIn),
+    cutLengthIn:  body.cutLengthIn != null ? num(body.cutLengthIn) : null,
+    pierceCount:  body.pierceCount != null ? num(body.pierceCount) : null,
+    qty:          num(body.qty),
+    vendorName:   body.vendorName || '',
+    notes:        body.notes || '',
+  };
+
+  // Compose the prompt — give Claude the inputs and let it apply known
+  // industry rules of thumb for the named process. Region: NE Ohio (KMF
+  // location) so rates reflect that market.
+  const userText = [
+    `Estimate the outside-service cost for the following cut/EDM/finishing job at a precision machining shop in NE Ohio (Cuyahoga Falls, OH).`,
+    ``,
+    `Job specs:`,
+    `  Process:          ${inputs.process}`,
+    `  Material:         ${inputs.material || '(not specified)'}`,
+    `  Thickness:        ${inputs.thicknessIn ? inputs.thicknessIn + ' in' : '(not specified)'}`,
+    `  Part L × W:       ${inputs.lengthIn || '?'} × ${inputs.widthIn || '?'} in`,
+    inputs.cutLengthIn  ? `  Cut length:       ${inputs.cutLengthIn} in (total linear)` : '',
+    inputs.pierceCount  ? `  Pierces / starts: ${inputs.pierceCount}` : '',
+    `  Quantity:         ${inputs.qty}`,
+    inputs.vendorName   ? `  Vendor target:    ${inputs.vendorName}` : '',
+    inputs.notes        ? `  Notes:            ${inputs.notes}` : '',
+    ``,
+    `Apply published / commonly-cited industry rules of thumb for ${inputs.process} in the Midwest US market:`,
+    `  - Waterjet:  $1.50–$4.00/in² depending on material+thickness, plus $10–$25 setup/program, plus $0.50–$2 per pierce`,
+    `  - Wire EDM:  $1.00–$3.00/hr at typical cut speeds 2–15 in²/hr depending on material+thickness, plus $50–$150 setup`,
+    `  - Laser:     $0.50–$2.00/in² depending on material+thickness (thin sheet metal cheapest), plus $10–$30 setup`,
+    `  - Plasma:    $0.30–$1.00/in² on plate, plus $10–$30 setup (rough edges vs laser, post-cut prep may be needed)`,
+    `  - Oxy-fuel:  Thick plate only (>3/8"), ~$0.20–$0.60/in² + $20 setup`,
+    ``,
+    `Compute area = L × W (then × 2 for both-side processes). If cut length not provided, estimate from part perimeter.`,
+    `Be conservative. If thickness or material is missing, note that the estimate has a wider range. Flag any inputs that are inconsistent or suspicious in redFlags.`,
+  ].filter(Boolean).join('\n');
+
+  const tool = {
+    name: 'submit_estimate',
+    description: 'Return the structured cost estimate for the outside-service job described above.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        perPieceEstimate: { type: 'number', description: 'Most-likely $/piece (midpoint of the realistic range)' },
+        perPieceRangeLow: { type: 'number', description: 'Low end of the $/piece range' },
+        perPieceRangeHigh:{ type: 'number', description: 'High end of the $/piece range' },
+        setupEstimate:    { type: 'number', description: 'One-time setup / programming charge in $' },
+        leadTimeDays:     { type: 'number', description: 'Typical lead time in business days for this process + qty' },
+        confidence:       { type: 'string', enum: ['high','medium','low'], description: 'How tight the range is — high = ±20%, medium = ±50%, low = guess based on incomplete info' },
+        reasoning:        { type: 'string', description: 'One-paragraph plain-English walk-through of the math (area, per-area rate, pierce charges, setup, qty multiplier) so the estimator can sanity-check' },
+        ruleOfThumb:      { type: 'string', description: 'The specific rule-of-thumb you applied (e.g. "Waterjet 1/4 mild steel ~$2.50/in² + 15min setup")' },
+        redFlags:         { type: 'array', items: { type: 'string' }, description: 'Missing/inconsistent inputs, or "vendor confirmation recommended" notes' },
+      },
+      required: ['perPieceEstimate', 'reasoning', 'confidence'],
+    },
+  };
+
+  const result = await extractWithTool(env, {
+    tool,
+    content: [{ type: 'text', text: userText }],
+    system: `You estimate outside-service costs for a precision machining + fabrication shop (KMF, Cuyahoga Falls, OH). Apply documented industry rules of thumb for the Midwest US market. Be conservative — your output is a sanity-check ballpark, not a vendor commitment. Always include redFlags for any inputs that are missing or look off.`,
+    model: env.CLAUDE_MODEL,
+    max_tokens: 2048,
+  });
+
+  return {
+    estimate: result.data,
+    inputs,
+    model: result.model,
+    usage: result.usage,
+  };
+}
+
+// Local num() — mirrors the frontend helper for null/empty/NaN safety
+function num(v) {
+  if (v == null || v === '') return 0;
+  const n = Number(v);
+  return isFinite(n) ? n : 0;
 }
 
 function badRequest(message) {
