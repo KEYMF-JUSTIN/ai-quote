@@ -685,7 +685,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.64.0';
+const APP_VERSION = '7.64.1';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -14534,22 +14534,13 @@ async function parseExcelForArchive(file) {
 }
 
 // ============================================================================
-// PDF READER (pdf.js) — used by Supplier Quote smart-paste workflow
+// PDF READER (pdf.js) — used by Supplier Quote smart-paste workflow.
+// v7.64.1: this file used to define a second ensurePdfJs() that hoisted
+// over the v7.63 one (silently loading the broken .mjs build). Removed.
+// extractPdfText now uses the canonical ensurePdfJs() defined at the top
+// of the file alongside the PdfViewer module.
 // ============================================================================
-async function ensurePdfJs() {
-  if (window.pdfjsLib) return;
-  await loadScript('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.min.mjs');
-  // pdf.js with .mjs requires module type — simpler: use the legacy build
-}
-
-// Use the legacy UMD build that loads as plain script
-async function ensurePdfJsLegacy() {
-  if (window.pdfjsLib) return;
-  await loadScript('https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/legacy/build/pdf.min.js');
-  if (!window.pdfjsLib) throw new Error('pdf.js failed to load');
-  // Worker config — same CDN
-  window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/legacy/build/pdf.worker.min.js';
-}
+const ensurePdfJsLegacy = ensurePdfJs;  // back-compat alias for any older call sites
 
 /**
  * Extract all text from a PDF File/Blob, returning lines (preserving rough
