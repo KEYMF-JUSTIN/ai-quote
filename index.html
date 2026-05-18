@@ -644,7 +644,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.61.0';
+const APP_VERSION = '7.62.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -872,6 +872,7 @@ const state = {
     partsExpanded: {},          // v7.57: per-part expand state for inline parts on Quote Info page, keyed partId (deprecated by v7.60 chip selector but kept for migration safety)
     activePartIdForInfo: {},    // v7.60: per-quote chip selector — which part is currently visible on the Quote Info page, keyed quoteId
     partTypePicker: null,       // v7.61: { open: true } when "what kind of part?" modal is up
+    trainingPicker: null,       // v7.62: { entityType, entityId, sampleId?, file?, parsed?, docType, notes, error, loading } for the training sample editor
     activePurchaseId: null,     // v7.50: currently-open purchase in the Purchasing workspace
     purchaseFilters: { search:'', hiddenStatuses:[], vendor:'all' },
     activeInboxEntryId: null,   // v7.33: which RFQ Inbox entry is expanded
@@ -1274,6 +1275,19 @@ function migrateState() {
   (state.quotes || []).forEach(q => (q.parts || []).forEach(p => {
     if (!p.typeId) p.typeId = 'machined';
   }));
+  // v7.62: extraction training — every vendor and every customer gets a
+  // training bucket. Stores labeled sample extractions (parsed JSON + filename)
+  // that v7.63+ will pass to Claude as few-shot examples for that entity's
+  // future docs. Receipts ride under the vendor record (Home Depot, Amazon,
+  // etc. as vendors); RFQs/POs ride under the customer record.
+  (state.settings && state.settings.vendors || []).forEach(v => {
+    if (!v.extractionTraining) v.extractionTraining = { samples: [], lastTrainedAt: null };
+    if (!Array.isArray(v.extractionTraining.samples)) v.extractionTraining.samples = [];
+  });
+  (state.customers || []).forEach(c => {
+    if (!c.extractionTraining) c.extractionTraining = { samples: [], lastTrainedAt: null };
+    if (!Array.isArray(c.extractionTraining.samples)) c.extractionTraining.samples = [];
+  });
 }
 
 // =================================================================
@@ -5166,6 +5180,7 @@ function render() {
   renderQuoteArchiveImportModal();
   renderNewQuoteKindPickerModal();
   renderPartTypePickerModal();
+  renderTrainingModal();
   renderMsgImportModal();
   renderMissingCustFolderModal();
   // v7.34: user management dialogs
@@ -6159,6 +6174,7 @@ function renderVendorsCards(vendors) {
             ${mats.length === 0 ? '<span class="text-mute"> none — assign in Settings</span>' : ' ' + esc(mats.join(', '))}
           </div>
         </div>
+        ${renderTrainingSection('vendor', v)}
       </div>
     `;
   }).join('');
@@ -10284,6 +10300,7 @@ function renderCustomersCards(list) {
             </div>
             <hr>
             ${renderCustomerContactsSection(c)}
+            ${renderTrainingSection('customer', c)}
             <hr>
             <div style="font-family:var(--font-display); font-size:11px; letter-spacing:0.12em; color:var(--steel); margin-bottom:8px;">ONEDRIVE</div>
             <div class="row" style="gap:8px; align-items:end;">
@@ -11496,6 +11513,102 @@ function renderQuoteInfo(q) {
   `;
 }
 
+// v7.62: training modal — drop a sample doc, Claude extracts, user edits, saves.
+// Re-uses /api/claude/extract-document on the Worker (v7.51) — same endpoint
+// that powers receipt/invoice parsing. Output is stored as a labeled sample
+// on vendor.extractionTraining.samples[] (or customer's).
+function renderTrainingModal() {
+  let modalHost = document.getElementById('training-modal-host');
+  if (!modalHost) {
+    modalHost = document.createElement('div');
+    modalHost.id = 'training-modal-host';
+    document.body.appendChild(modalHost);
+  }
+  const p = state.ui.trainingPicker;
+  if (!p) { modalHost.innerHTML = ''; return; }
+  const entity = getTrainingEntity(p.entityType, p.entityId);
+  if (!entity) { modalHost.innerHTML = ''; return; }
+  const entityLabel = entity.name || (p.entityType === 'vendor' ? '(unnamed vendor)' : '(unnamed customer)');
+  const docTypes = docTypesFor(p.entityType);
+  const isEdit = !!p.sampleId;
+  const parsedJson = p.parsed ? JSON.stringify(p.parsed, null, 2) : '';
+
+  modalHost.innerHTML = `
+    <div class="modal-backdrop" onclick="App.closeTrainingPicker()">
+      <div class="modal" style="width:880px; max-width:96vw; max-height:90vh; display:flex; flex-direction:column;" onclick="event.stopPropagation()">
+        <div class="modal-header">
+          📚 ${isEdit ? 'Edit' : 'Add'} Training Sample — ${esc(entityLabel)}
+        </div>
+        <div class="modal-body" style="flex:1; overflow-y:auto;">
+          <div style="margin-bottom:12px;">
+            <div class="label">Document type</div>
+            <div style="display:flex; flex-wrap:wrap; gap:6px; margin-top:4px;">
+              ${docTypes.map(d => `
+                <button class="chip ${p.docType === d.id ? 'chip-selected' : ''}"
+                        onclick="App.setTrainingDocType('${d.id}')"
+                        style="cursor:pointer; padding:4px 10px; border:1px solid ${p.docType===d.id?'var(--navy)':'var(--line-dark)'}; background:${p.docType===d.id?'var(--navy)':'var(--bg)'}; color:${p.docType===d.id?'white':'inherit'};">
+                  ${d.icon} ${esc(d.label)}
+                </button>
+              `).join('')}
+            </div>
+          </div>
+          ${!p.file && !isEdit ? `
+            <div class="msg-dropzone training-dropzone" style="margin-bottom:14px;">
+              <strong>📄 Drop a sample document here</strong>
+              <div style="margin-top:4px;">PDF / image / text · Claude reads it and extracts structured fields</div>
+              <button class="pickbtn" onclick="App.pickTrainingFile()" style="margin-top:8px;">or pick a file…</button>
+              <div class="hint" style="margin-top:6px; font-size:11px;">Example: drop the most recent Alro invoice on Alro, or the most recent Hannon Electric RFQ on Hannon. The richer your sample (more fields populated), the better future extractions get.</div>
+            </div>
+          ` : ''}
+          ${p.loading ? `
+            <div style="text-align:center; padding:24px;">
+              <div style="font-size:14px;">⏳ Claude is reading ${esc(p.file ? p.file.name : 'the document')}…</div>
+              <div class="text-mute small" style="margin-top:4px;">Usually 5-15 seconds.</div>
+            </div>
+          ` : ''}
+          ${p.error ? `
+            <div style="background:#FDEDEA; border-left:3px solid #C73E1D; padding:10px 12px; margin-bottom:12px; color:#C73E1D;">
+              <strong>Couldn't extract:</strong> ${esc(p.error)}
+            </div>
+          ` : ''}
+          ${p.parsed && !p.loading ? `
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px;">
+              <div>
+                <div class="label">Extracted fields <span class="text-mute small">— edit any values that aren't right</span></div>
+                <textarea id="training-parsed-textarea"
+                          style="width:100%; min-height:340px; font-family:var(--font-mono); font-size:12px; padding:8px;"
+                          onchange="App.setTrainingParsedJson(this.value)">${esc(parsedJson)}</textarea>
+                <div class="text-mute small" style="margin-top:4px;">JSON format. The shape mirrors what the document-extract endpoint returns: detected_doc_type, vendor, references, dates, lineItems, totals, drawing, summary, redFlags.</div>
+              </div>
+              <div>
+                <div class="label">File metadata</div>
+                <div style="background:var(--bg); padding:8px 10px; font-size:12px; line-height:1.6; margin-top:4px;">
+                  <div><strong>Filename:</strong> <span class="mono">${esc(p.file ? p.file.name : (p.sampleFilename || '?'))}</span></div>
+                  <div><strong>Type:</strong> ${esc(p.file ? (p.file.type || 'unknown') : (p.sampleMimeType || '?'))}</div>
+                  <div><strong>Size:</strong> ${p.file ? Math.round(p.file.size / 1024) : (p.sampleSize || '?')} KB</div>
+                </div>
+                <div class="label" style="margin-top:10px;">Notes (optional)</div>
+                <textarea
+                  style="width:100%; min-height:60px; font-size:13px; padding:6px;"
+                  onchange="App.setTrainingNotes(this.value)"
+                  placeholder="Anything special about this format? (e.g. 'old format pre-2024 — they redesigned the layout', 'this one had a typo we corrected')">${esc(p.notes || '')}</textarea>
+                <div class="label" style="margin-top:10px;">Usage</div>
+                <div class="text-mute small">
+                  This sample will be passed to Claude as a few-shot example when future ${p.entityType === 'vendor' ? 'vendor' : 'customer'} docs from ${esc(entityLabel)} arrive (v7.63+). The more samples and the more accurate the labels, the better future extractions get.
+                </div>
+              </div>
+            </div>
+          ` : ''}
+        </div>
+        <div class="modal-footer">
+          <button class="btn" onclick="App.closeTrainingPicker()">Cancel</button>
+          <button class="btn btn-primary" ${(!p.parsed || p.loading) ? 'disabled' : ''} onclick="App.saveTrainingSample()">${isEdit ? 'Save Changes' : '+ Save Training Sample'}</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 // v7.61: "What kind of part are we adding?" modal — shown when user clicks
 // + Add Part on the chip-card row. One card per registered part type with
 // color stripe + icon + description. Click a card → createPartOfType(id).
@@ -11534,6 +11647,99 @@ function renderPartTypePickerModal() {
         <div class="modal-footer">
           <button class="btn" onclick="App.closePartTypePicker()">Cancel</button>
         </div>
+      </div>
+    </div>
+  `;
+}
+
+// =================================================================
+// v7.62: EXTRACTION TRAINING — labeled document samples per vendor + customer.
+// Each sample = { id, filename, mimeType, sizeBytes, addedAt, docType,
+// parsedFields, notes }. The parsedFields is the structured extraction
+// (initially produced by Claude, then user-corrected). In v7.63 these
+// samples will be passed as few-shot examples to /api/claude/extract-document
+// for any new doc from the same entity — so Claude sees real labeled
+// examples of THIS vendor/customer's format instead of generic instruction.
+//
+// Doc types are tagged per sample so we can match training: e.g. when an
+// Alro PACKING SLIP arrives, only use Alro samples tagged 'packing_slip'.
+// =================================================================
+const TRAINING_DOC_TYPES = [
+  { id: 'quote',         label: 'Vendor Quote',         icon: '💰', for: 'vendor' },
+  { id: 'invoice',       label: 'Vendor Invoice',       icon: '🧾', for: 'vendor' },
+  { id: 'packing_slip',  label: 'Packing Slip',         icon: '📦', for: 'vendor' },
+  { id: 'po_confirm',    label: 'Order Confirmation',   icon: '✓',  for: 'vendor' },
+  { id: 'receipt',       label: 'Receipt',              icon: '🧾', for: 'vendor' },
+  { id: 'rfq',           label: 'Customer RFQ',         icon: '📧', for: 'customer' },
+  { id: 'customer_po',   label: 'Customer PO',          icon: '📋', for: 'customer' },
+  { id: 'drawing',       label: 'Drawing / Print',      icon: '📐', for: 'customer' },
+  { id: 'spec_sheet',    label: 'Spec Sheet',           icon: '📄', for: 'both' },
+  { id: 'other',         label: 'Other',                icon: '📎', for: 'both' },
+];
+function docTypesFor(entityType) {
+  return TRAINING_DOC_TYPES.filter(d => d.for === entityType || d.for === 'both');
+}
+function docTypeLabel(id) {
+  const d = TRAINING_DOC_TYPES.find(x => x.id === id);
+  return d ? `${d.icon} ${d.label}` : id || 'Untagged';
+}
+function getTrainingEntity(entityType, entityId) {
+  if (entityType === 'vendor') return (state.settings.vendors || []).find(v => v.id === entityId);
+  if (entityType === 'customer') return (state.customers || []).find(c => c.id === entityId);
+  return null;
+}
+function trainingSampleCount(entity) {
+  return (entity && entity.extractionTraining && Array.isArray(entity.extractionTraining.samples))
+    ? entity.extractionTraining.samples.length : 0;
+}
+
+// Renders the per-entity training section. Drops into the vendor edit view
+// and the customer edit view (and anywhere else we want training UI).
+function renderTrainingSection(entityType, entity) {
+  if (!entity) return '';
+  if (!entity.extractionTraining) entity.extractionTraining = { samples: [], lastTrainedAt: null };
+  const samples = entity.extractionTraining.samples || [];
+  const entityName = entityType === 'vendor' ? (entity.name || 'this vendor') : (entity.name || 'this customer');
+  return `
+    <div class="card no-print" style="margin-top:14px; border-left:4px solid #7C3AED;">
+      <div class="card-header" style="background:linear-gradient(90deg, #7C3AED22 0%, var(--navy) 60%);">
+        <span>📚 Document Training <span style="font-weight:normal; letter-spacing:0; text-transform:none; opacity:0.85; font-size:12px; margin-left:8px;">${samples.length} sample${samples.length===1?'':'s'} for ${esc(entityName)}</span></span>
+        <div class="header-actions">
+          <button class="btn btn-sm btn-primary" onclick="App.openTrainingPicker('${entityType}','${entity.id}')">+ Add Sample</button>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="text-mute small" style="margin-bottom:10px;">
+          Drop a real document from ${esc(entityName)} (PDF, image, or text). Claude extracts the structured fields once; you correct any mistakes; we save it as a labeled example. Future docs from the same ${entityType} get matched against these examples for much more reliable parsing.
+          ${entityType === 'vendor' ? ' Receipts from Home Depot, Amazon, etc. train under those vendors.' : ' RFQs, POs, and engineering drawings train under the customer that sent them.'}
+        </div>
+        ${samples.length === 0 ? `
+          <div class="text-mute" style="text-align:center; padding:20px;">No training samples yet — click <strong>+ Add Sample</strong> to drop your first one.</div>
+        ` : `
+          <table class="tbl">
+            <thead><tr>
+              <th style="width:36%;">Filename</th>
+              <th style="width:16%;">Doc Type</th>
+              <th style="width:14%;">Added</th>
+              <th style="width:24%;">Notes</th>
+              <th class="action"></th>
+            </tr></thead>
+            <tbody>
+              ${samples.map(s => `
+                <tr>
+                  <td><span class="mono" style="font-size:12px;">${esc(s.filename || '(unnamed)')}</span><div class="text-mute small">${s.sizeBytes ? Math.round(s.sizeBytes/1024)+' KB · ' : ''}${esc(s.mimeType || '')}</div></td>
+                  <td>${esc(docTypeLabel(s.docType))}</td>
+                  <td>${esc((s.addedAt || '').slice(0,10))}</td>
+                  <td>${esc(s.notes || '')}</td>
+                  <td class="action">
+                    <button class="btn btn-sm" title="View / re-edit this sample" onclick="App.editTrainingSample('${entityType}','${entity.id}','${s.id}')">⚙</button>
+                    <button class="btn btn-sm btn-danger" title="Delete this sample" onclick="App.removeTrainingSample('${entityType}','${entity.id}','${s.id}')">×</button>
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        `}
       </div>
     </div>
   `;
@@ -15346,6 +15552,152 @@ const App = {
       s.ui.activePartIdForInfo[quoteId] = partId;
     });
   },
+  // v7.62: Document Training handlers — generic across vendor + customer entities
+  openTrainingPicker(entityType, entityId) {
+    state.ui.trainingPicker = {
+      entityType, entityId,
+      file: null, parsed: null, docType: '', notes: '',
+      loading: false, error: '',
+      sampleId: null, sampleFilename: '', sampleMimeType: '', sampleSize: 0,
+    };
+    render();
+  },
+  closeTrainingPicker() {
+    state.ui.trainingPicker = null;
+    render();
+  },
+  setTrainingDocType(docType) {
+    if (!state.ui.trainingPicker) return;
+    state.ui.trainingPicker.docType = docType;
+    render();
+  },
+  setTrainingNotes(notes) {
+    if (!state.ui.trainingPicker) return;
+    state.ui.trainingPicker.notes = notes;
+  },
+  setTrainingParsedJson(json) {
+    if (!state.ui.trainingPicker) return;
+    try {
+      state.ui.trainingPicker.parsed = JSON.parse(json);
+      state.ui.trainingPicker.error = '';
+    } catch (e) {
+      state.ui.trainingPicker.error = 'Invalid JSON: ' + e.message;
+    }
+  },
+  pickTrainingFile() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.pdf,.png,.jpg,.jpeg,.gif,.webp,.txt,.csv,.tsv,.dxf,.step,.stp';
+    input.onchange = () => {
+      const f = input.files && input.files[0];
+      if (f) App.handleTrainingFile(f);
+    };
+    input.click();
+  },
+  async handleTrainingFile(file) {
+    const p = state.ui.trainingPicker;
+    if (!p) return;
+    p.file = file;
+    p.loading = true;
+    p.error = '';
+    p.parsed = null;
+    render();
+    try {
+      const health = await workerHealthCheck();
+      if (!health.ok || !health.info || !health.info.has_anthropic_key) {
+        throw new Error('Worker unreachable or Anthropic key not configured');
+      }
+      const data = await blobToBase64(file);
+      const attachment = { name: file.name, mimeType: file.type || 'application/octet-stream', data };
+      const response = await workerCall('/api/claude/extract-document', {
+        docType: p.docType || null,
+        hint: `Training sample for ${p.entityType} record. The user is teaching Claude how to read documents from this entity. Extract everything you can, even ambiguous fields — the user will correct them before saving.`,
+        attachments: [attachment],
+      }, { timeoutMs: 90000 });
+      const np = state.ui.trainingPicker;
+      if (!np || np.file !== file) return; // user closed/replaced mid-flight
+      np.loading = false;
+      np.parsed = response.parsed || {};
+      // If the user didn't pre-pick a doc type and Claude detected one, use it
+      if (!np.docType && np.parsed.detected_doc_type) {
+        const match = TRAINING_DOC_TYPES.find(d => d.id === np.parsed.detected_doc_type);
+        if (match) np.docType = match.id;
+      }
+      render();
+    } catch (e) {
+      const np = state.ui.trainingPicker;
+      if (!np) return;
+      np.loading = false;
+      np.error = e.message || String(e);
+      render();
+    }
+  },
+  saveTrainingSample() {
+    const p = state.ui.trainingPicker;
+    if (!p || !p.parsed) return;
+    update(s => {
+      const entity = getTrainingEntity(p.entityType, p.entityId);
+      if (!entity) return;
+      if (!entity.extractionTraining) entity.extractionTraining = { samples: [], lastTrainedAt: null };
+      if (!Array.isArray(entity.extractionTraining.samples)) entity.extractionTraining.samples = [];
+      if (p.sampleId) {
+        // Edit: replace existing
+        const idx = entity.extractionTraining.samples.findIndex(x => x.id === p.sampleId);
+        if (idx >= 0) {
+          entity.extractionTraining.samples[idx].docType = p.docType || entity.extractionTraining.samples[idx].docType;
+          entity.extractionTraining.samples[idx].notes = p.notes || '';
+          entity.extractionTraining.samples[idx].parsedFields = p.parsed;
+          entity.extractionTraining.samples[idx].updatedAt = new Date().toISOString();
+        }
+      } else {
+        entity.extractionTraining.samples.push({
+          id: uid(),
+          filename: p.file ? p.file.name : '(unnamed)',
+          mimeType: p.file ? (p.file.type || '') : '',
+          sizeBytes: p.file ? p.file.size : 0,
+          docType: p.docType || (p.parsed.detected_doc_type || 'other'),
+          parsedFields: p.parsed,
+          notes: p.notes || '',
+          addedAt: new Date().toISOString(),
+        });
+      }
+      entity.extractionTraining.lastTrainedAt = new Date().toISOString();
+      logActivity('Saved training sample', entity.name || '?', `${p.entityType} · ${p.file ? p.file.name : 'edit'}`);
+    });
+    state.ui.trainingPicker = null;
+    showToast('✓ Training sample saved. Future docs from this entity will use it as context.', 5000);
+    render();
+  },
+  editTrainingSample(entityType, entityId, sampleId) {
+    const entity = getTrainingEntity(entityType, entityId);
+    if (!entity || !entity.extractionTraining) return;
+    const sample = entity.extractionTraining.samples.find(x => x.id === sampleId);
+    if (!sample) return;
+    state.ui.trainingPicker = {
+      entityType, entityId, sampleId,
+      file: null,
+      parsed: sample.parsedFields || {},
+      docType: sample.docType || '',
+      notes: sample.notes || '',
+      loading: false, error: '',
+      sampleFilename: sample.filename || '',
+      sampleMimeType: sample.mimeType || '',
+      sampleSize: sample.sizeBytes ? Math.round(sample.sizeBytes / 1024) : 0,
+    };
+    render();
+  },
+  removeTrainingSample(entityType, entityId, sampleId) {
+    if (!confirm('Remove this training sample? Future extractions for this entity won\'t use it.')) return;
+    update(s => {
+      const entity = entityType === 'vendor'
+        ? (s.settings.vendors || []).find(v => v.id === entityId)
+        : (s.customers || []).find(c => c.id === entityId);
+      if (!entity || !entity.extractionTraining) return;
+      entity.extractionTraining.samples = (entity.extractionTraining.samples || []).filter(x => x.id !== sampleId);
+    });
+    showToast('Training sample removed.', 2000);
+  },
+
   // v7.61: change the part type for the active part (re-colors the card stripe)
   setPartType(partId, typeId) {
     update(s => {
@@ -19989,6 +20341,12 @@ setTimeout(() => {
     const isMsg = /\.msg$/i.test(file.name) || /vnd\.ms-outlook/i.test(file.type || '');
     const isSpreadsheet = /\.(xlsx|xlsm|xls|csv|tsv)$/i.test(file.name) ||
       /spreadsheet|excel|csv/i.test(file.type || '');
+    // v7.62: if the training modal is open, route ALL drops to it
+    if (state.ui.trainingPicker && state.ui.trainingPicker.open !== false) {
+      e.preventDefault();
+      App.handleTrainingFile(file);
+      return;
+    }
     // v7.55: dropping CAD/engineering files directly onto the active quote
     // creates a DXF cut entry per file on the first part (or the open part if
     // we're in the part editor). Routes laser/waterjet/plasma work into the
