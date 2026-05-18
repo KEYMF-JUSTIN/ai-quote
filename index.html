@@ -223,6 +223,35 @@
   .claude-section > div[style*="background:white"] { color:#0F172A; }
   .claude-section ul li { color:#0F172A; }
 
+  /* v7.61: Parts cards — color-coded preview cards above the active part editor.
+     Replaces the v7.60 chip row. Each card shows: colored type stripe on the
+     left, type icon + label, part #, description, qty + $/ea. Active card has
+     a stronger border and "raised" feel. */
+  .parts-cards { display:flex; flex-wrap:wrap; gap:10px; padding:10px 0 14px; }
+  .part-card-chip { display:flex; align-items:stretch; min-width:200px; max-width:260px; padding:0; background:var(--paper); border:1px solid var(--line-dark); border-radius:5px; cursor:pointer; text-align:left; font:inherit; color:var(--text); overflow:hidden; transition:all 0.12s ease; }
+  .part-card-chip:hover:not(:disabled) { border-color:var(--type-color, var(--orange)); box-shadow:0 2px 6px rgba(0,0,0,0.08); transform:translateY(-1px); }
+  .part-card-chip.active { border:2px solid var(--type-color, var(--orange)); box-shadow:0 4px 10px rgba(0,0,0,0.12); background:#FFFCFA; }
+  .part-card-chip.active .part-card-stripe { width:8px; }
+  .part-card-stripe { flex:0 0 6px; transition:width 0.12s ease; }
+  .part-card-body { flex:1; display:flex; flex-direction:column; gap:2px; padding:8px 10px; min-width:0; }
+  .part-card-top { display:flex; align-items:center; gap:4px; font-size:10px; letter-spacing:0.05em; text-transform:uppercase; color:var(--steel); }
+  .part-card-icon { font-size:13px; line-height:1; }
+  .part-card-typelabel { font-weight:700; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .part-card-num { color:var(--steel); font-family:var(--font-mono); font-size:10px; }
+  .part-card-name { font-size:13px; font-weight:700; color:var(--navy); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .part-card-desc { font-size:11px; color:var(--text); line-height:1.3; overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
+  .part-card-meta { font-size:10px; color:var(--text-mute); font-family:var(--font-mono); margin-top:2px; }
+  .part-card-add { min-width:120px; max-width:140px; background:transparent; }
+  .part-card-add:hover:not(:disabled) { background:#FFF7ED; }
+
+  /* v7.61: Type picker modal cards */
+  .type-picker-card { display:flex; align-items:stretch; padding:0; background:var(--paper); border:1px solid var(--line-dark); border-radius:5px; cursor:pointer; text-align:left; font:inherit; color:var(--text); overflow:hidden; transition:all 0.12s ease; min-height:80px; }
+  .type-picker-card:hover { border-color:var(--type-color, var(--orange)); box-shadow:0 4px 10px rgba(0,0,0,0.08); transform:translateY(-1px); }
+  .type-picker-stripe { flex:0 0 8px; }
+  .type-picker-body { flex:1; display:flex; flex-direction:column; gap:4px; padding:10px 12px; }
+  .type-picker-top { display:flex; align-items:center; gap:8px; }
+  .type-picker-desc { font-size:11px; color:var(--text-mute); line-height:1.3; }
+
   /* v7.60: Parts chip selector — horizontal row above the active part editor */
   .parts-chips { display:flex; flex-wrap:wrap; gap:6px; align-items:center; padding:8px 10px; background:var(--bg); border:1px solid var(--line-dark); border-radius:3px; margin-bottom:12px; }
   .parts-chips-label { font-family:var(--font-display); font-size:10px; letter-spacing:0.14em; color:var(--steel); font-weight:700; margin-right:6px; }
@@ -615,7 +644,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.60.0';
+const APP_VERSION = '7.61.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -842,6 +871,7 @@ const state = {
     similarPartsOpen: {},       // v7.50: per-part expand state for the Similar Parts card, keyed 'sim_'+partId
     partsExpanded: {},          // v7.57: per-part expand state for inline parts on Quote Info page, keyed partId (deprecated by v7.60 chip selector but kept for migration safety)
     activePartIdForInfo: {},    // v7.60: per-quote chip selector — which part is currently visible on the Quote Info page, keyed quoteId
+    partTypePicker: null,       // v7.61: { open: true } when "what kind of part?" modal is up
     activePurchaseId: null,     // v7.50: currently-open purchase in the Purchasing workspace
     purchaseFilters: { search:'', hiddenStatuses:[], vendor:'all' },
     activeInboxEntryId: null,   // v7.33: which RFQ Inbox entry is expanded
@@ -1225,6 +1255,25 @@ function migrateState() {
   if (!state.settings.shopInfo) {
     state.settings.shopInfo = JSON.parse(JSON.stringify(DEFAULT_SETTINGS.shopInfo));
   }
+  // v7.61: customizable part types — color-coded card view + future progressive
+  // disclosure (Cut Blank hides Machine Setups by default, etc.). Defaults
+  // backfilled here so existing installs pick them up. User can add/edit
+  // their own types via Settings → Part Types.
+  if (!Array.isArray(state.settings.partTypes) || state.settings.partTypes.length === 0) {
+    state.settings.partTypes = [
+      { id:'machined',  label:'Machined Part',     icon:'🔧', color:'#1E5BAE', desc:'Standard CNC machining from raw stock' },
+      { id:'cutblank',  label:'Cut Blank',         icon:'⚡', color:'#C56B1C', desc:'Outside-cut (laser/waterjet/plasma) — no machining' },
+      { id:'welded',    label:'Welded Assembly',   icon:'🔥', color:'#C73E1D', desc:'Welded component with weld ops, may include cutting + machining' },
+      { id:'hybrid',    label:'Hybrid (cut+mill)', icon:'🛠', color:'#7C3AED', desc:'Outside-cut blank that also needs secondary machining' },
+      { id:'purchased', label:'Purchased Item',    icon:'📦', color:'#64748B', desc:'Off-the-shelf component (McMaster, Grainger, etc.) — no operations' },
+    ];
+  }
+  // v7.61: every part gets a typeId. Existing parts without one default to
+  // 'machined' (the most common case for KMF's historical work). Estimators
+  // can re-tag in the chip-card via the type pill on each part.
+  (state.quotes || []).forEach(q => (q.parts || []).forEach(p => {
+    if (!p.typeId) p.typeId = 'machined';
+  }));
 }
 
 // =================================================================
@@ -2554,9 +2603,11 @@ function loadScript(src) {
 // =================================================================
 // MODEL helpers
 // =================================================================
-function newPart() {
+function newPart(opts) {
+  opts = opts || {};
   return {
     id: uid(),
+    typeId: opts.typeId || 'machined',   // v7.61: customizable part type (color-coded chip)
     partNum: '', description: '', customerPN: '', material: '', notes: '',
     qtyTiers: [1],
     stock: {
@@ -5114,6 +5165,7 @@ function render() {
   renderInvoiceArchiveImportModal();
   renderQuoteArchiveImportModal();
   renderNewQuoteKindPickerModal();
+  renderPartTypePickerModal();
   renderMsgImportModal();
   renderMissingCustFolderModal();
   // v7.34: user management dialogs
@@ -5241,7 +5293,7 @@ function renderActiveQuoteNav() {
       ${(q.kind === 'machining' && q.parts.length >= 1) ? `
         <div class="nav-item" style="color:var(--text-mute); opacity:0.5; cursor:not-allowed;" title="Single-part machining quote — change kind to add more parts">+ Add Part (locked)</div>
       ` : `
-        <div class="nav-item" style="color:var(--text-mute);" onclick="App.addPart()">+ Add Part</div>
+        <div class="nav-item" style="color:var(--text-mute);" onclick="App.promptAddPart()">+ Add Part</div>
       `}
       ${q.kind === 'build' ? `
         <div class="nav-item ${t==='bom'?'active':''}" onclick="App.goTab('bom')">
@@ -11444,6 +11496,58 @@ function renderQuoteInfo(q) {
   `;
 }
 
+// v7.61: "What kind of part are we adding?" modal — shown when user clicks
+// + Add Part on the chip-card row. One card per registered part type with
+// color stripe + icon + description. Click a card → createPartOfType(id).
+function renderPartTypePickerModal() {
+  const host = document.getElementById('keypad-modal-host') || document.body;
+  // Reuse a stable host so the modal can self-cleanup on close
+  let modalHost = document.getElementById('part-type-picker-host');
+  if (!modalHost) {
+    modalHost = document.createElement('div');
+    modalHost.id = 'part-type-picker-host';
+    document.body.appendChild(modalHost);
+  }
+  if (!state.ui.partTypePicker || !state.ui.partTypePicker.open) {
+    modalHost.innerHTML = '';
+    return;
+  }
+  const types = state.settings.partTypes || [];
+  modalHost.innerHTML = `
+    <div class="modal-backdrop" onclick="App.closePartTypePicker()">
+      <div class="modal" style="width:640px; max-width:96vw;" onclick="event.stopPropagation()">
+        <div class="modal-header">What kind of part?</div>
+        <div class="modal-body">
+          <p class="text-mute small" style="margin:0 0 14px;">Tag the part by type so it gets the right color in the parts chip row. You can change it later from the part header.</p>
+          <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(220px, 1fr)); gap:10px;">
+            ${types.map(t => `
+              <button class="type-picker-card" onclick="App.createPartOfType('${esc(t.id)}')" style="--type-color:${esc(t.color)};">
+                <span class="type-picker-stripe" style="background:${esc(t.color)};"></span>
+                <span class="type-picker-body">
+                  <span class="type-picker-top"><span style="font-size:20px;">${t.icon}</span><strong>${esc(t.label)}</strong></span>
+                  <span class="type-picker-desc">${esc(t.desc || '')}</span>
+                </span>
+              </button>
+            `).join('')}
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn" onclick="App.closePartTypePicker()">Cancel</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// v7.61: look up a part type by id. Falls back to a sane default if the id
+// references a deleted custom type, so deleting a type doesn't break parts.
+function partTypeById(typeId) {
+  const types = (state.settings && state.settings.partTypes) || [];
+  return types.find(t => t.id === typeId)
+      || types.find(t => t.id === 'machined')
+      || { id: typeId || 'unknown', label: typeId || 'Untagged', icon:'❓', color:'#94A3B8', desc:'' };
+}
+
 // v7.60: render parts as a chip-selected tab view — ONE part visible at a time.
 // Replaces the v7.57 all-stacked layout which produced duplicate-looking cards
 // (Machine Setups + Material Stock × N parts). Single-part quotes skip the chip
@@ -11465,24 +11569,43 @@ function renderInlineParts(q) {
   const activePart = q.parts.find(p => p.id === activeId);
   const activeIdx  = q.parts.findIndex(p => p.id === activeId);
 
-  // Chip selector — only shown when more than one part on the quote
-  const chips = q.parts.length <= 1 ? '' : `
-    <div class="parts-chips no-print">
-      <span class="parts-chips-label">PART:</span>
+  // v7.61: colored "card" selector — each part renders as its own preview
+  // card with a colored stripe (matching the part's type), icon, part #,
+  // description, qty + $/ea. Active card has the orange highlight.
+  const cards = q.parts.length <= 1 ? '' : `
+    <div class="parts-cards no-print">
       ${q.parts.map((p, i) => {
         const isActive = p.id === activeId;
+        const t = partTypeById(p.typeId);
         const label = p.partNum ? esc(p.partNum) : `Part ${i+1}`;
-        const sub   = (p.partNum && p.description) ? ` · ${esc(p.description.slice(0,30))}${p.description.length>30?'…':''}` : '';
+        const desc  = p.description ? esc(p.description.slice(0, 48)) + (p.description.length>48?'…':'') : '';
+        const tier1 = (p.qtyTiers && p.qtyTiers[0]) || 1;
+        const unit  = unitPriceAt(p, 0);
         return `
-          <button class="parts-chip ${isActive?'active':''}" onclick="App.selectPartChip('${q.id}','${p.id}')" title="${esc(p.description || '')}">
-            <span class="parts-chip-num">${i+1}</span>
-            <span class="parts-chip-label">${label}${sub}</span>
+          <button class="part-card-chip ${isActive?'active':''}" onclick="App.selectPartChip('${q.id}','${p.id}')" title="${esc(t.label)} — ${esc(p.description || label)}" style="--type-color: ${esc(t.color)};">
+            <span class="part-card-stripe" style="background:${esc(t.color)};"></span>
+            <span class="part-card-body">
+              <span class="part-card-top">
+                <span class="part-card-icon">${t.icon}</span>
+                <span class="part-card-typelabel">${esc(t.label)}</span>
+                <span class="part-card-num">#${i+1}</span>
+              </span>
+              <span class="part-card-name mono">${label}</span>
+              ${desc ? `<span class="part-card-desc">${desc}</span>` : ''}
+              ${unit > 0 ? `<span class="part-card-meta">${fmtInt(tier1)} ea · ${fmtMoney(unit)}/pc</span>` : `<span class="part-card-meta">${fmtInt(tier1)} ea</span>`}
+            </span>
           </button>
         `;
       }).join('')}
       ${lockedSingle
-        ? `<button class="parts-chip" disabled style="opacity:0.5;" title="Single-part machining quote — change quote type if you want multiple parts">+ Add (locked)</button>`
-        : `<button class="parts-chip parts-chip-add" onclick="App.addPart()" title="Add a new part to this quote">+ Add Part</button>`
+        ? `<button class="part-card-chip part-card-add" disabled style="opacity:0.5;" title="Single-part machining quote — change quote type if you want multiple parts">+ Add (locked)</button>`
+        : `<button class="part-card-chip part-card-add" onclick="App.promptAddPart()" title="Add a new part to this quote">
+            <span class="part-card-stripe" style="background:transparent; border-right:2px dashed var(--line-dark);"></span>
+            <span class="part-card-body" style="align-items:center; justify-content:center; color:var(--steel); font-weight:600;">
+              <span style="font-size:24px; line-height:1;">+</span>
+              <span style="font-size:11px; letter-spacing:0.06em;">Add Part</span>
+            </span>
+          </button>`
       }
     </div>
   `;
@@ -11492,15 +11615,19 @@ function renderInlineParts(q) {
   const descLabel    = activePart.description ? esc(activePart.description) : '(no description)';
   const matLabel     = activePart.material ? esc(materialLabelFor(activePart)) : '';
   const firstTierUnit = unitPriceAt(activePart, 0);
+  // v7.61: active part header gets the type pill + dropdown to recategorize
+  const activeType = partTypeById(activePart.typeId);
+  const typeOpts = (state.settings.partTypes || []).map(t => `<option value="${esc(t.id)}" ${t.id === activeType.id?'selected':''}>${t.icon} ${esc(t.label)}</option>`).join('');
   return `
     <div class="section-divider" id="parts-section">
       <span class="label">Parts (${q.parts.length})</span>
-      <span class="hint-text">${q.parts.length === 1 ? 'one part on this quote' : `viewing Part ${activeIdx+1} of ${q.parts.length} · click a chip below to switch`}</span>
+      <span class="hint-text">${q.parts.length === 1 ? 'one part on this quote' : `viewing Part ${activeIdx+1} of ${q.parts.length} · click a card below to switch`}</span>
     </div>
-    ${chips}
-    <div class="card part-card" id="part-anchor-${activePart.id}" style="border-left:4px solid var(--orange);">
-      <div class="card-header">
+    ${cards}
+    <div class="card part-card" id="part-anchor-${activePart.id}" style="border-left:4px solid ${esc(activeType.color)};">
+      <div class="card-header" style="background:linear-gradient(90deg, ${esc(activeType.color)}22 0%, var(--navy) 60%);">
         <span style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+          <span style="font-size:16px;">${activeType.icon}</span>
           <span style="font-family:var(--font-display); letter-spacing:0.04em;">PART ${activeIdx+1}</span>
           <span class="mono" style="font-weight:600;">${partNumLabel}</span>
           <span style="font-weight:normal; letter-spacing:0; text-transform:none; opacity:0.85; font-size:13px;">${descLabel}</span>
@@ -11508,6 +11635,9 @@ function renderInlineParts(q) {
           ${firstTierUnit > 0 ? `<span class="text-mute small" style="font-size:11px;">$${fmtMoney(firstTierUnit).replace('$','')}/ea @ qty ${fmtInt((activePart.qtyTiers||[1])[0])}</span>` : ''}
         </span>
         <span class="header-actions">
+          <select onchange="App.setPartType('${activePart.id}', this.value)" title="Change part type — affects color coding (and progressive disclosure in a future ship)" style="font-size:11px; padding:2px 4px;">
+            ${typeOpts}
+          </select>
           <button class="btn btn-sm" title="Duplicate this part" onclick="App.duplicatePart('${activePart.id}')">⎘ Duplicate</button>
           <button class="btn btn-sm btn-danger" title="Remove this part" onclick="App.deletePart('${activePart.id}')">× Remove</button>
         </span>
@@ -11518,7 +11648,7 @@ function renderInlineParts(q) {
       <div style="text-align:center; padding:12px 0;">
         ${lockedSingle
           ? `<button class="btn" disabled title="Single-part machining quote — change quote type if you want multiple parts">+ Add Part (locked — single-part kind)</button>`
-          : `<button class="btn btn-primary" onclick="App.addPart()">+ Add Another Part</button>`
+          : `<button class="btn btn-primary" onclick="App.promptAddPart()">+ Add Another Part</button>`
         }
       </div>
     ` : ''}
@@ -15215,6 +15345,45 @@ const App = {
       if (!s.ui.activePartIdForInfo) s.ui.activePartIdForInfo = {};
       s.ui.activePartIdForInfo[quoteId] = partId;
     });
+  },
+  // v7.61: change the part type for the active part (re-colors the card stripe)
+  setPartType(partId, typeId) {
+    update(s => {
+      const q = s.quotes.find(qq => qq.id === s.ui.activeQuoteId);
+      if (!q) return;
+      const p = q.parts.find(x => x.id === partId);
+      if (!p) return;
+      p.typeId = typeId || 'machined';
+    });
+  },
+  // v7.61: open a small picker so the user picks a part TYPE before the part
+  // is created. Falls back to "machined" if dismissed. Calls App.addPart()
+  // internally so the existing add-part logic still runs.
+  promptAddPart() {
+    state.ui.partTypePicker = { open: true };
+    render();
+  },
+  closePartTypePicker() {
+    state.ui.partTypePicker = null;
+    render();
+  },
+  // Called from picker cards — creates the part with the chosen type, jumps
+  // to it via the chip selector.
+  createPartOfType(typeId) {
+    update(s => {
+      const q = getActiveQuote(); if (!q) return;
+      const p = newPart({ typeId: typeId || 'machined' });
+      q.parts.push(p);
+      // Auto-select the new part on the chip selector
+      if (!s.ui.activePartIdForInfo) s.ui.activePartIdForInfo = {};
+      s.ui.activePartIdForInfo[q.id] = p.id;
+      s.ui.partTypePicker = null;
+    });
+    // Scroll the parts section into view so the new card is visible
+    setTimeout(() => {
+      const el = document.getElementById('parts-section');
+      if (el && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 60);
   },
   // v7.57: collapse/expand a part on the Quote Info page (inline parts layout)
   togglePartExpanded(partId) {
