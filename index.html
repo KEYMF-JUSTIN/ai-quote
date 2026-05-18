@@ -728,7 +728,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.69.0';
+const APP_VERSION = '7.69.1';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -12686,8 +12686,8 @@ function renderVendorWizardModal() {
           <div class="row" style="gap:8px;">
             ${stepIdx > 0 ? `<button class="btn" onclick="App.vendorWizardBack()">← Back</button>` : ''}
             ${step.key !== 'review'
-              ? `<button class="btn btn-primary" ${canNext?'':'disabled title="Enter a vendor name first"'} onclick="App.vendorWizardNext()">Next →</button>`
-              : `<button class="btn btn-primary" ${canSave?'':'disabled'} onclick="App.vendorWizardSave()">✓ Save Vendor</button>`}
+              ? `<button id="vendor-wizard-next-btn" class="btn btn-primary" ${canNext?'':'disabled title="Enter a vendor name first"'} onclick="App.vendorWizardNext()">Next →</button>`
+              : `<button id="vendor-wizard-save-btn" class="btn btn-primary" ${canSave?'':'disabled'} onclick="App.vendorWizardSave()">✓ Save Vendor</button>`}
           </div>
         </div>
       </div>
@@ -12866,8 +12866,8 @@ function renderCustomerWizardModal() {
           <div class="row" style="gap:8px;">
             ${stepIdx > 0 ? `<button class="btn" onclick="App.customerWizardBack()">← Back</button>` : ''}
             ${step.key !== 'review'
-              ? `<button class="btn btn-primary" ${canNext?'':'disabled title="Enter a company name first"'} onclick="App.customerWizardNext()">Next →</button>`
-              : `<button class="btn btn-primary" ${canSave?'':'disabled'} onclick="App.customerWizardSave()">✓ Save Customer</button>`}
+              ? `<button id="customer-wizard-next-btn" class="btn btn-primary" ${canNext?'':'disabled title="Enter a company name first"'} onclick="App.customerWizardNext()">Next →</button>`
+              : `<button id="customer-wizard-save-btn" class="btn btn-primary" ${canSave?'':'disabled'} onclick="App.customerWizardSave()">✓ Save Customer</button>`}
           </div>
         </div>
       </div>
@@ -17476,12 +17476,31 @@ const App = {
     if (hasContent && !confirm('Discard this customer draft? Anything you typed will be lost.')) return;
     update(s => { s.ui.customerWizard = null; });
     localStorage.removeItem(WIZARD_DRAFTS_KEY);
+    this._wizardForcePush('Closed — synced to cloud.');
   },
   customerWizardSet(field, value) {
     if (!state.ui.customerWizard) return;
     state.ui.customerWizard.draft[field] = value;
-    // Re-render when toggles flip OR when name changes (Next button enable state)
-    if (field === 'name' || field === 'shipSameAsBill' || field === 'status' || field === 'paymentTerms') {
+    // v7.69.1: Same focus-preservation fix as vendor wizard — no full
+    // re-render for text inputs. Only `shipSameAsBill` actually changes the
+    // step list (adds/removes the shipping step) so it's the only one that
+    // genuinely needs a full re-render. status/paymentTerms are <select>s
+    // whose DOM already reflects state; name uses a targeted DOM update.
+    saveWizardDrafts();
+    markLastSaved();
+    if (field === 'name') {
+      const nextBtn = document.getElementById('customer-wizard-next-btn');
+      if (nextBtn) {
+        const canNext = (value || '').trim().length > 0;
+        nextBtn.disabled = !canNext;
+        if (canNext) nextBtn.removeAttribute('title');
+        else nextBtn.setAttribute('title', 'Enter a company name first');
+      }
+    }
+    if (field === 'shipSameAsBill') {
+      // This one DOES need a full re-render because it adds/removes the
+      // shipping step from the step list. Checkbox click means no focused
+      // text input to lose, so safe to re-render.
       renderCustomerWizardModal();
     }
   },
@@ -17543,7 +17562,27 @@ const App = {
       s.ui.customerWizard = null;
       s.ui.view = 'customers';
     });
-    showToast(`Customer "${d.name.trim()}" added.`);
+    localStorage.removeItem(WIZARD_DRAFTS_KEY);
+    this._wizardForcePush(`Customer "${d.name.trim()}" saved and synced to cloud.`);
+  },
+
+  // v7.69.1: Shared helper — forces a cloud push and shows visible
+  // confirmation. update() already pushes if sync is connected; this is the
+  // extra-loud version specifically for wizard-exit moments where the user
+  // wants to KNOW the work landed in Firebase (not just localStorage).
+  _wizardForcePush(toastMsg) {
+    try {
+      saveStateLocal();
+      markLastSaved();
+      if (SyncEngine.isEnabled() && SyncEngine.connected && !SyncEngine.applyingRemote) {
+        SyncEngine.push();
+        showToast('☁ ' + toastMsg);
+      } else if (SyncEngine.isEnabled()) {
+        showToast('💾 Saved locally — will sync when cloud reconnects.');
+      } else {
+        showToast('💾 ' + toastMsg.replace(/synced to cloud/i, 'saved locally'));
+      }
+    } catch (_) { /* non-fatal */ }
   },
   deleteCustomer(id) {
     if (!confirm('Delete this customer? Existing quotes referencing them will keep working.')) return;
@@ -18668,16 +18707,33 @@ const App = {
     if (hasContent && !confirm('Discard this vendor draft? Anything you typed will be lost.')) return;
     update(s => { s.ui.vendorWizard = null; });
     localStorage.removeItem(WIZARD_DRAFTS_KEY);
+    // v7.69.1: force a cloud push on every wizard exit so the user has
+    // confirmation that their work landed in Firebase, not just localStorage.
+    this._wizardForcePush('Closed — synced to cloud.');
   },
   vendorWizardSet(field, value) {
     if (!state.ui.vendorWizard) return;
     state.ui.vendorWizard.draft[field] = value;
-    // For the basics step we re-render on each keystroke only to update the
-    // disabled state of the Next button. Skip render on text inputs where
-    // possible to keep typing snappy — but Next's disabled state needs it.
-    if (field === 'name' || field === 'favorite' || field === 'shipSameAsBill') {
-      renderVendorWizardModal();
+    // v7.69.1: Text-input fields MUST NOT trigger a full re-render — that
+    // rebuilds the modal innerHTML, throws away the focused <input>, and
+    // kicks the user out of the text field every keystroke. Instead:
+    //   - Update Next button's disabled state via targeted DOM (no re-render)
+    //   - Persist draft directly here (was previously waiting for next update())
+    //   - Only re-render when the field genuinely changes the modal STRUCTURE
+    //     (e.g. a checkbox that adds/removes a step)
+    saveWizardDrafts();
+    markLastSaved();
+    if (field === 'name') {
+      const nextBtn = document.getElementById('vendor-wizard-next-btn');
+      if (nextBtn) {
+        const canNext = (value || '').trim().length > 0;
+        nextBtn.disabled = !canNext;
+        if (canNext) nextBtn.removeAttribute('title');
+        else nextBtn.setAttribute('title', 'Enter a vendor name first');
+      }
     }
+    // 'favorite' is a checkbox — the DOM already reflects state on its own.
+    // No re-render needed.
   },
   vendorWizardToggleType(t) {
     if (!state.ui.vendorWizard) return;
@@ -18778,7 +18834,8 @@ const App = {
       logActivity('Added vendor', d.name.trim(), `via wizard · ${types.join('+')}${services.length?` · ${services.length} svc`:''}${(d.materialIds||[]).length?` · ${(d.materialIds||[]).length} mat`:''}`);
       s.ui.vendorWizard = null;
     });
-    showToast(`Vendor "${d.name.trim()}" added.`);
+    localStorage.removeItem(WIZARD_DRAFTS_KEY);
+    this._wizardForcePush(`Vendor "${d.name.trim()}" saved and synced to cloud.`);
   },
   setVendorSearch(v) {
     state.ui.vendorSearch = v;
