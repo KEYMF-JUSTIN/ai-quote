@@ -208,6 +208,21 @@
   table.tbl input[type=number] { font-family:var(--font-mono); }
   table.tbl td.action { width:30px; text-align:center; }
 
+  /* v7.52: AI Analysis (Claude Vision) section — force readable contrast.
+     The section background is a tinted pastel, so child text needs an explicit
+     dark color rather than inheriting body defaults that may resolve to muted
+     gray on light backgrounds. */
+  .claude-section { color:#0F172A; }
+  .claude-section h3 { color:#0F172A; }
+  .claude-section .text-mute, .claude-section .text-mute.small { color:#475569 !important; }
+  .claude-section strong { color:#0F172A; }
+  .claude-section a { color:#1E5BAE; }
+  .claude-section .label { color:#475569; }
+  .claude-section .pill { color:#fff; }
+  /* Cards-within-card: white background for nested rows so dense text reads cleanly */
+  .claude-section > div[style*="background:white"] { color:#0F172A; }
+  .claude-section ul li { color:#0F172A; }
+
   /* v7.50: Similar Parts analytics grid */
   .similar-analytics { display:grid; grid-template-columns:repeat(6, 1fr); gap:8px; padding:8px; background:var(--bg); border:1px solid var(--line); border-radius:3px; }
   .similar-analytics > div { display:flex; flex-direction:column; gap:2px; }
@@ -586,7 +601,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.51.0';
+const APP_VERSION = '7.52.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -14168,14 +14183,24 @@ function renderMsgImportModal() {
   `;
 
   // Attachments section
+  // v7.52: each PDF row has an "Include in quote" checkbox. All attachments
+  // auto-save to the job folder regardless — this flag only controls whether
+  // the attachment gets bundled into the outbound quote PDF when emailing
+  // the customer back. Default OFF (RFQ drawings are usually the customer's
+  // own — no point sending them back).
   const pdfRows = pdfs.length === 0 ? `<div class="text-mute small">No PDFs found in this email.</div>` :
+    `<div class="text-mute small" style="margin-bottom:6px;">All attachments auto-save to the job folder when applied. Toggle "Include in quote" to also attach the file to the outbound quote PDF when emailing the customer.</div>` +
     pdfs.map((pdf, i) => `
       <div class="msg-attachment-row">
-        <div>
+        <div style="flex:1;">
           <span style="font-size:18px;">📄</span>
           <span class="mono" style="font-size:12px;">${esc(pdf.filename)}</span>
           <span class="text-mute small"> · ${(pdf.size/1024).toFixed(0)} KB</span>
         </div>
+        <label style="display:flex; align-items:center; gap:5px; cursor:pointer; font-size:12px; color:var(--text); margin-right:8px;" title="When checked, this attachment is bundled with the outbound quote PDF when you email the customer.">
+          <input type="checkbox" ${pdf.includeInQuote ? 'checked' : ''} onchange="App.msgToggleAttachmentIncluded(${i})" style="width:auto; padding:0; margin:0;">
+          Include in quote
+        </label>
         <div style="display:flex; gap:6px;">
           <a class="btn btn-sm" href="${esc(pdf.blobUrl)}" target="_blank" rel="noopener" title="Open PDF in a new tab">↗ View</a>
           <button class="btn btn-sm" onclick="App.msgSavePdf(${i})">⬇ Save</button>
@@ -14208,15 +14233,44 @@ function renderMsgImportModal() {
             <ul style="margin:4px 0 0 18px; padding:0;">${claude.parsed.redFlags.map(f => `<li>${esc(f)}</li>`).join('')}</ul>
           </div>
         ` : ''}
-        ${claude.parsed.customer ? `
-          <div style="margin-bottom:8px;">
-            <strong>Customer (AI-identified):</strong>
-            ${esc(claude.parsed.customer.companyName || '(unknown)')}
-            ${claude.parsed.customer.contactName ? ` · ${esc(claude.parsed.customer.contactName)}` : ''}
-            ${claude.parsed.customer.role ? ` (${esc(claude.parsed.customer.role)})` : ''}
-            ${claude.parsed.customer.confidence ? `<span class="pill" style="margin-left:6px; font-size:10px; background:${claude.parsed.customer.confidence === 'high' ? '#16A34A' : claude.parsed.customer.confidence === 'medium' ? '#D97706' : '#94A3B8'}; color:white;">${esc(claude.parsed.customer.confidence)}</span>` : ''}
-          </div>
-        ` : ''}
+        ${claude.parsed.customer ? (() => {
+          const cust = claude.parsed.customer;
+          // v7.52: Detect "new contact at existing customer" — if the regex/enriched
+          // matches have a high-confidence top hit AND that customer doesn't already
+          // have this contact email or name, surface an "Add as contact" button so
+          // future RFQs from this person auto-match.
+          const topMatch = (p.matches && p.matches[0] && p.matches[0].score >= 75) ? p.matches[0] : null;
+          let addContactBtn = '';
+          if (topMatch && (cust.contactName || cust.contactEmail)) {
+            const matchedCust = topMatch.customer;
+            const allEmails = new Set([
+              (matchedCust.email || '').toLowerCase().trim(),
+              ...((matchedCust.contacts || []).map(c => (c.email || '').toLowerCase().trim()))
+            ].filter(Boolean));
+            const allNames = new Set([
+              (matchedCust.contact || '').toLowerCase().trim(),
+              ...((matchedCust.contacts || []).map(c => (c.name || '').toLowerCase().trim()))
+            ].filter(Boolean));
+            const contactEmail = (cust.contactEmail || p.senderEmail || '').toLowerCase().trim();
+            const contactName  = (cust.contactName || '').toLowerCase().trim();
+            const alreadyKnown = (contactEmail && allEmails.has(contactEmail)) || (contactName && allNames.has(contactName));
+            if (!alreadyKnown && (contactEmail || contactName)) {
+              addContactBtn = `<button class="btn btn-sm btn-primary" style="margin-left:8px;" onclick="App.msgAddContactFromClaude('${matchedCust.id}')">+ Add ${esc(cust.contactName || cust.contactEmail || 'this person')} to ${esc(matchedCust.name)}</button>`;
+            }
+          }
+          return `
+            <div style="margin-bottom:8px; display:flex; align-items:center; flex-wrap:wrap; gap:6px;">
+              <span><strong>Customer (AI-identified):</strong>
+              ${esc(cust.companyName || '(unknown)')}
+              ${cust.contactName ? ` · ${esc(cust.contactName)}` : ''}
+              ${cust.role ? ` (${esc(cust.role)})` : ''}
+              ${cust.contactEmail ? ` · <span class="mono" style="font-size:12px;">${esc(cust.contactEmail)}</span>` : ''}
+              ${cust.confidence ? `<span class="pill" style="margin-left:6px; font-size:10px; background:${cust.confidence === 'high' ? '#16A34A' : cust.confidence === 'medium' ? '#D97706' : '#94A3B8'}; color:white;">${esc(cust.confidence)}</span>` : ''}
+              </span>
+              ${addContactBtn}
+            </div>
+          `;
+        })() : ''}
         ${(claude.parsed.dueDate || claude.parsed.urgency || claude.parsed.rfqRef) ? `
           <div style="margin-bottom:8px; font-size:13px;">
             ${claude.parsed.rfqRef ? `<strong>RFQ #:</strong> <span class="mono">${esc(claude.parsed.rfqRef)}</span> · ` : ''}
@@ -18441,6 +18495,52 @@ Online Metals,Brass,Round,1.25 dia,per_lb,5.20`;
       render();
     }
   },
+  // v7.52: Add the Claude-identified contact under the matched customer's
+  // contacts[] in one click. Uses Claude's structured contact info; falls back
+  // to the email sender's address/name if Claude didn't fill contactEmail.
+  msgAddContactFromClaude(customerId) {
+    const m = state.ui.msgImport;
+    if (!m || !m.claude || !m.claude.parsed) return;
+    const cust = m.claude.parsed.customer || {};
+    const fallbackEmail = m.parsed && m.parsed.senderEmail || '';
+    const fallbackName  = m.parsed && m.parsed.sender || '';
+    const name  = cust.contactName  || fallbackName  || '';
+    const email = cust.contactEmail || fallbackEmail || '';
+    const phone = cust.contactPhone || '';
+    const role  = cust.role || '';
+    if (!name && !email) { alert('No contact name or email identified — nothing to add.'); return; }
+    update(s => {
+      const c = s.customers.find(x => x.id === customerId);
+      if (!c) return;
+      if (!Array.isArray(c.contacts)) c.contacts = [];
+      // Dedupe — if the same email is already a contact, just touch the role
+      const emailLower = email.toLowerCase().trim();
+      const existing = c.contacts.find(ct => (ct.email || '').toLowerCase().trim() === emailLower);
+      if (existing) {
+        if (!existing.name && name) existing.name = name;
+        if (!existing.role && role) existing.role = role;
+        if (!existing.phone && phone) existing.phone = phone;
+      } else {
+        c.contacts.push(newContact({ name, email, phone, role }));
+      }
+      logActivity('Added contact from RFQ email', c.name, name + (email ? ' <' + email + '>' : ''));
+    });
+    showToast(`Added ${name || email} to ${(state.customers.find(c => c.id === customerId) || {}).name || 'customer'}.`, 3000);
+    // Re-render so the button disappears (alreadyKnown check now passes)
+    if (typeof renderMsgImportModal === 'function') renderMsgImportModal();
+  },
+  // v7.52: per-attachment include toggle on the RFQ import modal. Just flips
+  // a flag on the parsed PDF object — the actual bundling into outbound quote
+  // PDFs is wired in a later ship; this captures the user's intent today.
+  msgToggleAttachmentIncluded(idx) {
+    const m = state.ui.msgImport;
+    if (!m || !m.parsed || !m.parsed.pdfs) return;
+    const pdf = m.parsed.pdfs[idx];
+    if (!pdf) return;
+    pdf.includeInQuote = !pdf.includeInQuote;
+    if (typeof renderMsgImportModal === 'function') renderMsgImportModal();
+  },
+
   // v7.51: force a fresh Worker health check (user-clickable on the AI pill)
   async refreshWorkerHealth() {
     showToast('Checking AI Worker…', 1500);
