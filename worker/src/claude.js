@@ -87,8 +87,18 @@ export async function extractWithTool(env, { tool, content, system, model, max_t
  * Claude vision supports PDF and image media types natively.
  */
 export function attachmentToContentBlock(attachment) {
-  if (!attachment || !attachment.data) return null;
+  if (!attachment) return null;
   const mime = (attachment.mimeType || '').toLowerCase();
+  // v7.54: empty data = filename-only announcement. Used when the frontend
+  // detected an attachment by name (e.g. via UTF-16 scan of an Outlook .msg)
+  // but couldn't extract its bytes. Claude still gets the signal that a CAD
+  // file is attached so it can reason about cutting/outsourcing.
+  if (!attachment.data) {
+    return {
+      type: 'text',
+      text: `[Attachment listed (file contents not provided): ${attachment.name || 'unnamed'} (${mime || 'unknown type'})]`,
+    };
+  }
   if (mime === 'application/pdf') {
     return {
       type: 'document',

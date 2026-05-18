@@ -114,7 +114,7 @@ async function handleExtractRfq(env, body) {
       `${email.body || '(empty)'}`,
       ``,
       email.attachments.length
-        ? `ATTACHMENTS follow below. Read drawings carefully — extract part numbers, dimensions, material specs, finish callouts, tolerances, quantities, and any due date / lead time mentioned.`
+        ? `ATTACHMENTS follow below. Read drawings carefully — extract part numbers, dimensions, material specs, finish callouts, tolerances, quantities, and any due date / lead time mentioned. IMPORTANT: if ANY CAD attachments are listed (DWG, DXF, STEP, STP, IGES, etc.), that is a strong signal the customer wants outside cutting (laser/waterjet/plasma/wire-EDM). Populate dxfSuggestions[] with one entry per CAD attachment EVEN IF the email body does not explicitly say "cut" — a flat-part CAD file attached to an RFQ almost always means cutting work. For non-CAD attachments (PDFs), only suggest a DXF entry if the PDF is a drawing showing a flat part with cutting callouts.`
         : `No attachments. Extract whatever you can from the email body alone.`,
     ].join('\n'),
   });
@@ -174,7 +174,7 @@ async function handleExtractRfq(env, body) {
         redFlags: { type: 'array', items: { type: 'string' }, description: 'Things that warrant human attention: "no quantity stated", "drawing is unreadable", "material call-out is ambiguous", "competitor mentioned", "lead time impossible", etc.' },
         dxfSuggestions: {
           type: 'array',
-          description: 'When the email or attached drawings call out flat parts that need outside cutting (laser, waterjet, plasma, oxy-fuel, wire EDM, etc.) — e.g. "please quote 4 each of these plates, laser-cut from 1/4 plate steel" — surface one suggestion per distinct cut file/drawing. Each entry can later be one-click added to a part\'s DXF Cut Files list. Only populate if cutting is explicitly mentioned or strongly implied (e.g. drawing says "FLAME CUT" or "WATERJET FINISH").',
+          description: 'Suggest one entry per distinct CAD/cut file the customer wants outside-cut. STRONG TRIGGERS (always populate when seen): (a) ANY CAD attachment listed (DWG, DXF, STEP, STP, IGES, SLDPRT) — these almost always mean cutting work; populate one entry per attachment. (b) Email/drawing language explicitly mentioning cutting: "laser-cut", "waterjet", "plasma", "wire EDM", "flame cut", "burn out", "cut from plate". (c) Drawings showing flat parts with cutting callouts. WEAKER TRIGGERS (suggest with low confidence): flat-plate parts that LOOK like they\'d be cut (rectangular plates with bolt patterns, gussets, mounting brackets) even without explicit cut language. Each entry can be one-click added to a part\'s DXF Cut Files list and then estimated via /api/claude/estimate-outside-service.',
           items: {
             type: 'object',
             properties: {

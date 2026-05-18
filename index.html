@@ -601,7 +601,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.53.0';
+const APP_VERSION = '7.54.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -13767,6 +13767,12 @@ async function parseOutlookMsg(file) {
   // Extract embedded PDFs
   const pdfs = msgExtractPdfs(bytes, file.name);
 
+  // v7.54: enumerate ALL attachment filenames (PDF, DWG, DXF, STEP, etc.)
+  // by scanning UTF-16 strings for known CAD/engineering file extensions.
+  // We don't try to extract the binary bytes (.msg uses CFB streams that need
+  // proper parsing) — we just surface the names so Claude knows what's attached.
+  const attachmentNames = msgExtractAttachmentFilenames(bytes);
+
   // Customer fuzzy match
   const matches = msgFuzzyMatchCustomer(parsed.sender, parsed.senderEmail, state.customers);
 
@@ -13781,9 +13787,61 @@ async function parseOutlookMsg(file) {
     body: parsed.body,
     bodyRaw,
     pdfs,
+    attachmentNames,   // v7.54: DWG/DXF/STEP/etc. detected by filename (no bytes extracted)
     matches,
     partHints,
   };
+}
+
+// v7.54: scan .msg bytes for UTF-16LE filenames ending in known CAD /
+// engineering extensions. Returns deduped list of { name, ext, mime }
+// objects. Does NOT extract the file bytes — Outlook stores attachments
+// in CFB streams that need proper parsing; this just surfaces what's
+// listed so Claude knows attachments exist. The .pdf entries are also
+// captured here but we keep msgExtractPdfs as the path that actually
+// pulls PDF bytes (PDFs have a strong file signature; DWGs/DXFs don't).
+const CAD_EXTENSION_MIME = {
+  'dwg':    'image/vnd.dwg',
+  'dxf':    'image/vnd.dxf',
+  'step':   'model/step',
+  'stp':    'model/step',
+  'iges':   'model/iges',
+  'igs':    'model/iges',
+  'sldprt': 'application/vnd.solidworks.part',
+  'sldasm': 'application/vnd.solidworks.assembly',
+  'slddrw': 'application/vnd.solidworks.drawing',
+  'stl':    'model/stl',
+  'x_t':    'model/parasolid',
+  'x_b':    'model/parasolid',
+  'sat':    'model/acis',
+  'pdf':    'application/pdf',
+  'zip':    'application/zip',
+};
+function msgExtractAttachmentFilenames(bytes) {
+  // Find all UTF-16LE strings of length >= 5 chars
+  const candidates = msgExtractUtf16Runs(bytes, 5);
+  const extRe = /\.(dwg|dxf|step|stp|iges|igs|sldprt|sldasm|slddrw|stl|x_t|x_b|sat|pdf|zip)$/i;
+  const seen = new Set();
+  const out = [];
+  for (const run of candidates) {
+    const text = run.text || '';
+    // A typical filename is 4-200 chars and looks like word characters + extension
+    // Strip whitespace/quotes/path separators to isolate the filename portion
+    const trimmed = text.trim();
+    // The string may contain the filename mid-text; split on common path/quote chars
+    const tokens = trimmed.split(/[\s"'<>;,\\\/]+/);
+    for (const tok of tokens) {
+      const m = tok.match(/^([A-Za-z0-9_.\- ()&+#]{1,180})\.(dwg|dxf|step|stp|iges|igs|sldprt|sldasm|slddrw|stl|x_t|x_b|sat|pdf|zip)$/i);
+      if (!m) continue;
+      const name = m[0];
+      const ext = m[2].toLowerCase();
+      const key = name.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ name, ext, mime: CAD_EXTENSION_MIME[ext] || 'application/octet-stream' });
+    }
+  }
+  return out;
 }
 
 function msgExtractUtf16Runs(bytes, minChars) {
@@ -14199,8 +14257,19 @@ function renderMsgImportModal() {
   // the attachment gets bundled into the outbound quote PDF when emailing
   // the customer back. Default OFF (RFQ drawings are usually the customer's
   // own — no point sending them back).
-  const pdfRows = pdfs.length === 0 ? `<div class="text-mute small">No PDFs found in this email.</div>` :
-    `<div class="text-mute small" style="margin-bottom:6px;">All attachments auto-save to the job folder when applied. Toggle "Include in quote" to also attach the file to the outbound quote PDF when emailing the customer.</div>` +
+  // v7.54: render BOTH extracted PDFs and detected non-PDF attachment names.
+  // Extracted PDFs have a blobUrl (View/Save buttons available); detected
+  // names (DWG/DXF/STEP/etc.) are filename-only and show with an info hint
+  // explaining they need to be attached to the job folder separately.
+  const attachmentNames = (p.attachmentNames || []).filter(att => att.ext !== 'pdf' || !pdfs.some(pf => pf.filename.toLowerCase() === att.name.toLowerCase()));
+  const totalAttachments = pdfs.length + attachmentNames.length;
+  const extIcon = (ext) => ({
+    dwg:'📐', dxf:'📐', step:'🔩', stp:'🔩', iges:'🔩', igs:'🔩',
+    sldprt:'🧩', sldasm:'🧩', slddrw:'🧩', stl:'🧊',
+    x_t:'🔩', x_b:'🔩', sat:'🔩', zip:'🗜', pdf:'📄'
+  }[ext] || '📎');
+  const pdfRows = totalAttachments === 0 ? `<div class="text-mute small">No attachments detected in this email.</div>` :
+    `<div class="text-mute small" style="margin-bottom:6px;">All attachments auto-save to the job folder when applied. Toggle "Include in quote" to also attach the file to the outbound quote PDF when emailing the customer.${attachmentNames.length > 0 ? ' CAD files (DWG/DXF/STEP) are detected by name from the .msg — the bytes aren\'t extracted today (drop the original files into the job folder separately).' : ''}</div>` +
     pdfs.map((pdf, i) => `
       <div class="msg-attachment-row">
         <div style="flex:1;">
@@ -14216,6 +14285,17 @@ function renderMsgImportModal() {
           <a class="btn btn-sm" href="${esc(pdf.blobUrl)}" target="_blank" rel="noopener" title="Open PDF in a new tab">↗ View</a>
           <button class="btn btn-sm" onclick="App.msgSavePdf(${i})">⬇ Save</button>
         </div>
+      </div>
+    `).join('') +
+    attachmentNames.map(att => `
+      <div class="msg-attachment-row" style="opacity:0.85;">
+        <div style="flex:1;">
+          <span style="font-size:18px;">${extIcon(att.ext)}</span>
+          <span class="mono" style="font-size:12px;">${esc(att.name)}</span>
+          <span class="pill" style="background:#C56B1C; color:white; font-size:10px; margin-left:6px;">${esc(att.ext.toUpperCase())}</span>
+          <span class="text-mute small"> · filename only (bytes not extracted from .msg)</span>
+        </div>
+        <span class="text-mute small" style="font-style:italic;" title="The .msg parser only extracts PDFs today. CAD files are detected by filename only — drop the original files into the job folder.">drop file into job folder</span>
       </div>
     `).join('');
 
@@ -14374,7 +14454,7 @@ function renderMsgImportModal() {
             ${partSection}
           </div>
           <div class="msg-modal-section">
-            <h3>Attached PDFs (${pdfs.length})</h3>
+            <h3>Attachments (${totalAttachments})${attachmentNames.length > 0 ? ` <span style="font-weight:normal; font-size:11px; color:var(--text-mute); letter-spacing:0;">— ${pdfs.length} PDF${pdfs.length===1?'':'s'}, ${attachmentNames.length} CAD/other</span>` : ''}</h3>
             ${pdfRows}
           </div>
           <div class="msg-modal-section">
@@ -18508,6 +18588,15 @@ Online Metals,Brass,Round,1.25 dia,per_lb,5.20`;
         const data = await blobToBase64(blob);
         attachments.push({ name: pdf.filename, mimeType: blob.type || 'application/pdf', data });
       } catch (e) { /* skip unreadable attachments */ }
+    }
+    // v7.54: filename-only attachments (DWG/DXF/STEP/etc.) — we can't extract
+    // bytes from .msg without a CFB parser, but Claude can still reason about
+    // the existence of CAD attachments to suggest cut routings.
+    const pdfNameSet = new Set(attachments.map(a => (a.name || '').toLowerCase()));
+    for (const att of (parsed.attachmentNames || [])) {
+      if (pdfNameSet.has((att.name || '').toLowerCase())) continue;   // already extracted as PDF
+      if (att.ext === 'pdf') continue;                                  // PDFs handled above (may be missing if extraction failed)
+      attachments.push({ name: att.name, mimeType: att.mime, data: '' }); // empty data = filename announcement
     }
     const requestBody = {
       sender:      parsed.sender || '',
