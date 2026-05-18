@@ -256,19 +256,51 @@ async function handleExtractDocument(env, body) {
       `items are structured, what their vendor name looks like, etc.). Use them as your guide.`,
       ``,
       ...sorted.map((s, i) => {
-        const json = JSON.stringify(s.parsedFields || {}, null, 2);
+        // v7.66: pull _fieldHints out so they get their own dedicated section
+        // (location/label hints the user marked via drag-box on the PDF).
+        // The remaining parsedFields show field structure + actual values.
+        const parsed = s.parsedFields || {};
+        const fieldHints = parsed._fieldHints || null;
+        const parsedNoHints = { ...parsed };
+        delete parsedNoHints._fieldHints;
+        const json = JSON.stringify(parsedNoHints, null, 2);
         const trimmed = json.length > 1500 ? json.slice(0, 1500) + '\n  ...(truncated)...\n}' : json;
+        let hintsBlock = '';
+        if (fieldHints && typeof fieldHints === 'object' && Object.keys(fieldHints).length > 0) {
+          const hintLines = Object.entries(fieldHints).map(([key, h]) => {
+            if (!h) return '';
+            const labelHint = h.nearbyText ? ` · adjacent label/text: "${String(h.nearbyText).slice(0, 100)}"` : '';
+            const valHint   = h.value      ? ` · captured value: "${String(h.value).slice(0, 80)}"` : ' · (value blank on this teaching sample — location-only hint)';
+            const posHint   = h.bounds     ? ` · page ${h.bounds.page||1}, box ~(${Math.round(h.bounds.left)},${Math.round(h.bounds.top)})-(${Math.round(h.bounds.right)},${Math.round(h.bounds.bottom)})` : '';
+            return `      ${key}${labelHint}${valHint}${posHint}`;
+          }).filter(Boolean);
+          if (hintLines.length > 0) {
+            hintsBlock = [
+              `   FIELD LOCATION HINTS (user-marked via drag-box on the PDF):`,
+              ...hintLines,
+            ].join('\n');
+          }
+        }
         return [
           `--- EXAMPLE ${i+1}: ${s.docType || 'unknown type'}${s.notes ? ' · note: ' + s.notes : ''} ---`,
           trimmed,
+          hintsBlock,
           ``,
-        ].join('\n');
+        ].filter(Boolean).join('\n');
       }),
       `=== END EXAMPLES ===`,
       ``,
       `Now extract the NEW document attached below using the same field shape and conventions.`,
       `Where the new doc has values the examples don't have, infer reasonably. Where structure is`,
       `ambiguous, follow the examples' precedent.`,
+      ``,
+      `IMPORTANT — about FIELD LOCATION HINTS in the examples above:`,
+      `The user marked specific regions on prior docs to teach you WHERE each field appears`,
+      `on this entity's documents. The "adjacent label/text" tells you what nearby text to look`,
+      `for. The "captured value" shows what the value looked like (blank if the field was empty`,
+      `on that teaching sample — but the location hint still applies). The box coordinates give`,
+      `the approximate page-region. Use these hints to find the same field on the NEW document,`,
+      `even if the layout is slightly different — labels are more reliable than coordinates.`,
       ``,
     ].join('\n');
   }

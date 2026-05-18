@@ -703,7 +703,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.65.2';
+const APP_VERSION = '7.66.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -2940,17 +2940,35 @@ PdfViewer._wireCaptureHandlers = function(containerId, overlay) {
     const w = right - left, h = bottom - top;
     const inst = self._instances[containerId];
     if (inst && inst.captureCallback && w > 4 && h > 4) {
-      // Intersect text items with the drawn box; sort top-to-bottom, left-to-right
-      const hits = (inst.textItems || [])
+      // v7.66: capture BOTH the text inside the box AND the text within a
+      // ~60px buffer zone around it. Inside-box text is the "value"; nearby
+      // text is the "label context" — used as a structural hint so Claude
+      // can find the same field on docs where the value differs (or is
+      // blank on the training sample, but present on future docs).
+      const NEARBY_BUFFER = 60;
+      const nearLeft = left - NEARBY_BUFFER, nearRight = right + NEARBY_BUFFER;
+      const nearTop  = top - NEARBY_BUFFER,  nearBottom = bottom + NEARBY_BUFFER;
+      const readingOrder = (a, b) => {
+        if (Math.abs(a.y - b.y) > Math.max(a.h, b.h) / 2) return a.y - b.y;
+        return a.x - b.x;
+      };
+      const insideHits = (inst.textItems || [])
         .filter(t => !(t.x + t.w < left || t.x > right || t.y + t.h < top || t.y > bottom))
-        .sort((a, b) => {
-          if (Math.abs(a.y - b.y) > Math.max(a.h, b.h) / 2) return a.y - b.y;
-          return a.x - b.x;
-        });
-      const captured = hits.map(t => t.str).join(' ').replace(/\s+/g, ' ').trim();
-      if (captured) {
-        try { inst.captureCallback(captured, { left, top, right, bottom }); } catch (e) { console.warn('capture callback failed', e); }
-      }
+        .sort(readingOrder);
+      const nearbyHits = (inst.textItems || [])
+        .filter(t => {
+          // In the wider zone, but NOT in the inside box (we want labels around it, not the value)
+          const inNear   = !(t.x + t.w < nearLeft || t.x > nearRight || t.y + t.h < nearTop || t.y > nearBottom);
+          const inInside = !(t.x + t.w < left || t.x > right || t.y + t.h < top || t.y > bottom);
+          return inNear && !inInside;
+        })
+        .sort(readingOrder);
+      const captured = insideHits.map(t => t.str).join(' ').replace(/\s+/g, ' ').trim();
+      const nearbyText = nearbyHits.map(t => t.str).join(' ').replace(/\s+/g, ' ').trim().slice(0, 200);
+      const bounds = { left, top, right, bottom, page: inst.curPage };
+      // v7.66: fire callback even when inside text is empty — empty-box drags
+      // teach LOCATION even when the value isn't present on this teaching sample.
+      try { inst.captureCallback(captured, { ...bounds, nearbyText }); } catch (err) { console.warn('capture callback failed', err); }
     }
     // Fade + remove the box
     if (box) {
@@ -12066,26 +12084,46 @@ function renderTrainingModal() {
   const isPdf = !!(p.file && (/pdf$/i.test(p.file.type || '') || /\.pdf$/i.test(p.file.name || '')));
   const isImage = !!(p.file && /^image\//i.test(p.file.type || ''));
   // Preview pane on the LEFT — switches by file type
-  // v7.65: capture callback for drag-box on PDF → writes captured text into
-  // the active wizard question. Number/currency types parse the captured
-  // string; line-items pushes a new row with the text as description.
+  // v7.65/66: capture callback for drag-box on PDF.
+  // - When the box CONTAINS text: write it into the active wizard question.
+  // - ALWAYS write a _fieldHints[questionKey] record so future docs from this
+  //   entity get LOCATION context for the field, even if today's teaching
+  //   sample had a blank value at that spot. Hints = { value, nearbyText,
+  //   bounds, page } — Claude uses them in the few-shot prompt to find the
+  //   same field on the next doc.
   const captureCallback = (text, bounds) => {
     const pk = state.ui.trainingPicker;
     if (!pk || !pk.parsed) return;
     const qs = questionsForDocType(pk.docType || 'other');
     const q = qs[pk.currentQuestionIdx || 0];
     if (!q) return;
-    if (q.type === 'lineItems') {
-      if (!Array.isArray(pk.parsed.lineItems)) pk.parsed.lineItems = [];
-      pk.parsed.lineItems.push({ description: text, qty: null, unitPrice: null, extended: null, partNum: '', unitOfMeasure: '', notes: '' });
-    } else if (q.type === 'number' || q.type === 'currency') {
-      const cleaned = text.replace(/[^0-9.\-]/g, '');
-      const num = parseFloat(cleaned);
-      if (isFinite(num)) setByPath(pk.parsed, q.key, num);
-    } else {
-      setByPath(pk.parsed, q.key, text);
+    // Write the value (only if non-empty)
+    if (text) {
+      if (q.type === 'lineItems') {
+        if (!Array.isArray(pk.parsed.lineItems)) pk.parsed.lineItems = [];
+        pk.parsed.lineItems.push({ description: text, qty: null, unitPrice: null, extended: null, partNum: '', unitOfMeasure: '', notes: '' });
+      } else if (q.type === 'number' || q.type === 'currency') {
+        const cleaned = text.replace(/[^0-9.\-]/g, '');
+        const num = parseFloat(cleaned);
+        if (isFinite(num)) setByPath(pk.parsed, q.key, num);
+      } else {
+        setByPath(pk.parsed, q.key, text);
+      }
     }
-    showToast(`✨ Captured: "${text.length > 60 ? text.slice(0,60)+'…' : text}" → ${q.label}`, 3000);
+    // Always persist the location hint (even when value is empty)
+    if (!pk.parsed._fieldHints) pk.parsed._fieldHints = {};
+    pk.parsed._fieldHints[q.key] = {
+      value: text || '',
+      nearbyText: (bounds && bounds.nearbyText) || '',
+      bounds: bounds ? { left: bounds.left, top: bounds.top, right: bounds.right, bottom: bounds.bottom, page: bounds.page || 1 } : null,
+      capturedAt: new Date().toISOString(),
+    };
+    if (text) {
+      showToast(`✨ Captured: "${text.length > 60 ? text.slice(0,60)+'…' : text}" → ${q.label}`, 3000);
+    } else {
+      const labelPreview = (bounds && bounds.nearbyText) ? ` (label: "${bounds.nearbyText.slice(0,40)}${bounds.nearbyText.length>40?'…':''}")` : '';
+      showToast(`📍 Location-only hint saved for "${q.label}"${labelPreview} — Claude will look here on future docs`, 4500);
+    }
     render();
   };
   const previewPane = (!p.file && !isEdit) ? `
