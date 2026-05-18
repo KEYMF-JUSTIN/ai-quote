@@ -265,6 +265,26 @@
   .training-no-preview { display:flex; align-items:center; justify-content:center; height:100%; color:#cbd5e1; font-style:italic; padding:40px; text-align:center; }
   .training-img-preview { max-width:100%; max-height:100%; object-fit:contain; background:white; box-shadow:0 4px 12px rgba(0,0,0,0.4); }
 
+  /* v7.64: Training wizard — step-by-step question form */
+  .wizard-section { background:var(--bg); border:1px solid var(--line-dark); border-radius:5px; padding:14px; margin-bottom:12px; }
+  .wizard-progress { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; }
+  .wizard-section-badge { padding:2px 8px; border-radius:10px; font-size:10px; text-transform:uppercase; letter-spacing:0.08em; font-weight:600; }
+  .wizard-dots { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:12px; padding-bottom:10px; border-bottom:1px dashed var(--line); }
+  .wizard-dot { width:24px; height:24px; padding:0; border:1px solid var(--line-dark); background:var(--paper); border-radius:50%; cursor:pointer; font-size:10px; font-family:var(--font-mono); color:var(--text-mute); font-weight:700; line-height:1; transition:all 0.1s ease; }
+  .wizard-dot:hover { border-color:var(--orange); color:var(--orange); }
+  .wizard-dot.filled { background:#ECFDF3; color:#16A34A; border-color:#16A34A; }
+  .wizard-dot.active { background:var(--orange); color:white; border-color:var(--orange); transform:scale(1.15); box-shadow:0 2px 4px rgba(220,67,24,0.3); }
+  .wizard-dot.active.filled { background:var(--orange); color:white; border-color:var(--orange); }
+  .wizard-question { padding:8px 0 14px; }
+  .wizard-label { font-size:18px; font-weight:600; color:var(--text); margin-bottom:4px; line-height:1.3; }
+  .wizard-hint { font-size:12px; color:var(--text-mute); margin-bottom:12px; font-style:italic; line-height:1.4; }
+  .wizard-input input, .wizard-input textarea { border:2px solid var(--line-dark); border-radius:3px; }
+  .wizard-input input:focus, .wizard-input textarea:focus { border-color:var(--orange); outline:none; }
+  .wizard-nav { display:flex; gap:8px; align-items:center; padding-top:10px; border-top:1px dashed var(--line); }
+  .wizard-lineitems table { font-size:11px; }
+  .wizard-lineitems input { border:1px solid var(--line); background:white; }
+  .wizard-lineitems input:focus { border-color:var(--orange); outline:none; }
+
   /* v7.61: Type picker modal cards */
   .type-picker-card { display:flex; align-items:stretch; padding:0; background:var(--paper); border:1px solid var(--line-dark); border-radius:5px; cursor:pointer; text-align:left; font:inherit; color:var(--text); overflow:hidden; transition:all 0.12s ease; min-height:80px; }
   .type-picker-card:hover { border-color:var(--type-color, var(--orange)); box-shadow:0 4px 10px rgba(0,0,0,0.08); transform:translateY(-1px); }
@@ -665,7 +685,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.63.2';
+const APP_VERSION = '7.64.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -11730,6 +11750,104 @@ function renderQuoteInfo(q) {
   `;
 }
 
+// v7.64: render the wizard pane on the right side of the training modal.
+// Given the current parsed answers + the doc type, walks the user through
+// each question one at a time with type-appropriate input controls. Pre-fills
+// from Claude's initial extraction; user confirms/corrects each value.
+function renderTrainingWizard(p) {
+  const docType = p.docType || 'other';
+  const questions = questionsForDocType(docType);
+  if (!questions.length) return '<div class="text-mute small">No question schema for this doc type.</div>';
+  const total = questions.length;
+  let curIdx = p.currentQuestionIdx || 0;
+  if (curIdx < 0) curIdx = 0;
+  if (curIdx >= total) curIdx = total - 1;
+  const q = questions[curIdx];
+  const currentValue = q.type === 'lineItems' ? null : getByPath(p.parsed || {}, q.key);
+  const valStr = currentValue == null ? '' : String(currentValue);
+
+  // Section nav strip — show each question as a small dot; clicking jumps
+  const sectionStrip = questions.map((qq, i) => {
+    const filled = qq.type === 'lineItems'
+      ? Array.isArray(getByPath(p.parsed || {}, 'lineItems')) && getByPath(p.parsed || {}, 'lineItems').length > 0
+      : getByPath(p.parsed || {}, qq.key) != null && getByPath(p.parsed || {}, qq.key) !== '';
+    return `<button class="wizard-dot ${i===curIdx?'active':''} ${filled?'filled':''}" onclick="App.trainingGoTo(${i})" title="${esc(qq.label)}">${i+1}</button>`;
+  }).join('');
+
+  // Type-specific input
+  let input = '';
+  if (q.type === 'lineItems') {
+    const items = Array.isArray(getByPath(p.parsed || {}, 'lineItems')) ? getByPath(p.parsed || {}, 'lineItems') : [];
+    input = `
+      <div class="wizard-lineitems">
+        ${items.length === 0 ? `<div class="text-mute small" style="padding:8px 0;">No line items yet — click <strong>+ Add Row</strong> to add the first one.</div>` : `
+          <table class="tbl tight">
+            <thead><tr>
+              <th style="width:80px;">Part / SKU</th>
+              <th>Description</th>
+              <th class="num" style="width:60px;">Qty</th>
+              <th style="width:60px;">UoM</th>
+              <th class="num" style="width:80px;">Unit $</th>
+              <th class="num" style="width:80px;">Extended</th>
+              <th class="action"></th>
+            </tr></thead>
+            <tbody>
+              ${items.map((it, idx) => `
+                <tr>
+                  <td><input type="text" value="${esc(it.partNum||'')}" onchange="App.setTrainingLineItemField(${idx},'partNum',this.value)" style="width:100%; font-size:11px; padding:2px 4px;"></td>
+                  <td><input type="text" value="${esc(it.description||'')}" onchange="App.setTrainingLineItemField(${idx},'description',this.value)" style="width:100%; font-size:11px; padding:2px 4px;"></td>
+                  <td class="num"><input type="number" value="${esc(it.qty == null ? '' : it.qty)}" onchange="App.setTrainingLineItemField(${idx},'qty',parseFloat(this.value))" style="width:100%; font-size:11px; padding:2px 4px;" step="any" min="0"></td>
+                  <td><input type="text" value="${esc(it.unitOfMeasure||'')}" placeholder="ea/lb/ft" onchange="App.setTrainingLineItemField(${idx},'unitOfMeasure',this.value)" style="width:100%; font-size:11px; padding:2px 4px;"></td>
+                  <td class="num"><input type="number" value="${esc(it.unitPrice == null ? '' : it.unitPrice)}" onchange="App.setTrainingLineItemField(${idx},'unitPrice',parseFloat(this.value))" style="width:100%; font-size:11px; padding:2px 4px;" step="any" min="0"></td>
+                  <td class="num"><input type="number" value="${esc(it.extended == null ? '' : it.extended)}" onchange="App.setTrainingLineItemField(${idx},'extended',parseFloat(this.value))" style="width:100%; font-size:11px; padding:2px 4px;" step="any" min="0"></td>
+                  <td class="action"><button class="btn btn-sm btn-danger" onclick="App.removeTrainingLineItem(${idx})">×</button></td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        `}
+        <button class="btn btn-sm" style="margin-top:8px;" onclick="App.addTrainingLineItem()">+ Add Row</button>
+      </div>
+    `;
+  } else if (q.type === 'textarea') {
+    input = `<textarea style="width:100%; min-height:90px; font-size:13px; padding:6px;" onchange="App.setTrainingAnswer('${esc(q.key)}', this.value)" placeholder="${esc(q.hint||'')}">${esc(valStr)}</textarea>`;
+  } else if (q.type === 'date') {
+    input = `<input type="text" value="${esc(valStr)}" placeholder="${esc(q.hint||'YYYY-MM-DD or natural language')}" onchange="App.setTrainingAnswer('${esc(q.key)}', this.value)" style="width:100%; font-size:14px; padding:6px;">`;
+  } else if (q.type === 'number' || q.type === 'currency') {
+    input = `<input type="number" step="any" value="${esc(valStr)}" placeholder="${esc(q.hint||'')}" onchange="App.setTrainingAnswer('${esc(q.key)}', parseFloat(this.value))" style="width:100%; font-size:14px; padding:6px;">`;
+  } else {
+    input = `<input type="text" value="${esc(valStr)}" placeholder="${esc(q.hint||'')}" onchange="App.setTrainingAnswer('${esc(q.key)}', this.value)" style="width:100%; font-size:14px; padding:6px;">`;
+  }
+
+  // Section badge color
+  const sectionColors = { header:'#1E5BAE', lineItems:'#C56B1C', totals:'#16A34A', metadata:'#7C3AED' };
+  const sectionColor = sectionColors[q.section] || '#64748B';
+
+  return `
+    <div class="wizard-section">
+      <div class="wizard-progress">
+        <span class="text-mute small">Question ${curIdx+1} of ${total}</span>
+        <span class="wizard-section-badge" style="background:${sectionColor}22; color:${sectionColor}; border:1px solid ${sectionColor};">${esc(q.section || '')}</span>
+      </div>
+      <div class="wizard-dots">${sectionStrip}</div>
+      <div class="wizard-question">
+        <div class="wizard-label">${esc(q.label)}</div>
+        ${q.hint ? `<div class="wizard-hint">${esc(q.hint)}</div>` : ''}
+        <div class="wizard-input">${input}</div>
+      </div>
+      <div class="wizard-nav">
+        <button class="btn btn-sm" ${curIdx === 0 ? 'disabled' : ''} onclick="App.trainingPrev()">← Previous</button>
+        <span style="flex:1;"></span>
+        ${curIdx < total - 1
+          ? `<button class="btn btn-sm" onclick="App.trainingNext()">Skip →</button>
+             <button class="btn btn-sm btn-primary" onclick="App.trainingNext()">Next →</button>`
+          : `<button class="btn btn-sm btn-primary" onclick="App.saveTrainingSample()">✓ Save Sample</button>`
+        }
+      </div>
+    </div>
+  `;
+}
+
 // v7.62: training modal — drop a sample doc, Claude extracts, user edits, saves.
 // Re-uses /api/claude/extract-document on the Worker (v7.51) — same endpoint
 // that powers receipt/invoice parsing. Output is stored as a labeled sample
@@ -11808,11 +11926,20 @@ function renderTrainingModal() {
               ` : ''}
 
               ${p.parsed ? `
-                <div class="label">Extracted fields <span class="text-mute small">— edit any values that aren't right</span></div>
-                <textarea id="training-parsed-textarea"
-                          style="width:100%; min-height:280px; font-family:var(--font-mono); font-size:12px; padding:8px;"
-                          onchange="App.setTrainingParsedJson(this.value)">${esc(parsedJson)}</textarea>
-                <div class="text-mute small" style="margin-top:4px;">JSON format. Mirrors the extract-document endpoint output: <span class="mono">detected_doc_type, vendor, references, dates, lineItems, totals, drawing, summary, redFlags</span>. <strong>v7.63.1 will replace this with a step-by-step wizard.</strong></div>
+                ${renderTrainingWizard(p)}
+
+                <div style="margin-top:14px;">
+                  <button class="btn btn-sm" onclick="App.toggleTrainingAdvanced()" title="Show the raw JSON instead of the wizard — for power users / debugging">
+                    ${p.showAdvanced ? '▾ Hide raw JSON' : '▸ Show raw JSON (advanced)'}
+                  </button>
+                </div>
+                ${p.showAdvanced ? `
+                  <div class="label" style="margin-top:10px;">Extracted fields (raw)</div>
+                  <textarea id="training-parsed-textarea"
+                            style="width:100%; min-height:200px; font-family:var(--font-mono); font-size:11px; padding:8px;"
+                            onchange="App.setTrainingParsedJson(this.value)">${esc(parsedJson)}</textarea>
+                  <div class="text-mute small" style="margin-top:4px;">Direct JSON editing. Same data as the wizard above — edits here are reflected when you switch back to wizard view.</div>
+                ` : ''}
 
                 <div class="label" style="margin-top:14px;">File metadata</div>
                 <div style="background:var(--bg); padding:8px 10px; font-size:12px; line-height:1.6; margin-top:4px;">
@@ -15916,6 +16043,8 @@ const App = {
       file: null, parsed: null, docType: '', notes: '',
       loading: false, error: '',
       sampleId: null, sampleFilename: '', sampleMimeType: '', sampleSize: 0,
+      currentQuestionIdx: 0,  // v7.64: wizard step index
+      showAdvanced: false,    // v7.64: power-user toggle to bypass wizard and edit raw JSON
     };
     render();
   },
@@ -15945,6 +16074,63 @@ const App = {
       state.ui.trainingPicker.error = '';
     } catch (e) {
       state.ui.trainingPicker.error = 'Invalid JSON: ' + e.message;
+    }
+  },
+  // v7.64: WIZARD handlers — navigate, set answers via dotted path
+  trainingPrev() {
+    const p = state.ui.trainingPicker; if (!p) return;
+    if ((p.currentQuestionIdx || 0) > 0) {
+      p.currentQuestionIdx = (p.currentQuestionIdx || 0) - 1;
+      render();
+    }
+  },
+  trainingNext() {
+    const p = state.ui.trainingPicker; if (!p) return;
+    const qs = questionsForDocType(p.docType || 'other');
+    if ((p.currentQuestionIdx || 0) < qs.length - 1) {
+      p.currentQuestionIdx = (p.currentQuestionIdx || 0) + 1;
+      render();
+    }
+  },
+  trainingGoTo(idx) {
+    const p = state.ui.trainingPicker; if (!p) return;
+    p.currentQuestionIdx = idx;
+    render();
+  },
+  setTrainingAnswer(path, value) {
+    const p = state.ui.trainingPicker; if (!p) return;
+    if (!p.parsed) p.parsed = {};
+    setByPath(p.parsed, path, value);
+  },
+  toggleTrainingAdvanced() {
+    const p = state.ui.trainingPicker; if (!p) return;
+    p.showAdvanced = !p.showAdvanced;
+    render();
+  },
+  // Line-items step handlers
+  addTrainingLineItem() {
+    const p = state.ui.trainingPicker; if (!p) return;
+    if (!p.parsed) p.parsed = {};
+    if (!Array.isArray(p.parsed.lineItems)) p.parsed.lineItems = [];
+    p.parsed.lineItems.push({ description: '', qty: null, unitPrice: null, extended: null, partNum: '', unitOfMeasure: '', notes: '' });
+    render();
+  },
+  removeTrainingLineItem(idx) {
+    const p = state.ui.trainingPicker; if (!p) return;
+    if (!p.parsed || !Array.isArray(p.parsed.lineItems)) return;
+    p.parsed.lineItems.splice(idx, 1);
+    render();
+  },
+  setTrainingLineItemField(idx, field, value) {
+    const p = state.ui.trainingPicker; if (!p) return;
+    if (!p.parsed || !Array.isArray(p.parsed.lineItems)) return;
+    const li = p.parsed.lineItems[idx];
+    if (!li) return;
+    li[field] = value;
+    // Auto-compute extended when qty + unitPrice are filled in
+    if (field === 'qty' || field === 'unitPrice') {
+      const q = num(li.qty), up = num(li.unitPrice);
+      if (q > 0 && up > 0) li.extended = q * up;
     }
   },
   pickTrainingFile() {
@@ -15986,6 +16172,8 @@ const App = {
         const match = TRAINING_DOC_TYPES.find(d => d.id === np.parsed.detected_doc_type);
         if (match) np.docType = match.id;
       }
+      // v7.64: start the wizard from question 0 once we have data
+      np.currentQuestionIdx = 0;
       render();
     } catch (e) {
       const np = state.ui.trainingPicker;
@@ -16046,6 +16234,8 @@ const App = {
       sampleFilename: sample.filename || '',
       sampleMimeType: sample.mimeType || '',
       sampleSize: sample.sizeBytes ? Math.round(sample.sizeBytes / 1024) : 0,
+      currentQuestionIdx: 0,  // v7.64: start wizard at step 0 on edit
+      showAdvanced: false,
     };
     render();
   },
