@@ -601,7 +601,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.55.0';
+const APP_VERSION = '7.56.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -1121,8 +1121,15 @@ function migrateState() {
       p.dxfFiles.forEach(f => {
         if (f.material === undefined) f.material = '';
         if (f.thicknessIn === undefined) f.thicknessIn = null;
+        // v7.56: supplier tax field
+        if (f.supplierTaxPct === undefined) f.supplierTaxPct = 0;
       });
+      // v7.56: outside services + material cost get supplier tax fields too
+      (p.outsideServices || []).forEach(o => { if (o.supplierTaxPct === undefined) o.supplierTaxPct = 0; });
+      if (p.materialCost && p.materialCost.supplierTaxPct === undefined) p.materialCost.supplierTaxPct = 0;
       if (!Array.isArray(p.specialtyTooling)) p.specialtyTooling = [];
+      // v7.56: specialty tooling supplier tax
+      p.specialtyTooling.forEach(t => { if (t.supplierTaxPct === undefined) t.supplierTaxPct = 0; });
       // v7.26: per-item opt-in for showing tooling on customer PDF
       p.specialtyTooling.forEach(t => {
         if (t.includeOnQuote === undefined) t.includeOnQuote = false;
@@ -2579,6 +2586,10 @@ function newDxfFile() {
     // part.material + part.stock.partHeight if unset.
     material: '',          // material spec for this cut (e.g. "A36", "1018", "304 SS", "6061-T6")
     thicknessIn: null,     // plate thickness in inches (vendor needs this to price)
+    // v7.56: supplier sales tax % paid to the cut vendor (e.g. 6.75 for Cuyahoga
+    // Falls). Adds to KMF's actual cost. Customer-facing pricing is unaffected
+    // — tax flows into NRE and per-part cost, not the customer total.
+    supplierTaxPct: 0,
   };
 }
 function newSpecialtyTool() {
@@ -2592,6 +2603,8 @@ function newSpecialtyTool() {
     unitCost: null,
     notes: '',
     includeOnQuote: false,  // v7.26: opt-in to show this tooling line on the customer PDF
+    // v7.56: supplier sales tax % paid to the vendor (internal cost — not on customer PDF)
+    supplierTaxPct: 0,
   };
 }
 function newMachineOp() {
@@ -4049,13 +4062,22 @@ function runCostPerPart(op, discountFactor) {
   const f = (discountFactor != null && isFinite(discountFactor)) ? discountFactor : 1;
   return num(op.runTime) * factor * runRateFor(op.machine) * f;
 }
+// v7.56: helper — multiply a base cost by (1 + tax%) where tax% is in percentage units (e.g. 6.75 means 6.75%)
+function withTax(base, taxPct) {
+  const t = num(taxPct);
+  if (t <= 0) return num(base);
+  return num(base) * (1 + t / 100);
+}
 function totalServiceSetup(part) {
-  // One-time setup charges from finishing/outside services
-  return (part.outsideServices||[]).reduce((s,o) => s + num(o.setupCost), 0);
+  // One-time setup charges from finishing/outside services (includes supplier tax)
+  return (part.outsideServices||[]).reduce((s,o) => s + withTax(o.setupCost, o.supplierTaxPct), 0);
 }
 function totalSpecialtyTooling(part) {
-  // Specialty tooling — one-time purchases that roll into NRE
-  return (part.specialtyTooling||[]).reduce((s,t) => s + (num(t.qty) || 1) * num(t.unitCost), 0);
+  // Specialty tooling — one-time purchases that roll into NRE (includes supplier tax)
+  return (part.specialtyTooling||[]).reduce((s,t) => {
+    const base = (num(t.qty) || 1) * num(t.unitCost);
+    return s + withTax(base, t.supplierTaxPct);
+  }, 0);
 }
 // v7.26: Customer-visible specialty tooling — only items the user opted-in
 // via the "Show on customer quote" checkbox.
@@ -4104,23 +4126,23 @@ function totalRunPerPart(part, qtyIdx) {
   return total;
 }
 function totalDxfPerPart(part) {
-  // Per-part DXF cut cost: sum of (price/piece × qty/part) for each DXF file
+  // Per-part DXF cut cost: sum of (price/piece × qty/part × (1+tax)) per DXF file
   if (!part || !Array.isArray(part.dxfFiles)) return 0;
   return part.dxfFiles.reduce((s, f) => {
     const price = num(f.pricePerPiece);
     const qty = num(f.qtyPerPart) || 1;
-    return s + price * qty;
+    return s + withTax(price * qty, f.supplierTaxPct);
   }, 0);
 }
 function totalDxfSetup(part) {
-  // One-time setup/programming charges across all DXFs (NRE, not per-part)
+  // One-time setup/programming charges across all DXFs (NRE, includes supplier tax)
   if (!part || !Array.isArray(part.dxfFiles)) return 0;
-  return part.dxfFiles.reduce((s, f) => s + num(f.setupCost), 0);
+  return part.dxfFiles.reduce((s, f) => s + withTax(f.setupCost, f.supplierTaxPct), 0);
 }
 function totalOutside(part) {
-  // Combined: traditional outside services + per-part DXF cut costs
+  // Combined: traditional outside services (with tax) + per-part DXF cut costs (with tax)
   if (!part) return 0;
-  const services = (part.outsideServices||[]).reduce((s,o) => s + num(o.cost), 0);
+  const services = (part.outsideServices||[]).reduce((s,o) => s + withTax(o.cost, o.supplierTaxPct), 0);
   return services + totalDxfPerPart(part);
 }
 // v7.25/26: Display label for material. CSM signaling moved to part-# asterisk
@@ -4137,31 +4159,34 @@ function effectiveMaterialPerPiece(part, qtyIdx) {
   const qty = num(tiers[qtyIdx]);
   if (qty <= 0) return 0;
   // v7.25: Customer-supplied material — return handling fee instead of supplier cost.
+  // (CSM has no supplier tax — KMF didn't buy the material.)
   if (part.customerSuppliedMaterial) {
     return num(part.csmDeclaredValue) * (num(part.csmHandlingFeePct) / 100);
   }
+  // v7.56: supplier sales tax % applies to all real-supplier material paths
+  const taxPct = num(part.materialCost.supplierTaxPct);
   // v7.44: Off-the-shelf component (McMaster, Grainger, etc.) — sold by pack,
   // no cutting from raw stock. Per-piece = $ per pack ÷ pack size.
   if (part.materialCost.isComponent) {
     const ps = num(part.materialCost.packSize);
     const pp = num(part.materialCost.perPack);
-    if (ps > 0 && pp > 0) return pp / ps;
+    if (ps > 0 && pp > 0) return withTax(pp / ps, taxPct);
     // Fall back to perPiece[qtyIdx] if pack fields not set yet
     const perPiece = Array.isArray(part.materialCost.perPiece) ? part.materialCost.perPiece : [];
-    return num(perPiece[qtyIdx]);
+    return withTax(num(perPiece[qtyIdx]), taxPct);
   }
   const stock = part.stock || {};
   if (stock.form === 'Sheet' && part.materialCost.perSheet != null) {
     const u = unitsNeeded(part, qty);
-    return u != null ? (num(part.materialCost.perSheet) * u) / qty : 0;
+    return u != null ? withTax((num(part.materialCost.perSheet) * u) / qty, taxPct) : 0;
   }
   if ((stock.form === 'Bar/Block' || stock.form === 'Round') && part.materialCost.perBar != null) {
     const u = unitsNeeded(part, qty);
-    return u != null ? (num(part.materialCost.perBar) * u) / qty : 0;
+    return u != null ? withTax((num(part.materialCost.perBar) * u) / qty, taxPct) : 0;
   }
   // v7.34.6: guard against missing perPiece array (some migrated parts have it as undefined)
   const perPiece = Array.isArray(part.materialCost.perPiece) ? part.materialCost.perPiece : [];
-  return num(perPiece[qtyIdx]);
+  return withTax(num(perPiece[qtyIdx]), taxPct);
 }
 // v7.49: actual cash spend on material for a given qty tier — what KMF
 // pays the supplier, BEFORE markup. Honors whole-bar / whole-pack pricing so
@@ -4175,27 +4200,29 @@ function materialOutOfPocketAt(part, qtyIdx) {
   const tiers = Array.isArray(part.qtyTiers) ? part.qtyTiers : [];
   const qty = num(tiers[qtyIdx]);
   if (qty <= 0) return 0;
+  // v7.56: supplier tax applies to actual cash spend too
+  const taxPct = num(part.materialCost.supplierTaxPct);
   // Off-the-shelf component (McMaster pack pricing)
   if (part.materialCost.isComponent) {
     const ps = num(part.materialCost.packSize);
     const pp = num(part.materialCost.perPack);
-    if (ps > 0 && pp > 0) return Math.ceil(qty / ps) * pp;
+    if (ps > 0 && pp > 0) return withTax(Math.ceil(qty / ps) * pp, taxPct);
     const perPiece = Array.isArray(part.materialCost.perPiece) ? part.materialCost.perPiece : [];
-    return num(perPiece[qtyIdx]) * qty;
+    return withTax(num(perPiece[qtyIdx]) * qty, taxPct);
   }
   // Raw stock — buy whole bars/sheets, not pieces
   const stock = part.stock || {};
   if (stock.form === 'Sheet' && part.materialCost.perSheet != null) {
     const u = unitsNeeded(part, qty);
-    return u != null ? num(part.materialCost.perSheet) * u : 0;
+    return u != null ? withTax(num(part.materialCost.perSheet) * u, taxPct) : 0;
   }
   if ((stock.form === 'Bar/Block' || stock.form === 'Round') && part.materialCost.perBar != null) {
     const u = unitsNeeded(part, qty);
-    return u != null ? num(part.materialCost.perBar) * u : 0;
+    return u != null ? withTax(num(part.materialCost.perBar) * u, taxPct) : 0;
   }
   // Fallback when no whole-stock pricing — straight perPiece × qty
   const perPiece = Array.isArray(part.materialCost.perPiece) ? part.materialCost.perPiece : [];
-  return num(perPiece[qtyIdx]) * qty;
+  return withTax(num(perPiece[qtyIdx]) * qty, taxPct);
 }
 function quoteMaterialOutOfPocketAt(quote, qtyIdx) {
   if (!quote || !Array.isArray(quote.parts)) return 0;
@@ -11960,12 +11987,13 @@ function renderOutsideServicesCard(q, p) {
         <div class="card-body tight">
           <table class="tbl">
             <thead><tr>
-              <th style="width:18%;">Service Type</th>
+              <th style="width:16%;">Service Type</th>
               <th>Description</th>
-              <th style="width:18%;">Vendor</th>
-              <th class="num" style="width:12%;">$ per part</th>
-              <th class="num" style="width:12%;">Setup (NRE)</th>
-              <th class="action"></th>
+              <th style="width:16%;">Vendor</th>
+              <th class="num" style="width:11%;">$ per part</th>
+              <th class="num" style="width:11%;">Setup (NRE)</th>
+              <th class="num" style="width:7%;" title="Supplier sales tax % paid to the vendor (internal cost — never on customer PDF)">Tax %</th>
+              <th class="action" style="width:60px;"></th>
             </tr></thead>
             <tbody>
               ${items.map((o,i) => {
@@ -11982,6 +12010,7 @@ function renderOutsideServicesCard(q, p) {
                   : finishingVendors;
                 const serviceTypeOpts = FINISHING_SERVICES.map(s => ({value:s.value, label:s.label}));
                 const vendorOpts = matchingVendors.map(v => ({value:v.id, label:(v.favorite?'★ ':'') + (v.name||'(unnamed)')}));
+                if (o.supplierTaxPct === undefined) o.supplierTaxPct = 0;
                 return `
                   <tr>
                     <td>${bind({label:'Service type',value:o.serviceType||'', type:'select', options:serviceTypeOpts, placeholder:'— pick —', onChange:v=>{p.outsideServices[i].serviceType=v||'';}})}</td>
@@ -11989,7 +12018,11 @@ function renderOutsideServicesCard(q, p) {
                     <td>${bind({label:'Service vendor',value:o.vendorId||'', type:'select', options:vendorOpts, placeholder:matchingVendors.length===0?'(no vendor)':'— pick —', onChange:v=>{p.outsideServices[i].vendorId=v||null;}})}</td>
                     <td class="num">${bind({label:o.name+' cost',value:o.cost, type:'number', onChange:v=>{p.outsideServices[i].cost=v;}, attrs:'step="any" min="0"'})}</td>
                     <td class="num">${bind({label:o.name+' setup',value:o.setupCost, type:'number', onChange:v=>{p.outsideServices[i].setupCost=v;}, attrs:'step="any" min="0"'})}</td>
-                    <td class="action"><button class="btn btn-sm btn-danger" onclick="App.removeOutside('${p.id}',${i})">×</button></td>
+                    <td class="num">${bind({label:o.name+' tax %',value:o.supplierTaxPct, type:'number', placeholder:'0', onChange:v=>{p.outsideServices[i].supplierTaxPct=v;}, attrs:'step="any" min="0" max="20"'})}</td>
+                    <td class="action" style="white-space:nowrap;">
+                      <button class="btn btn-sm" title="Duplicate this service" onclick="App.duplicateOutside('${p.id}',${i})">⎘</button>
+                      <button class="btn btn-sm btn-danger" title="Remove this service" onclick="App.removeOutside('${p.id}',${i})">×</button>
+                    </td>
                   </tr>
                 `;
               }).join('')}
@@ -11997,7 +12030,7 @@ function renderOutsideServicesCard(q, p) {
                 <td colspan="3"><strong>SERVICES SUBTOTAL / PART</strong></td>
                 <td class="num"><strong>${fmtMoney(subtotal)}</strong></td>
                 <td class="num text-mute small">${setup > 0 ? 'Setup: ' + fmtMoney(setup) + ' (NRE)' : ''}</td>
-                <td></td>
+                <td colspan="2" class="text-mute small">incl. supplier tax</td>
               </tr>
             </tbody>
           </table>
@@ -12052,16 +12085,17 @@ function renderDxfCard(q, p) {
           ` : `
             <table class="tbl">
               <thead><tr>
-                <th style="width:16%;">Filename</th>
-                <th style="width:11%;">Process</th>
-                <th style="width:14%;">Cut Vendor</th>
-                <th style="width:11%;">Material</th>
-                <th class="num" style="width:7%;">Thk (in)</th>
-                <th class="num" style="width:7%;">Qty / part</th>
+                <th style="width:14%;">Filename</th>
+                <th style="width:10%;">Process</th>
+                <th style="width:12%;">Cut Vendor</th>
+                <th style="width:10%;">Material</th>
+                <th class="num" style="width:6%;">Thk (in)</th>
+                <th class="num" style="width:6%;">Qty / part</th>
                 <th class="num" style="width:10%;">$ / piece</th>
-                <th class="num" style="width:9%;">Setup (NRE)</th>
+                <th class="num" style="width:8%;">Setup (NRE)</th>
+                <th class="num" style="width:6%;" title="Supplier sales tax % paid to the cut vendor (internal cost — never on customer PDF)">Tax %</th>
                 <th>Notes</th>
-                <th class="action"></th>
+                <th class="action" style="width:60px;"></th>
               </tr></thead>
               <tbody>
                 ${files.map((f, fi) => {
@@ -12097,8 +12131,12 @@ function renderDxfCard(q, p) {
                         </button>
                       </td>
                       <td class="num">${bind({label:'Setup',value:f.setupCost, type:'number', onChange:v=>{p.dxfFiles[fi].setupCost=v;}, attrs:'step="any" min="0"'})}</td>
+                      <td class="num">${bind({label:'Supplier tax %',value:f.supplierTaxPct, type:'number', placeholder:'0', onChange:v=>{p.dxfFiles[fi].supplierTaxPct=v;}, attrs:'step="any" min="0" max="20"'})}</td>
                       <td>${bind({label:'Notes',value:f.notes, onChange:v=>{p.dxfFiles[fi].notes=v;}, placeholder:'optional'})}</td>
-                      <td class="action"><button class="btn btn-sm btn-danger" onclick="App.removeDxfFile('${p.id}',${fi})">×</button></td>
+                      <td class="action" style="white-space:nowrap;">
+                        <button class="btn btn-sm" title="Duplicate this DXF row" onclick="App.duplicateDxfFile('${p.id}',${fi})">⎘</button>
+                        <button class="btn btn-sm btn-danger" title="Remove this DXF row" onclick="App.removeDxfFile('${p.id}',${fi})">×</button>
+                      </td>
                     </tr>
                   `;
                 }).join('')}
@@ -12106,7 +12144,7 @@ function renderDxfCard(q, p) {
                   <td colspan="6"><strong>DXF SUBTOTAL / PART</strong></td>
                   <td class="num"><strong>${fmtMoney(perPartTotal)}</strong></td>
                   <td class="num text-mute small">${setupTotal > 0 ? 'Setup: ' + fmtMoney(setupTotal) + ' (NRE)' : ''}</td>
-                  <td colspan="2"></td>
+                  <td colspan="3" class="text-mute small">incl. supplier tax</td>
                 </tr>
               </tbody>
             </table>
@@ -12155,15 +12193,16 @@ function renderSpecialtyToolingCard(q, p) {
           ` : `
             <table class="tbl">
               <thead><tr>
-                <th class="num" style="width:6%;" title="Tick to itemize this tooling charge on the customer's quote PDF">On Quote?</th>
-                <th style="width:18%;">Description</th>
-                <th style="width:14%;">Vendor</th>
-                <th style="width:12%;">Vendor Part #</th>
-                <th style="width:14%;">Link</th>
-                <th class="num" style="width:6%;">Qty</th>
-                <th class="num" style="width:14%;">Unit Cost</th>
-                <th class="num" style="width:10%;">Extended</th>
-                <th class="action"></th>
+                <th class="num" style="width:5%;" title="Tick to itemize this tooling charge on the customer's quote PDF">On Quote?</th>
+                <th style="width:17%;">Description</th>
+                <th style="width:13%;">Vendor</th>
+                <th style="width:11%;">Vendor Part #</th>
+                <th style="width:13%;">Link</th>
+                <th class="num" style="width:5%;">Qty</th>
+                <th class="num" style="width:12%;">Unit Cost</th>
+                <th class="num" style="width:7%;" title="Supplier sales tax %">Tax %</th>
+                <th class="num" style="width:9%;">Extended</th>
+                <th class="action" style="width:60px;"></th>
               </tr></thead>
               <tbody>
                 ${tools.map((t, ti) => {
@@ -12216,19 +12255,23 @@ function renderSpecialtyToolingCard(q, p) {
                           <button class="btn btn-sm" style="flex:0 0 26px; padding:0; font-size:12px;" onclick="App.pasteToolPrice('${p.id}',${ti})" title="Paste price from clipboard — copy the price from the supplier page, then click this">📋</button>
                         </div>
                       </td>
-                      <td class="num"><span class="small text-mute">${fmtMoney(ext)}</span></td>
-                      <td class="action"><button class="btn btn-sm btn-danger" onclick="App.removeSpecialtyTool('${p.id}',${ti})">×</button></td>
+                      <td class="num">${bind({label:'Tax %',value:t.supplierTaxPct, type:'number', placeholder:'0', onChange:v=>{p.specialtyTooling[ti].supplierTaxPct=v;}, attrs:'step="any" min="0" max="20"'})}</td>
+                      <td class="num"><span class="small text-mute">${fmtMoney(withTax(ext, t.supplierTaxPct))}</span></td>
+                      <td class="action" style="white-space:nowrap;">
+                        <button class="btn btn-sm" title="Duplicate this tool" onclick="App.duplicateSpecialtyTool('${p.id}',${ti})">⎘</button>
+                        <button class="btn btn-sm btn-danger" title="Remove this tool" onclick="App.removeSpecialtyTool('${p.id}',${ti})">×</button>
+                      </td>
                     </tr>
                   `;
                 }).join('')}
                 <tr class="total">
-                  <td colspan="7"><strong>SPECIALTY TOOLING TOTAL (NRE)</strong></td>
+                  <td colspan="8"><strong>SPECIALTY TOOLING TOTAL (NRE, incl. supplier tax)</strong></td>
                   <td class="num"><strong>${fmtMoney(total)}</strong></td>
                   <td></td>
                 </tr>
                 ${tools.some(t => t.includeOnQuote) ? `
                   <tr style="background:rgba(220,67,24,0.06);">
-                    <td colspan="7" style="font-size:11px; color:var(--orange);"><strong>OF WHICH SHOWN ON CUSTOMER QUOTE</strong></td>
+                    <td colspan="8" style="font-size:11px; color:var(--orange);"><strong>OF WHICH SHOWN ON CUSTOMER QUOTE</strong></td>
                     <td class="num" style="font-size:11px; color:var(--orange);"><strong>${fmtMoney(visibleSpecialtyTooling(p))}</strong></td>
                     <td></td>
                   </tr>
@@ -13088,6 +13131,7 @@ function renderSupplierCostBody(q, p) {
       </div>
       <div class="field"><label>$ per bar (Bar/Round)</label>${bind({label:'$ per bar',value:p.materialCost.perBar, type:'number', onChange:v=>{p.materialCost.perBar=v;}, attrs:'step="any" min="0"'})}<div class="hint">overrides $/piece for Bar/Round</div></div>
       <div class="field"><label>$ per sheet (Sheet)</label>${bind({label:'$ per sheet',value:p.materialCost.perSheet, type:'number', onChange:v=>{p.materialCost.perSheet=v;}, attrs:'step="any" min="0"'})}<div class="hint">overrides $/piece for Sheet</div></div>
+      <div class="field"><label>Supplier tax %</label>${bind({label:'Supplier tax %',value:p.materialCost.supplierTaxPct, type:'number', placeholder:'0', onChange:v=>{p.materialCost.supplierTaxPct=v;}, attrs:'step="any" min="0" max="20"'})}<div class="hint">tax KMF pays the supplier — adds to internal cost only, never on customer PDF</div></div>
     </div>
     <table class="tbl mt-2">
       <thead><tr><th>Quantity</th>${p.qtyTiers.map(qt => `<th class="num">${fmtInt(qt)}</th>`).join('')}</tr></thead>
@@ -15494,6 +15538,46 @@ const App = {
       const p = q.parts.find(x => x.id === partId); if (!p) return;
       if (!Array.isArray(p.dxfFiles)) return;
       p.dxfFiles.splice(idx, 1);
+    });
+  },
+  // v7.56: duplicate buttons for DXF/Outside/Specialty rows.
+  // Deep-copies the source row, fresh id, drops any AI-estimate flags so
+  // the duplicate is treated as a manual entry (Re-run estimate on it
+  // explicitly if wanted).
+  duplicateDxfFile(partId, idx) {
+    update(s => {
+      const q = getActiveQuote(); if (!q) return;
+      const p = q.parts.find(x => x.id === partId); if (!p) return;
+      if (!Array.isArray(p.dxfFiles) || !p.dxfFiles[idx]) return;
+      const copy = JSON.parse(JSON.stringify(p.dxfFiles[idx]));
+      copy.id = uid();
+      delete copy._aiEstimate;
+      delete copy._aiEstimating;
+      // Tweak filename so duplicates are visually distinct
+      if (copy.filename) {
+        const m = copy.filename.match(/^(.*?)(\.[^.]+)?$/);
+        copy.filename = (m ? m[1] : copy.filename) + ' (copy)' + (m && m[2] ? m[2] : '');
+      }
+      p.dxfFiles.splice(idx + 1, 0, copy);
+    });
+  },
+  duplicateOutside(partId, idx) {
+    update(s => {
+      const q = getActiveQuote(); if (!q) return;
+      const p = q.parts.find(x => x.id === partId); if (!p) return;
+      if (!Array.isArray(p.outsideServices) || !p.outsideServices[idx]) return;
+      const copy = JSON.parse(JSON.stringify(p.outsideServices[idx]));
+      p.outsideServices.splice(idx + 1, 0, copy);
+    });
+  },
+  duplicateSpecialtyTool(partId, idx) {
+    update(s => {
+      const q = getActiveQuote(); if (!q) return;
+      const p = q.parts.find(x => x.id === partId); if (!p) return;
+      if (!Array.isArray(p.specialtyTooling) || !p.specialtyTooling[idx]) return;
+      const copy = JSON.parse(JSON.stringify(p.specialtyTooling[idx]));
+      copy.id = uid();
+      p.specialtyTooling.splice(idx + 1, 0, copy);
     });
   },
   // v7.55: drop CAD files (DWG / DXF / STEP / SLDPRT / etc.) directly onto
