@@ -665,7 +665,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.63.0';
+const APP_VERSION = '7.63.1';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -2642,16 +2642,24 @@ function loadScript(src) {
 // Used by: training wizard (big viewer), RFQ import modal (preview),
 // vendor/customer cards (thumbnails), future job folder browser.
 // =================================================================
-const PDFJS_VERSION = '4.0.379';
+// v7.63.1: pin to PDF.js v3.x — v4+ ships as ES modules and doesn't expose
+// window.pdfjsLib via a simple <script> tag (would need `type="module"`
+// + import). v3.11.174 is the last stable UMD build that works with our
+// loadScript() pattern and exposes window.pdfjsLib.getDocument directly.
+const PDFJS_VERSION = '3.11.174';
 const PDFJS_CDN     = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${PDFJS_VERSION}`;
 let _pdfjsLoaded = false;
 const _pdfDocCache = new Map();   // blobUrl → PDFDocumentProxy (cache so opening the same file twice is instant)
 
 async function ensurePdfJs() {
-  if (_pdfjsLoaded && typeof window.pdfjsLib !== 'undefined') return window.pdfjsLib;
+  if (_pdfjsLoaded && window.pdfjsLib && typeof window.pdfjsLib.getDocument === 'function') {
+    return window.pdfjsLib;
+  }
   await loadScript(`${PDFJS_CDN}/pdf.min.js`);
-  if (typeof window.pdfjsLib === 'undefined') throw new Error('PDF.js failed to load');
-  // Set worker source — PDF.js does parsing in a worker for performance
+  // Verify the global was actually exposed correctly — v4+ exports differently
+  if (!window.pdfjsLib || typeof window.pdfjsLib.getDocument !== 'function') {
+    throw new Error('PDF.js loaded but window.pdfjsLib.getDocument is missing — wrong build (need UMD, not ESM)');
+  }
   window.pdfjsLib.GlobalWorkerOptions.workerSrc = `${PDFJS_CDN}/pdf.worker.min.js`;
   _pdfjsLoaded = true;
   return window.pdfjsLib;
