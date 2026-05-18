@@ -214,11 +214,16 @@ async function handleExtractRfq(env, body) {
 // Generic doc extraction. Used for: vendor receipts/invoices, packing slips,
 // engineering drawings, customer POs. Output schema is intentionally loose
 // so the frontend can branch on docType.
-// Input  : { docType, hint, attachments: [{name, mimeType, data}], context }
-//   docType   - optional hint: 'receipt' | 'invoice' | 'packing_slip' | 'drawing' | 'po' | null (auto-detect)
-//   hint      - free-text context: "this came from Alro", "scanned with phone"
-//   context   - optional structured context the frontend wants Claude to consider
-//                  e.g. { recentJobs: [...], activeQuoteId: '...' }
+// Input  : { docType, hint, attachments: [{name, mimeType, data}], context, priorSamples }
+//   docType      - optional hint: 'receipt' | 'invoice' | 'packing_slip' | 'drawing' | 'po' | null (auto-detect)
+//   hint         - free-text context: "this came from Alro", "scanned with phone"
+//   context      - optional structured context the frontend wants Claude to consider
+//                     e.g. { recentJobs: [...], activeQuoteId: '...' }
+//   priorSamples - v7.65: array of { entityName, docType, parsedFields, notes }
+//                  from earlier user-labeled samples for the SAME entity. Injected
+//                  as few-shot examples so Claude sees exactly how this vendor's
+//                  docs map to fields. Quality of extraction jumps with each
+//                  labeled sample — that's the payoff of the training capture.
 // Output : { detected_doc_type, vendor, lineItems[], totals, references, dates, ... }
 // =================================================================
 async function handleExtractDocument(env, body) {
@@ -227,7 +232,46 @@ async function handleExtractDocument(env, body) {
   const hint = body.hint || '';
   const attachments = Array.isArray(body.attachments) ? body.attachments : [];
   const context = body.context || null;
+  const priorSamples = Array.isArray(body.priorSamples) ? body.priorSamples : [];
   if (attachments.length === 0) throw badRequest('At least one attachment is required');
+
+  // v7.65: build few-shot examples from prior labeled samples. We prefer
+  // samples of the same docType (most relevant), but include up to 5 total
+  // even if other types — they still demonstrate the entity's conventions.
+  // Cap each sample's JSON to ~1500 chars so we don't blow the prompt budget
+  // (5 samples * 1500 chars = ~7.5KB of prompt overhead, very reasonable).
+  let fewShotBlock = '';
+  if (priorSamples.length > 0) {
+    const sorted = [...priorSamples].sort((a, b) => {
+      const aMatch = a.docType === docTypeHint ? 0 : 1;
+      const bMatch = b.docType === docTypeHint ? 0 : 1;
+      return aMatch - bMatch;  // same-type samples first
+    }).slice(0, 5);
+    const entityName = sorted[0] && sorted[0].entityName ? sorted[0].entityName : 'this entity';
+    fewShotBlock = [
+      ``,
+      `=== ${sorted.length} PREVIOUSLY LABELED EXAMPLE${sorted.length===1?'':'S'} FROM ${entityName.toUpperCase()} ===`,
+      `These are real docs from the same entity, extracted previously and corrected by the user.`,
+      `They show the EXACT field conventions this entity uses (where the quote # lives, how line`,
+      `items are structured, what their vendor name looks like, etc.). Use them as your guide.`,
+      ``,
+      ...sorted.map((s, i) => {
+        const json = JSON.stringify(s.parsedFields || {}, null, 2);
+        const trimmed = json.length > 1500 ? json.slice(0, 1500) + '\n  ...(truncated)...\n}' : json;
+        return [
+          `--- EXAMPLE ${i+1}: ${s.docType || 'unknown type'}${s.notes ? ' · note: ' + s.notes : ''} ---`,
+          trimmed,
+          ``,
+        ].join('\n');
+      }),
+      `=== END EXAMPLES ===`,
+      ``,
+      `Now extract the NEW document attached below using the same field shape and conventions.`,
+      `Where the new doc has values the examples don't have, infer reasonably. Where structure is`,
+      `ambiguous, follow the examples' precedent.`,
+      ``,
+    ].join('\n');
+  }
 
   const contentBlocks = [];
   contentBlocks.push({
@@ -251,6 +295,7 @@ async function handleExtractDocument(env, body) {
       `For drawings, extract part number, material, dimensions, tolerances, finish, GD&T flags, and any title-block info.`,
       `If the document references a keyword that looks like a job number (JOB-1234) or RFQ number (RFQ-5678), surface it under references.`,
       context ? `\nADDITIONAL CONTEXT FROM THE APP:\n${JSON.stringify(context).slice(0, 2000)}` : '',
+      fewShotBlock,  // v7.65: prior training samples injected here
     ].filter(Boolean).join('\n'),
   });
   for (const att of attachments) {

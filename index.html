@@ -256,6 +256,24 @@
   .pdf-viewer-canvas { background:white; box-shadow:0 4px 12px rgba(0,0,0,0.4); display:block; }
   .pdf-viewer-loading { padding:40px; color:#cbd5e1; font-size:14px; text-align:center; }
 
+  /* v7.65: drag-box capture overlay over the PDF canvas */
+  .pdf-capture-overlay { cursor:crosshair; user-select:none; -webkit-user-select:none; }
+  .pdf-capture-enabled .pdf-viewer-scroll { background:#3a3f47; }
+  .pdf-capture-enabled .pdf-viewer-toolbar::after {
+    content:'✨ Drag a box on the document to fill the active question';
+    flex:0 0 auto; padding:2px 10px; background:rgba(124,58,237,0.22); color:#c4b5fd;
+    border:1px solid #7c3aed; border-radius:10px; font-size:11px; font-weight:600;
+    margin-left:auto; white-space:nowrap;
+  }
+  .pdf-selection-box {
+    position:absolute;
+    background:rgba(124,58,237,0.18);
+    border:1.5px dashed #7C3AED;
+    pointer-events:none;
+    border-radius:2px;
+    box-shadow:0 0 0 1px rgba(255,255,255,0.4);
+  }
+
   /* v7.63: Training wizard layout — full screen with left/right split */
   .training-modal-wide { width:95vw !important; max-width:none !important; height:90vh; max-height:none !important; display:flex; flex-direction:column; }
   .training-modal-wide .modal-body { flex:1; min-height:0; padding:0; }
@@ -685,7 +703,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.64.1';
+const APP_VERSION = '7.65.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -2747,6 +2765,11 @@ function renderPdfViewerEmbed(blobUrl, opts) {
   opts = opts || {};
   const containerId = 'pdfv_' + uid();
   const initialScale = opts.scale || 1.4;
+  // v7.65: if caller provides onCapture, stash it for the mount handler so
+  // the capture overlay gets wired as soon as the first page renders.
+  if (opts.onCapture && PdfViewer._pendingCaptureCallbacks) {
+    PdfViewer._pendingCaptureCallbacks[containerId] = opts.onCapture;
+  }
   // Schedule async mount after the container is in the DOM
   setTimeout(() => PdfViewer._mountEmbed(containerId, blobUrl, { ...opts, scale: initialScale }), 30);
   return `
@@ -2763,7 +2786,9 @@ function renderPdfViewerEmbed(blobUrl, opts) {
       </div>
       <div class="pdf-viewer-scroll">
         <div class="pdf-viewer-loading">⏳ Loading PDF…</div>
-        <canvas class="pdf-viewer-canvas" style="display:none;"></canvas>
+        <div class="pdf-canvas-wrap" style="position:relative; display:none;">
+          <canvas class="pdf-viewer-canvas"></canvas>
+        </div>
       </div>
     </div>
   `;
@@ -2780,7 +2805,8 @@ PdfViewer._mountEmbed = async function(containerId, blobUrl, opts) {
     this._instances[containerId] = inst;
     container.querySelector('.pdf-viewer-totpages').textContent = pdf.numPages;
     container.querySelector('.pdf-viewer-loading').style.display = 'none';
-    container.querySelector('.pdf-viewer-canvas').style.display = 'block';
+    const wrap = container.querySelector('.pdf-canvas-wrap');
+    if (wrap) wrap.style.display = 'inline-block';
     await this._renderCurrentInstance(containerId);
   } catch (e) {
     container.querySelector('.pdf-viewer-loading').innerHTML =
@@ -2792,9 +2818,145 @@ PdfViewer._renderCurrentInstance = async function(containerId) {
   const container = document.getElementById(containerId);
   if (!inst || !container) return;
   const canvas = container.querySelector('.pdf-viewer-canvas');
-  await this.renderPage(inst.pdf, inst.curPage, canvas, inst.scale);
+  // Render the page and capture viewport so we can position the capture overlay
+  const page = await inst.pdf.getPage(inst.curPage);
+  const viewport = page.getViewport({ scale: inst.scale });
+  canvas.width = viewport.width;
+  canvas.height = viewport.height;
+  canvas.style.width  = viewport.width + 'px';
+  canvas.style.height = viewport.height + 'px';
+  await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+  inst.viewport = viewport;
+  // v7.65: extract text items + positions for drag-box capture
+  try {
+    const textContent = await page.getTextContent();
+    inst.textItems = (textContent.items || []).map(item => {
+      const tx = window.pdfjsLib.Util.transform(viewport.transform, item.transform);
+      const fontHeight = Math.hypot(tx[2], tx[3]);
+      return {
+        str: item.str || '',
+        x: tx[4],
+        y: tx[5] - fontHeight,
+        w: (item.width || 0) * inst.scale,
+        h: fontHeight || 12,
+      };
+    }).filter(t => t.str && t.str.trim());
+  } catch (_) {
+    inst.textItems = [];
+  }
+  // v7.65: position the capture overlay over the canvas (inside pdf-canvas-wrap,
+  // which is position:relative so the overlay aligns pixel-for-pixel with the canvas)
+  const wrap = canvas.parentElement;  // .pdf-canvas-wrap
+  wrap.style.width  = viewport.width + 'px';
+  wrap.style.height = viewport.height + 'px';
+  let overlay = wrap.querySelector('.pdf-capture-overlay');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.className = 'pdf-capture-overlay';
+    overlay.style.position = 'absolute';
+    overlay.style.left = '0';
+    overlay.style.top = '0';
+    overlay.style.zIndex = '2';
+    wrap.appendChild(overlay);
+    this._wireCaptureHandlers(containerId, overlay);
+  }
+  overlay.style.width  = viewport.width + 'px';
+  overlay.style.height = viewport.height + 'px';
+  // Wire any pending capture callback now that the instance is ready
+  if (this._pendingCaptureCallbacks[containerId]) {
+    this.enableCapture(containerId, this._pendingCaptureCallbacks[containerId]);
+    delete this._pendingCaptureCallbacks[containerId];
+  }
   container.querySelector('.pdf-viewer-curpage').textContent = inst.curPage;
   container.querySelector('.pdf-viewer-zoomlevel').textContent = Math.round(inst.scale * 100 / 1.5) + '%';
+};
+
+// v7.65: drag-box capture — user draws a rectangle on the PDF and any text
+// items inside it get concatenated + passed to the capture callback. No
+// extra Claude call: this is local geometric intersection using PDF.js's
+// text-content API, which gives us every text item with screen-space
+// bounding box (after applying the viewport transform).
+PdfViewer._pendingCaptureCallbacks = {};
+PdfViewer._wireCaptureHandlers = function(containerId, overlay) {
+  let dragStart = null;
+  let box = null;
+  const self = this;
+  overlay.addEventListener('mousedown', (e) => {
+    const inst = self._instances[containerId];
+    if (!inst || !inst.captureCallback) return;  // capture not enabled
+    const rect = overlay.getBoundingClientRect();
+    dragStart = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    box = document.createElement('div');
+    box.className = 'pdf-selection-box';
+    box.style.left = dragStart.x + 'px';
+    box.style.top  = dragStart.y + 'px';
+    overlay.appendChild(box);
+    e.preventDefault();
+  });
+  overlay.addEventListener('mousemove', (e) => {
+    if (!dragStart || !box) return;
+    const rect = overlay.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    box.style.left   = Math.min(dragStart.x, x) + 'px';
+    box.style.top    = Math.min(dragStart.y, y) + 'px';
+    box.style.width  = Math.abs(x - dragStart.x) + 'px';
+    box.style.height = Math.abs(y - dragStart.y) + 'px';
+  });
+  overlay.addEventListener('mouseup', (e) => {
+    if (!dragStart || !box) return;
+    const rect = overlay.getBoundingClientRect();
+    const endX = e.clientX - rect.left, endY = e.clientY - rect.top;
+    const left = Math.min(dragStart.x, endX), top = Math.min(dragStart.y, endY);
+    const right = Math.max(dragStart.x, endX), bottom = Math.max(dragStart.y, endY);
+    const w = right - left, h = bottom - top;
+    const inst = self._instances[containerId];
+    if (inst && inst.captureCallback && w > 4 && h > 4) {
+      // Intersect text items with the drawn box; sort top-to-bottom, left-to-right
+      const hits = (inst.textItems || [])
+        .filter(t => !(t.x + t.w < left || t.x > right || t.y + t.h < top || t.y > bottom))
+        .sort((a, b) => {
+          if (Math.abs(a.y - b.y) > Math.max(a.h, b.h) / 2) return a.y - b.y;
+          return a.x - b.x;
+        });
+      const captured = hits.map(t => t.str).join(' ').replace(/\s+/g, ' ').trim();
+      if (captured) {
+        try { inst.captureCallback(captured, { left, top, right, bottom }); } catch (e) { console.warn('capture callback failed', e); }
+      }
+    }
+    // Fade + remove the box
+    if (box) {
+      box.style.transition = 'opacity 0.4s ease';
+      box.style.opacity = '0';
+      const bx = box;
+      setTimeout(() => { try { bx.remove(); } catch (_) {} }, 400);
+    }
+    dragStart = null; box = null;
+  });
+  // Cancel on leave (mouse exits the PDF area mid-drag)
+  overlay.addEventListener('mouseleave', () => {
+    if (box) { try { box.remove(); } catch (_) {} box = null; }
+    dragStart = null;
+  });
+};
+PdfViewer.enableCapture = function(containerId, callback) {
+  const inst = this._instances[containerId];
+  if (!inst) {
+    // Not mounted yet — stash for the mount handler
+    this._pendingCaptureCallbacks[containerId] = callback;
+    return;
+  }
+  inst.captureCallback = callback;
+  // Add a CSS class so we can show the crosshair cursor
+  const container = document.getElementById(containerId);
+  if (container) container.classList.add('pdf-capture-enabled');
+};
+PdfViewer.disableCapture = function(containerId) {
+  const inst = this._instances[containerId];
+  if (inst) inst.captureCallback = null;
+  delete this._pendingCaptureCallbacks[containerId];
+  const container = document.getElementById(containerId);
+  if (container) container.classList.remove('pdf-capture-enabled');
 };
 PdfViewer._prevPage = function(containerId) {
   const inst = this._instances[containerId]; if (!inst) return;
@@ -11876,6 +12038,28 @@ function renderTrainingModal() {
   const isPdf = !!(p.file && (/pdf$/i.test(p.file.type || '') || /\.pdf$/i.test(p.file.name || '')));
   const isImage = !!(p.file && /^image\//i.test(p.file.type || ''));
   // Preview pane on the LEFT — switches by file type
+  // v7.65: capture callback for drag-box on PDF → writes captured text into
+  // the active wizard question. Number/currency types parse the captured
+  // string; line-items pushes a new row with the text as description.
+  const captureCallback = (text, bounds) => {
+    const pk = state.ui.trainingPicker;
+    if (!pk || !pk.parsed) return;
+    const qs = questionsForDocType(pk.docType || 'other');
+    const q = qs[pk.currentQuestionIdx || 0];
+    if (!q) return;
+    if (q.type === 'lineItems') {
+      if (!Array.isArray(pk.parsed.lineItems)) pk.parsed.lineItems = [];
+      pk.parsed.lineItems.push({ description: text, qty: null, unitPrice: null, extended: null, partNum: '', unitOfMeasure: '', notes: '' });
+    } else if (q.type === 'number' || q.type === 'currency') {
+      const cleaned = text.replace(/[^0-9.\-]/g, '');
+      const num = parseFloat(cleaned);
+      if (isFinite(num)) setByPath(pk.parsed, q.key, num);
+    } else {
+      setByPath(pk.parsed, q.key, text);
+    }
+    showToast(`✨ Captured: "${text.length > 60 ? text.slice(0,60)+'…' : text}" → ${q.label}`, 3000);
+    render();
+  };
   const previewPane = (!p.file && !isEdit) ? `
     <div class="msg-dropzone training-dropzone" style="height:100%; display:flex; flex-direction:column; justify-content:center; align-items:center; background:#3a3f47; color:#e5e7eb;">
       <strong style="font-size:16px;">📄 Drop a sample document here</strong>
@@ -11885,7 +12069,7 @@ function renderTrainingModal() {
         Drop the most recent Alro invoice on Alro, or the most recent Hannon Electric RFQ on Hannon. The richer the sample (more fields populated), the better future extractions get.
       </div>
     </div>
-  ` : isPdf && p._fileBlobUrl ? renderPdfViewerEmbed(p._fileBlobUrl)
+  ` : isPdf && p._fileBlobUrl ? renderPdfViewerEmbed(p._fileBlobUrl, { onCapture: captureCallback })
     : isImage && p._fileBlobUrl ? `<div class="training-split-left" style="padding:0; align-items:center; justify-content:center;"><img class="training-img-preview" src="${esc(p._fileBlobUrl)}" alt="${esc(p.file.name)}"></div>`
     : p.file ? `<div class="training-no-preview">No preview available for ${esc(p.file.type || 'this file type')}.<br>Filename: <span class="mono" style="color:#fbbf24;">${esc(p.file.name)}</span><br>Claude can still extract fields from the raw bytes.</div>`
     : `<div class="training-no-preview">Original document not stored.<br>Edit the fields on the right to update the labels.</div>`;
@@ -16149,10 +16333,25 @@ const App = {
       }
       const data = await blobToBase64(file);
       const attachment = { name: file.name, mimeType: file.type || 'application/octet-stream', data };
+      // v7.65: pull prior training samples for this entity so Claude gets them
+      // as few-shot examples. Each labeled sample teaches Claude this entity's
+      // doc format — by sample 3 the extraction should be near-100% accurate.
+      const entity = getTrainingEntity(p.entityType, p.entityId);
+      const priorSamples = (entity && entity.extractionTraining && Array.isArray(entity.extractionTraining.samples))
+        ? entity.extractionTraining.samples
+            .filter(s => !p.sampleId || s.id !== p.sampleId)   // exclude the sample being edited
+            .map(s => ({
+              entityName: entity.name || '',
+              docType: s.docType || '',
+              parsedFields: s.parsedFields || {},
+              notes: s.notes || '',
+            }))
+        : [];
       const response = await workerCall('/api/claude/extract-document', {
         docType: p.docType || null,
-        hint: `Training sample for ${p.entityType} record. The user is teaching Claude how to read documents from this entity. Extract everything you can, even ambiguous fields — the user will correct them before saving.`,
+        hint: `Training sample for ${p.entityType} record. The user is teaching Claude how to read documents from this entity. ${priorSamples.length > 0 ? `${priorSamples.length} prior labeled sample${priorSamples.length===1?'':'s'} from this entity are included below — match their field conventions exactly.` : 'Extract everything you can, even ambiguous fields — the user will correct them before saving.'}`,
         attachments: [attachment],
+        priorSamples,
       }, { timeoutMs: 90000 });
       const np = state.ui.trainingPicker;
       if (!np || np.file !== file) return; // user closed/replaced mid-flight
