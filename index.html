@@ -703,7 +703,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.65.0';
+const APP_VERSION = '7.65.1';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -12101,6 +12101,22 @@ function renderTrainingModal() {
                 <div style="background:#FEF6E7; border-left:3px solid #D97706; padding:10px 12px; margin-bottom:12px;">
                   <strong>⏳ Claude is reading ${esc(p.file ? p.file.name : 'the document')}…</strong>
                   <div class="text-mute small" style="margin-top:2px;">Usually 5-15 seconds. The preview is shown on the left.</div>
+                  ${(p._priorSamplesCount != null) ? `
+                    <div style="margin-top:6px; font-size:12px; color:${p._priorSamplesCount > 0 ? '#16A34A' : '#C73E1D'};">
+                      ${p._priorSamplesCount > 0
+                        ? `✨ Including <strong>${p._priorSamplesCount}</strong> prior sample${p._priorSamplesCount===1?'':'s'} from <strong>${esc(p._priorEntityName||'this entity')}</strong> as labeled examples — should pre-fill correctly.`
+                        : `⚠ <strong>0 prior samples</strong> from <strong>${esc(p._priorEntityName||'this entity')}</strong> — Claude has no labeled examples to learn from yet.`}
+                    </div>
+                  ` : ''}
+                </div>
+              ` : ''}
+              ${(p.parsed && p._priorSamplesCount != null && p._priorSamplesCount > 0) ? `
+                <div style="background:#ECFDF3; border-left:3px solid #16A34A; padding:8px 12px; margin-bottom:12px; font-size:12px;">
+                  ✨ This extraction used <strong>${p._priorSamplesCount}</strong> prior labeled sample${p._priorSamplesCount===1?'':'s'} from <strong>${esc(p._priorEntityName||'this entity')}</strong>. If fields still came back blank/wrong, those particular fields likely vary per document — fix them and save, and they'll calibrate further next time.
+                </div>
+              ` : (p.parsed && p._priorSamplesCount === 0) ? `
+                <div style="background:#FEF6E7; border-left:3px solid #D97706; padding:8px 12px; margin-bottom:12px; font-size:12px;">
+                  ⚠ This extraction had <strong>no prior samples</strong> to learn from. After you correct and save this one, the next sample for this entity will use it as a labeled example.
                 </div>
               ` : ''}
               ${p.error ? `
@@ -16337,16 +16353,21 @@ const App = {
       // as few-shot examples. Each labeled sample teaches Claude this entity's
       // doc format — by sample 3 the extraction should be near-100% accurate.
       const entity = getTrainingEntity(p.entityType, p.entityId);
-      const priorSamples = (entity && entity.extractionTraining && Array.isArray(entity.extractionTraining.samples))
-        ? entity.extractionTraining.samples
-            .filter(s => !p.sampleId || s.id !== p.sampleId)   // exclude the sample being edited
-            .map(s => ({
-              entityName: entity.name || '',
-              docType: s.docType || '',
-              parsedFields: s.parsedFields || {},
-              notes: s.notes || '',
-            }))
-        : [];
+      const allSamples = (entity && entity.extractionTraining && Array.isArray(entity.extractionTraining.samples))
+        ? entity.extractionTraining.samples : [];
+      const priorSamples = allSamples
+        .filter(s => !p.sampleId || s.id !== p.sampleId)   // exclude the sample being edited
+        .map(s => ({
+          entityName: entity.name || '',
+          docType: s.docType || '',
+          parsedFields: s.parsedFields || {},
+          notes: s.notes || '',
+        }));
+      // v7.65.1: surface the count in the UI so the user can see it's flowing
+      p._priorSamplesCount = priorSamples.length;
+      p._priorEntityName = entity ? entity.name : '';
+      console.log('[training] Sending', priorSamples.length, 'prior samples for', entity ? entity.name : '(no entity)', '— sample doctypes:', priorSamples.map(s => s.docType));
+      render();
       const response = await workerCall('/api/claude/extract-document', {
         docType: p.docType || null,
         hint: `Training sample for ${p.entityType} record. The user is teaching Claude how to read documents from this entity. ${priorSamples.length > 0 ? `${priorSamples.length} prior labeled sample${priorSamples.length===1?'':'s'} from this entity are included below — match their field conventions exactly.` : 'Extract everything you can, even ambiguous fields — the user will correct them before saving.'}`,
