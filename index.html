@@ -665,7 +665,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.63.1';
+const APP_VERSION = '7.63.2';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -2642,12 +2642,13 @@ function loadScript(src) {
 // Used by: training wizard (big viewer), RFQ import modal (preview),
 // vendor/customer cards (thumbnails), future job folder browser.
 // =================================================================
-// v7.63.1: pin to PDF.js v3.x — v4+ ships as ES modules and doesn't expose
-// window.pdfjsLib via a simple <script> tag (would need `type="module"`
-// + import). v3.11.174 is the last stable UMD build that works with our
-// loadScript() pattern and exposes window.pdfjsLib.getDocument directly.
+// v7.63.2: serve PDF.js via unpkg.com so the path mirrors the npm package
+// structure exactly. The UMD/window.pdfjsLib build lives at legacy/build/
+// in pdfjs-dist (the root pdf.min.js is the MODERN build and may not expose
+// window.pdfjsLib for ESM consumers). cdnjs's mirror may not include the
+// legacy/ folder, hence we use unpkg which serves the npm package directly.
 const PDFJS_VERSION = '3.11.174';
-const PDFJS_CDN     = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${PDFJS_VERSION}`;
+const PDFJS_CDN     = `https://unpkg.com/pdfjs-dist@${PDFJS_VERSION}/legacy/build`;
 let _pdfjsLoaded = false;
 const _pdfDocCache = new Map();   // blobUrl → PDFDocumentProxy (cache so opening the same file twice is instant)
 
@@ -2656,9 +2657,9 @@ async function ensurePdfJs() {
     return window.pdfjsLib;
   }
   await loadScript(`${PDFJS_CDN}/pdf.min.js`);
-  // Verify the global was actually exposed correctly — v4+ exports differently
+  // Verify the global was actually exposed correctly — v4+ or modern build exports differently
   if (!window.pdfjsLib || typeof window.pdfjsLib.getDocument !== 'function') {
-    throw new Error('PDF.js loaded but window.pdfjsLib.getDocument is missing — wrong build (need UMD, not ESM)');
+    throw new Error('PDF.js loaded but window.pdfjsLib.getDocument is missing — script URL may be pointing at the modern (ESM) build instead of the legacy UMD build');
   }
   window.pdfjsLib.GlobalWorkerOptions.workerSrc = `${PDFJS_CDN}/pdf.worker.min.js`;
   _pdfjsLoaded = true;
