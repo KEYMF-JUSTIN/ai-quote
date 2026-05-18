@@ -696,6 +696,12 @@
   </div>
   <div class="header-actions">
     <span id="header-conn-pills" style="display:inline-flex; gap:6px; margin-right:10px;"></span>
+    <!-- v7.69: always-visible manual save + last-saved timestamp. Every state
+         mutation already auto-saves to localStorage, but the explicit button
+         gives a tactile confirmation that nothing's being lost between
+         re-renders, and persists any open wizard draft. -->
+    <button class="btn" style="background:var(--green,#16A34A); color:white; font-weight:600;" onclick="App.manualSave()" title="Save everything now (auto-saves on every change too)">💾 Save</button>
+    <span id="last-saved-pill" style="display:inline-block; font-size:11px; color:var(--text-mute); margin:0 8px 0 2px; min-width:90px;" title="When your data was last written to localStorage"></span>
     <button class="btn btn-ghost" onclick="App.toggleTheme()" title="Toggle dark/light"><span id="theme-icon">☀</span></button>
     <button class="btn btn-ghost" onclick="App.exportBackup()">Backup</button>
     <button class="btn btn-ghost" onclick="App.importBackup()">Restore</button>
@@ -722,7 +728,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.67.0';
+const APP_VERSION = '7.69.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -950,6 +956,8 @@ const state = {
     partsExpanded: {},          // v7.57: per-part expand state for inline parts on Quote Info page, keyed partId (deprecated by v7.60 chip selector but kept for migration safety)
     activePartIdForInfo: {},    // v7.60: per-quote chip selector — which part is currently visible on the Quote Info page, keyed quoteId
     partTypePicker: null,       // v7.61: { open: true } when "what kind of part?" modal is up
+    vendorWizard: null,         // v7.68: { open, step, draft } for "+ Add Vendor" guided flow
+    customerWizard: null,       // v7.68: { open, step, draft } for "+ Add Customer" guided flow
     trainingPicker: null,       // v7.62: { entityType, entityId, sampleId?, file?, parsed?, docType, notes, error, loading } for the training sample editor
     activePurchaseId: null,     // v7.50: currently-open purchase in the Purchasing workspace
     purchaseFilters: { search:'', hiddenStatuses:[], vendor:'all' },
@@ -1423,7 +1431,96 @@ function saveState() {
 function update(fn) {
   fn(state);
   saveState();
+  saveWizardDrafts();   // v7.69: keep wizard drafts persisted on every change
+  markLastSaved();      // v7.69: refresh the "Saved Xs ago" pill in the header
   render();
+}
+
+// v7.69: Wizard draft persistence. state.ui is intentionally NOT in
+// SYNCED_FIELDS so it never gets pushed to Firebase, but that means a hard
+// refresh wipes any half-filled "+ Add Vendor / + Add Customer" wizard. We
+// stash the two wizard objects (only those — not all of state.ui) under a
+// dedicated localStorage key and restore on boot. Cleared explicitly when the
+// wizard is saved or cancelled so we never silently re-open stale drafts on
+// the next page load.
+const WIZARD_DRAFTS_KEY = 'aiq-wizard-drafts-v1';
+function saveWizardDrafts() {
+  try {
+    const payload = {};
+    if (state.ui.vendorWizard && state.ui.vendorWizard.open) payload.vendorWizard = state.ui.vendorWizard;
+    if (state.ui.customerWizard && state.ui.customerWizard.open) payload.customerWizard = state.ui.customerWizard;
+    if (Object.keys(payload).length > 0) {
+      localStorage.setItem(WIZARD_DRAFTS_KEY, JSON.stringify(payload));
+    } else {
+      localStorage.removeItem(WIZARD_DRAFTS_KEY);
+    }
+  } catch (_) { /* quota or serialization issue — non-fatal */ }
+}
+function loadWizardDrafts() {
+  try {
+    const raw = localStorage.getItem(WIZARD_DRAFTS_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (parsed.vendorWizard)   state.ui.vendorWizard   = parsed.vendorWizard;
+    if (parsed.customerWizard) state.ui.customerWizard = parsed.customerWizard;
+  } catch (_) { /* corrupt — ignore */ }
+}
+
+// v7.69: Track the last save timestamp + refresh the header pill.
+let _lastSavedAt = null;
+function markLastSaved() {
+  _lastSavedAt = Date.now();
+  renderLastSavedPill();
+}
+function renderLastSavedPill() {
+  const el = document.getElementById('last-saved-pill');
+  if (!el) return;
+  if (!_lastSavedAt) { el.textContent = ''; return; }
+  const s = Math.round((Date.now() - _lastSavedAt) / 1000);
+  let label;
+  if (s < 5) label = '✓ Just saved';
+  else if (s < 60) label = `✓ Saved ${s}s ago`;
+  else if (s < 3600) label = `✓ Saved ${Math.floor(s/60)}m ago`;
+  else label = `✓ Saved ${Math.floor(s/3600)}h ago`;
+  el.textContent = label;
+  el.style.color = s < 5 ? 'var(--green,#16A34A)' : 'var(--text-mute)';
+}
+// Keep the timestamp pill fresh without forcing a full render
+setInterval(renderLastSavedPill, 5000);
+
+// v7.67.1: One-shot reset for every modal flag in state.ui. Called on
+// navigation (App.go) and quote-open so a half-closed modal from earlier in
+// the session can't leave a transparent high-z-index backdrop swallowing
+// clicks on the page underneath. Add new modal flags here as they're
+// introduced — keep this in lock-step with the modal render functions.
+function closeAllModals() {
+  if (state.ui.pdfDock && state.ui.pdfDock.blobUrl) {
+    try { URL.revokeObjectURL(state.ui.pdfDock.blobUrl); } catch(_) {}
+  }
+  state.ui.pdfDock = null;
+  if (state.ui.trainingPicker && state.ui.trainingPicker._fileBlobUrl) {
+    try { URL.revokeObjectURL(state.ui.trainingPicker._fileBlobUrl); } catch(_) {}
+  }
+  state.ui.trainingPicker = null;
+  state.ui.msgImport = null;
+  state.ui.keypad = null;
+  state.ui.partTemplate = null;
+  state.ui.partTypePicker = null;
+  state.ui.vendorWizard = null;     // v7.68
+  state.ui.customerWizard = null;   // v7.68
+  state.ui.mcMasterPaste = null;
+  state.ui.missingCustFolder = null;
+  state.ui.inviteDialog = null;
+  state.ui.acceptInviteDialog = null;
+  state.ui.newQuoteKindPicker = false;
+  if (state.ui.quoteParser)        state.ui.quoteParser.open = false;
+  if (state.ui.materialDbPicker)   state.ui.materialDbPicker.open = false;
+  if (state.ui.vendorFavoritePicker) state.ui.vendorFavoritePicker.open = false;
+  if (state.ui.priceBookImport)    state.ui.priceBookImport.open = false;
+  if (state.ui.archiveImport)      state.ui.archiveImport.open = false;
+  if (state.ui.poArchiveImport)    state.ui.poArchiveImport.open = false;
+  if (state.ui.invoiceArchiveImport) state.ui.invoiceArchiveImport.open = false;
+  if (state.ui.quoteArchiveImport) state.ui.quoteArchiveImport.open = false;
 }
 
 // =================================================================
@@ -5719,6 +5816,8 @@ function render() {
   renderQuoteArchiveImportModal();
   renderNewQuoteKindPickerModal();
   renderPartTypePickerModal();
+  renderVendorWizardModal();    // v7.68
+  renderCustomerWizardModal();  // v7.68
   renderTrainingModal();
   // v7.63: paint any PDF thumbnails (<canvas data-pdf-thumb>) emitted in this render pass
   try { if (typeof PdfViewer !== 'undefined') PdfViewer._mountAllThumbnails(); } catch (_) {}
@@ -12376,6 +12475,407 @@ function renderPartTypePickerModal() {
 }
 
 // =================================================================
+// v7.68: VENDOR + CUSTOMER WIZARDS — step-by-step add flow.
+// Replaces the legacy one-shot "+ Add Vendor / + Add Customer" buttons that
+// dumped the user into an empty inline row. Now the buttons open a small
+// guided modal that walks through basics → what-they-supply (vendor) /
+// addresses (customer) → review → save. Builds a complete record before it
+// hits state.settings.vendors / state.customers, so the entity is useful
+// from day one (assigned services, paymentTerms, etc.).
+// State shape:
+//   state.ui.vendorWizard   = { open, step, draft }
+//   state.ui.customerWizard = { open, step, draft }
+// Where draft is a partially-filled record matching the final schema.
+// =================================================================
+const VENDOR_TYPE_OPTIONS = [
+  { value:'material',  label:'Material',    icon:'📦', desc:'Steel, aluminum, plastic, etc.', color:'#1F2937' },
+  { value:'cut',       label:'Cut',         icon:'⚡', desc:'Laser, waterjet, plasma, EDM, shear.', color:'#7C3AED' },
+  { value:'finishing', label:'Finishing',   icon:'🛠', desc:'Heat treat, paint, plating, deburring.', color:'#0891B2' },
+  { value:'tooling',   label:'Tooling',     icon:'🔧', desc:'Inserts, end mills, drills, fixturing.', color:'#B45309' },
+];
+
+function vendorWizardSteps(draft) {
+  // Dynamic step list — services step only appears if cut/finishing was chosen,
+  // materials step only if material was chosen.
+  const types = new Set(draft.types || []);
+  const steps = [{ key:'basics', label:'Basics' }];
+  steps.push({ key:'types', label:'What they supply' });
+  if (types.has('cut') || types.has('finishing')) steps.push({ key:'services', label:'Services' });
+  if (types.has('material')) steps.push({ key:'materials', label:'Materials' });
+  steps.push({ key:'address', label:'Address & notes' });
+  steps.push({ key:'review', label:'Review' });
+  return steps;
+}
+
+function renderVendorWizardModal() {
+  let host = document.getElementById('vendor-wizard-host');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'vendor-wizard-host';
+    document.body.appendChild(host);
+  }
+  const w = state.ui.vendorWizard;
+  if (!w || !w.open) { host.innerHTML = ''; return; }
+  const d = w.draft;
+  const steps = vendorWizardSteps(d);
+  const stepIdx = Math.max(0, Math.min(steps.length - 1, w.step || 0));
+  const step = steps[stepIdx];
+
+  // Build the body for the current step
+  let body = '';
+  if (step.key === 'basics') {
+    body = `
+      <p class="text-mute small" style="margin:0 0 12px;">Tell me who this vendor is. You can fill the rest in later — name is the only required field.</p>
+      <label class="wizard-label" style="font-size:13px;">Vendor name <span style="color:var(--orange);">*</span></label>
+      <input type="text" value="${esc(d.name||'')}" oninput="App.vendorWizardSet('name', this.value)" placeholder="e.g. Alro Steel" style="width:100%; font-size:15px; padding:8px; margin-bottom:12px;" autofocus>
+      <div class="row" style="gap:10px;">
+        <div style="flex:1;">
+          <label class="wizard-label" style="font-size:13px;">Primary contact</label>
+          <input type="text" value="${esc(d.contact||'')}" oninput="App.vendorWizardSet('contact', this.value)" placeholder="e.g. Mike Johnson" style="width:100%; padding:6px;">
+        </div>
+        <div style="flex:1;">
+          <label class="wizard-label" style="font-size:13px;">Account #</label>
+          <input type="text" value="${esc(d.accountNum||'')}" oninput="App.vendorWizardSet('accountNum', this.value)" placeholder="your acct # with them" style="width:100%; padding:6px;">
+        </div>
+      </div>
+      <div class="row" style="gap:10px; margin-top:10px;">
+        <div style="flex:1;">
+          <label class="wizard-label" style="font-size:13px;">Email</label>
+          <input type="email" value="${esc(d.email||'')}" oninput="App.vendorWizardSet('email', this.value)" placeholder="sales@vendor.com" style="width:100%; padding:6px;">
+        </div>
+        <div style="flex:1;">
+          <label class="wizard-label" style="font-size:13px;">Phone</label>
+          <input type="tel" value="${esc(d.phone||'')}" oninput="App.vendorWizardSet('phone', this.value)" placeholder="(555) 123-4567" style="width:100%; padding:6px;">
+        </div>
+      </div>
+    `;
+  } else if (step.key === 'types') {
+    body = `
+      <p class="text-mute small" style="margin:0 0 12px;">What does this vendor supply? Pick all that apply — you'll customize the specific services in the next step.</p>
+      <div style="display:grid; grid-template-columns:repeat(2, 1fr); gap:10px;">
+        ${VENDOR_TYPE_OPTIONS.map(o => {
+          const on = (d.types || []).includes(o.value);
+          return `
+            <div onclick="App.vendorWizardToggleType('${o.value}')" style="cursor:pointer; user-select:none; padding:14px; border:2px solid ${on ? o.color : 'var(--line)'}; border-radius:5px; background:${on ? o.color+'15' : 'var(--paper)'}; transition:all 0.1s;">
+              <div style="font-size:24px; margin-bottom:4px;">${o.icon}</div>
+              <div style="font-weight:700; color:${on ? o.color : 'var(--text)'}; margin-bottom:2px;">${esc(o.label)}</div>
+              <div class="text-mute small">${esc(o.desc)}</div>
+              ${on ? `<div style="margin-top:6px; font-size:11px; color:${o.color}; font-weight:600;">✓ SELECTED</div>` : ''}
+            </div>
+          `;
+        }).join('')}
+      </div>
+    `;
+  } else if (step.key === 'services') {
+    const types = new Set(d.types || []);
+    const cats = [];
+    if (types.has('cut')) cats.push({ category:'cut', label:'⚡ Cut processes' });
+    if (types.has('finishing')) cats.push({ category:'finishing', label:'🛠 Finishing services' });
+    body = `
+      <p class="text-mute small" style="margin:0 0 12px;">Which specific services does this vendor offer? You can come back and edit these any time.</p>
+      ${cats.map(cat => {
+        const list = ALL_SERVICES.filter(s => s.category === cat.category);
+        return `
+          <div style="margin-bottom:14px;">
+            <div style="font-weight:600; margin-bottom:6px;">${esc(cat.label)}</div>
+            <div style="display:flex; flex-wrap:wrap; gap:6px;">
+              ${list.map(s => {
+                const on = (d.services || []).includes(s.value);
+                return `<span onclick="App.vendorWizardToggleService('${s.value}')" style="cursor:pointer; user-select:none; padding:5px 10px; border-radius:3px; font-size:12px; font-weight:500; ${on ? 'background:var(--navy); color:white;' : 'background:var(--bg); color:var(--text); border:1px dashed var(--line-dark);'}">${esc(s.label)}</span>`;
+              }).join('')}
+            </div>
+          </div>
+        `;
+      }).join('')}
+    `;
+  } else if (step.key === 'materials') {
+    const mats = state.settings.materials || [];
+    const selectedIds = new Set(d.materialIds || []);
+    body = `
+      <p class="text-mute small" style="margin:0 0 12px;">Which materials does this vendor sell? Selecting here adds the vendor to each material's vendor list (which feeds the Material Cost picker on a part). Skip if you'll wire this up later.</p>
+      ${mats.length === 0 ? `
+        <div class="text-mute small" style="padding:12px; background:var(--bg); border-radius:4px;">No materials in your list yet. You can add them via Settings → Materials, then come back and edit this vendor to assign them.</div>
+      ` : `
+        <div style="max-height:280px; overflow-y:auto; border:1px solid var(--line); border-radius:4px; padding:8px;">
+          ${mats.map((m, i) => {
+            const on = selectedIds.has(m.id || ('mat_'+i));
+            const matId = m.id || ('mat_'+i);
+            return `
+              <label style="display:flex; align-items:center; gap:8px; padding:4px 6px; cursor:pointer; ${on ? 'background:#ECFDF3;' : ''} border-radius:3px;">
+                <input type="checkbox" ${on?'checked':''} onchange="App.vendorWizardToggleMaterial('${matId}')" style="width:15px; height:15px; cursor:pointer;">
+                <span style="font-size:13px;">${esc(m.name || '(unnamed)')}</span>
+                <span class="text-mute small">${esc(m.form || '')}${m.spec ? ' · '+esc(m.spec) : ''}</span>
+              </label>
+            `;
+          }).join('')}
+        </div>
+        <div class="text-mute small" style="margin-top:8px;">${selectedIds.size} selected</div>
+      `}
+    `;
+  } else if (step.key === 'address') {
+    body = `
+      <p class="text-mute small" style="margin:0 0 12px;">Optional — useful for shipping or POs. Fax is rarely needed but kept for vendors that still use it.</p>
+      <label class="wizard-label" style="font-size:13px;">Address</label>
+      <textarea oninput="App.vendorWizardSet('address', this.value)" placeholder="Street, City, State ZIP" style="width:100%; padding:6px; font-size:13px; min-height:60px; margin-bottom:10px;">${esc(d.address||'')}</textarea>
+      <div class="row" style="gap:10px; margin-bottom:10px;">
+        <div style="flex:1;">
+          <label class="wizard-label" style="font-size:13px;">Fax</label>
+          <input type="tel" value="${esc(d.fax||'')}" oninput="App.vendorWizardSet('fax', this.value)" placeholder="(555) 555-5555" style="width:100%; padding:6px;">
+        </div>
+        <div style="flex:1; display:flex; align-items:flex-end;">
+          <label style="display:flex; align-items:center; gap:6px; cursor:pointer; user-select:none; padding:8px 0;">
+            <input type="checkbox" ${d.favorite?'checked':''} onchange="App.vendorWizardSet('favorite', this.checked)" style="width:16px; height:16px;">
+            <span>★ Mark as favorite</span>
+          </label>
+        </div>
+      </div>
+      <label class="wizard-label" style="font-size:13px;">Notes</label>
+      <textarea oninput="App.vendorWizardSet('notes', this.value)" placeholder="Lead time, payment terms, anything else worth remembering" style="width:100%; padding:6px; font-size:13px; min-height:60px;">${esc(d.notes||'')}</textarea>
+    `;
+  } else if (step.key === 'review') {
+    const types = (d.types || []).map(t => {
+      const def = VENDOR_TYPE_OPTIONS.find(x => x.value === t);
+      return def ? `${def.icon} ${def.label}` : t;
+    }).join(', ') || '(none)';
+    const services = (d.services || []).map(v => {
+      const def = ALL_SERVICES.find(s => s.value === v);
+      return def ? def.label : v;
+    }).join(', ') || '(none)';
+    const mats = state.settings.materials || [];
+    const matNames = (d.materialIds || []).map(id => {
+      const m = mats.find(mm => (mm.id || '') === id) || mats[parseInt((id.match(/^mat_(\d+)$/)||[])[1] || -1, 10)];
+      return m ? m.name : null;
+    }).filter(Boolean).join(', ') || '(none)';
+    body = `
+      <p class="text-mute small" style="margin:0 0 12px;">Quick review. Click <strong>Save</strong> to add this vendor to your list, or <strong>Back</strong> to fix anything.</p>
+      <table class="tbl tight" style="width:100%;">
+        <tr><td style="width:30%; color:var(--text-mute);">Name</td><td><strong>${esc(d.name||'(unnamed)')}</strong>${d.favorite?' ★':''}</td></tr>
+        ${d.contact ? `<tr><td style="color:var(--text-mute);">Contact</td><td>${esc(d.contact)}</td></tr>` : ''}
+        ${d.email ? `<tr><td style="color:var(--text-mute);">Email</td><td>${esc(d.email)}</td></tr>` : ''}
+        ${d.phone ? `<tr><td style="color:var(--text-mute);">Phone</td><td>${esc(d.phone)}</td></tr>` : ''}
+        ${d.accountNum ? `<tr><td style="color:var(--text-mute);">Account #</td><td>${esc(d.accountNum)}</td></tr>` : ''}
+        <tr><td style="color:var(--text-mute);">Supplies</td><td>${esc(types)}</td></tr>
+        ${(d.services||[]).length ? `<tr><td style="color:var(--text-mute);">Services</td><td>${esc(services)}</td></tr>` : ''}
+        ${(d.materialIds||[]).length ? `<tr><td style="color:var(--text-mute);">Materials</td><td>${esc(matNames)}</td></tr>` : ''}
+        ${d.address ? `<tr><td style="color:var(--text-mute);">Address</td><td>${esc(d.address)}</td></tr>` : ''}
+        ${d.notes ? `<tr><td style="color:var(--text-mute);">Notes</td><td>${esc(d.notes)}</td></tr>` : ''}
+      </table>
+    `;
+  }
+
+  // Step dots
+  const dots = steps.map((s, i) => `
+    <button class="wizard-dot ${i===stepIdx?'active':''} ${i<stepIdx?'filled':''}" onclick="App.vendorWizardGoTo(${i})" title="${esc(s.label)}">${i+1}</button>
+  `).join('');
+
+  const canSave = step.key === 'review' && (d.name||'').trim().length > 0;
+  const canNext = step.key !== 'basics' || (d.name||'').trim().length > 0;
+
+  host.innerHTML = `
+    <div class="modal-backdrop" onclick="App.closeVendorWizard()">
+      <div class="modal" style="width:640px; max-width:96vw; max-height:90vh; display:flex; flex-direction:column;" onclick="event.stopPropagation()">
+        <div class="modal-header">+ Add Vendor &middot; ${esc(step.label)} (${stepIdx+1}/${steps.length})</div>
+        <div class="modal-body" style="overflow-y:auto;">
+          <div class="wizard-dots" style="margin-bottom:14px;">${dots}</div>
+          <div class="wizard-section" style="margin:0;">
+            ${body}
+          </div>
+        </div>
+        <div class="modal-footer" style="display:flex; gap:8px; justify-content:space-between;">
+          <button class="btn" onclick="App.closeVendorWizard()">Cancel</button>
+          <div class="row" style="gap:8px;">
+            ${stepIdx > 0 ? `<button class="btn" onclick="App.vendorWizardBack()">← Back</button>` : ''}
+            ${step.key !== 'review'
+              ? `<button class="btn btn-primary" ${canNext?'':'disabled title="Enter a vendor name first"'} onclick="App.vendorWizardNext()">Next →</button>`
+              : `<button class="btn btn-primary" ${canSave?'':'disabled'} onclick="App.vendorWizardSave()">✓ Save Vendor</button>`}
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// ----- Customer wizard -----
+function customerWizardSteps(draft) {
+  const steps = [{ key:'basics', label:'Basics' }];
+  steps.push({ key:'billing', label:'Billing address' });
+  if (!draft.shipSameAsBill) steps.push({ key:'shipping', label:'Shipping address' });
+  steps.push({ key:'business', label:'Business details' });
+  steps.push({ key:'review', label:'Review' });
+  return steps;
+}
+
+function renderCustomerWizardModal() {
+  let host = document.getElementById('customer-wizard-host');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'customer-wizard-host';
+    document.body.appendChild(host);
+  }
+  const w = state.ui.customerWizard;
+  if (!w || !w.open) { host.innerHTML = ''; return; }
+  const d = w.draft;
+  const steps = customerWizardSteps(d);
+  const stepIdx = Math.max(0, Math.min(steps.length - 1, w.step || 0));
+  const step = steps[stepIdx];
+  const paymentTermsList = state.settings.paymentTerms || ['Net 30', 'Net 15', 'Net 45', 'Net 60', 'Due on receipt', 'COD', 'Prepaid'];
+
+  let body = '';
+  if (step.key === 'basics') {
+    body = `
+      <p class="text-mute small" style="margin:0 0 12px;">Who's the customer? Company name is required — everything else can be filled in as you learn it.</p>
+      <label class="wizard-label" style="font-size:13px;">Company name <span style="color:var(--orange);">*</span></label>
+      <input type="text" value="${esc(d.name||'')}" oninput="App.customerWizardSet('name', this.value)" placeholder="e.g. Acme Manufacturing" style="width:100%; font-size:15px; padding:8px; margin-bottom:12px;" autofocus>
+      <div class="row" style="gap:10px; margin-bottom:10px;">
+        <div style="flex:1;">
+          <label class="wizard-label" style="font-size:13px;">Customer code</label>
+          <input type="text" value="${esc(d.code||'')}" oninput="App.customerWizardSet('code', this.value)" placeholder="e.g. ACME-01" style="width:100%; padding:6px;">
+        </div>
+        <div style="flex:1;">
+          <label class="wizard-label" style="font-size:13px;">Primary contact</label>
+          <input type="text" value="${esc(d.contact||'')}" oninput="App.customerWizardSet('contact', this.value)" placeholder="e.g. Sarah Lee" style="width:100%; padding:6px;">
+        </div>
+      </div>
+      <div class="row" style="gap:10px;">
+        <div style="flex:1;">
+          <label class="wizard-label" style="font-size:13px;">Email</label>
+          <input type="email" value="${esc(d.email||'')}" oninput="App.customerWizardSet('email', this.value)" placeholder="purchasing@acme.com" style="width:100%; padding:6px;">
+        </div>
+        <div style="flex:1;">
+          <label class="wizard-label" style="font-size:13px;">Phone</label>
+          <input type="tel" value="${esc(d.phone||'')}" oninput="App.customerWizardSet('phone', this.value)" placeholder="(555) 123-4567" style="width:100%; padding:6px;">
+        </div>
+      </div>
+    `;
+  } else if (step.key === 'billing') {
+    body = `
+      <p class="text-mute small" style="margin:0 0 12px;">Where do invoices go? You can skip and add later — but it'll show up on every quote PDF, so worth filling in.</p>
+      <label class="wizard-label" style="font-size:13px;">Street</label>
+      <input type="text" value="${esc(d.billStreet||'')}" oninput="App.customerWizardSet('billStreet', this.value)" placeholder="123 Industrial Way" style="width:100%; padding:6px; margin-bottom:10px;">
+      <div class="row" style="gap:10px; margin-bottom:10px;">
+        <div style="flex:2;">
+          <label class="wizard-label" style="font-size:13px;">City</label>
+          <input type="text" value="${esc(d.billCity||'')}" oninput="App.customerWizardSet('billCity', this.value)" style="width:100%; padding:6px;">
+        </div>
+        <div style="flex:1;">
+          <label class="wizard-label" style="font-size:13px;">State</label>
+          <input type="text" value="${esc(d.billState||'')}" oninput="App.customerWizardSet('billState', this.value)" placeholder="PA" maxlength="2" style="width:100%; padding:6px;">
+        </div>
+        <div style="flex:1;">
+          <label class="wizard-label" style="font-size:13px;">ZIP</label>
+          <input type="text" value="${esc(d.billZip||'')}" oninput="App.customerWizardSet('billZip', this.value)" placeholder="15001" style="width:100%; padding:6px;">
+        </div>
+      </div>
+      <label style="display:flex; align-items:center; gap:8px; cursor:pointer; user-select:none; padding:6px; background:var(--bg); border-radius:3px; margin-top:6px;">
+        <input type="checkbox" ${d.shipSameAsBill?'checked':''} onchange="App.customerWizardSet('shipSameAsBill', this.checked)" style="width:16px; height:16px;">
+        <span>Shipping address is the same as billing</span>
+      </label>
+    `;
+  } else if (step.key === 'shipping') {
+    body = `
+      <p class="text-mute small" style="margin:0 0 12px;">Where do parts get delivered? Used on packing slips and order confirmations.</p>
+      <label class="wizard-label" style="font-size:13px;">Street</label>
+      <input type="text" value="${esc(d.shipStreet||'')}" oninput="App.customerWizardSet('shipStreet', this.value)" placeholder="Dock 4 — 456 Logistics Pkwy" style="width:100%; padding:6px; margin-bottom:10px;">
+      <div class="row" style="gap:10px;">
+        <div style="flex:2;">
+          <label class="wizard-label" style="font-size:13px;">City</label>
+          <input type="text" value="${esc(d.shipCity||'')}" oninput="App.customerWizardSet('shipCity', this.value)" style="width:100%; padding:6px;">
+        </div>
+        <div style="flex:1;">
+          <label class="wizard-label" style="font-size:13px;">State</label>
+          <input type="text" value="${esc(d.shipState||'')}" oninput="App.customerWizardSet('shipState', this.value)" placeholder="PA" maxlength="2" style="width:100%; padding:6px;">
+        </div>
+        <div style="flex:1;">
+          <label class="wizard-label" style="font-size:13px;">ZIP</label>
+          <input type="text" value="${esc(d.shipZip||'')}" oninput="App.customerWizardSet('shipZip', this.value)" placeholder="15002" style="width:100%; padding:6px;">
+        </div>
+      </div>
+    `;
+  } else if (step.key === 'business') {
+    body = `
+      <p class="text-mute small" style="margin:0 0 12px;">Account-level defaults — these flow through to every new quote/order for this customer.</p>
+      <div class="row" style="gap:10px; margin-bottom:10px;">
+        <div style="flex:1;">
+          <label class="wizard-label" style="font-size:13px;">Sales rep</label>
+          <input type="text" value="${esc(d.salesRep||'')}" oninput="App.customerWizardSet('salesRep', this.value)" placeholder="who owns this account" style="width:100%; padding:6px;">
+        </div>
+        <div style="flex:1;">
+          <label class="wizard-label" style="font-size:13px;">Payment terms</label>
+          <select onchange="App.customerWizardSet('paymentTerms', this.value)" style="width:100%; padding:6px;">
+            <option value="">(none set)</option>
+            ${paymentTermsList.map(t => `<option value="${esc(t)}" ${d.paymentTerms===t?'selected':''}>${esc(t)}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div class="row" style="gap:10px;">
+        <div style="flex:1;">
+          <label class="wizard-label" style="font-size:13px;">Status</label>
+          <select onchange="App.customerWizardSet('status', this.value)" style="width:100%; padding:6px;">
+            <option value="Active" ${(d.status||'Active')==='Active'?'selected':''}>Active</option>
+            <option value="Inactive" ${d.status==='Inactive'?'selected':''}>Inactive</option>
+            <option value="Prospect" ${d.status==='Prospect'?'selected':''}>Prospect</option>
+          </select>
+        </div>
+        <div style="flex:2;">
+          <label class="wizard-label" style="font-size:13px;">Notes</label>
+          <input type="text" value="${esc(d.notes||'')}" oninput="App.customerWizardSet('notes', this.value)" placeholder="Anything worth remembering" style="width:100%; padding:6px;">
+        </div>
+      </div>
+    `;
+  } else if (step.key === 'review') {
+    const bill = [d.billStreet, [d.billCity, d.billState].filter(Boolean).join(', '), d.billZip].filter(Boolean).join(' · ') || '(none)';
+    const ship = d.shipSameAsBill
+      ? '(same as billing)'
+      : ([d.shipStreet, [d.shipCity, d.shipState].filter(Boolean).join(', '), d.shipZip].filter(Boolean).join(' · ') || '(none)');
+    body = `
+      <p class="text-mute small" style="margin:0 0 12px;">Quick review. Click <strong>Save</strong> to add this customer to your list, or <strong>Back</strong> to fix anything.</p>
+      <table class="tbl tight" style="width:100%;">
+        <tr><td style="width:30%; color:var(--text-mute);">Company</td><td><strong>${esc(d.name||'(unnamed)')}</strong>${d.code?` <span class="mono small">${esc(d.code)}</span>`:''}</td></tr>
+        ${d.contact ? `<tr><td style="color:var(--text-mute);">Contact</td><td>${esc(d.contact)}</td></tr>` : ''}
+        ${d.email ? `<tr><td style="color:var(--text-mute);">Email</td><td>${esc(d.email)}</td></tr>` : ''}
+        ${d.phone ? `<tr><td style="color:var(--text-mute);">Phone</td><td>${esc(d.phone)}</td></tr>` : ''}
+        <tr><td style="color:var(--text-mute);">Bill to</td><td>${esc(bill)}</td></tr>
+        <tr><td style="color:var(--text-mute);">Ship to</td><td>${esc(ship)}</td></tr>
+        ${d.salesRep ? `<tr><td style="color:var(--text-mute);">Sales rep</td><td>${esc(d.salesRep)}</td></tr>` : ''}
+        ${d.paymentTerms ? `<tr><td style="color:var(--text-mute);">Payment terms</td><td>${esc(d.paymentTerms)}</td></tr>` : ''}
+        <tr><td style="color:var(--text-mute);">Status</td><td><span class="pill ${(d.status||'Active')==='Active'?'accepted':'draft'}">${esc(d.status||'Active')}</span></td></tr>
+        ${d.notes ? `<tr><td style="color:var(--text-mute);">Notes</td><td>${esc(d.notes)}</td></tr>` : ''}
+      </table>
+    `;
+  }
+
+  const dots = steps.map((s, i) => `
+    <button class="wizard-dot ${i===stepIdx?'active':''} ${i<stepIdx?'filled':''}" onclick="App.customerWizardGoTo(${i})" title="${esc(s.label)}">${i+1}</button>
+  `).join('');
+
+  const canSave = step.key === 'review' && (d.name||'').trim().length > 0;
+  const canNext = step.key !== 'basics' || (d.name||'').trim().length > 0;
+
+  host.innerHTML = `
+    <div class="modal-backdrop" onclick="App.closeCustomerWizard()">
+      <div class="modal" style="width:640px; max-width:96vw; max-height:90vh; display:flex; flex-direction:column;" onclick="event.stopPropagation()">
+        <div class="modal-header">+ Add Customer &middot; ${esc(step.label)} (${stepIdx+1}/${steps.length})</div>
+        <div class="modal-body" style="overflow-y:auto;">
+          <div class="wizard-dots" style="margin-bottom:14px;">${dots}</div>
+          <div class="wizard-section" style="margin:0;">
+            ${body}
+          </div>
+        </div>
+        <div class="modal-footer" style="display:flex; gap:8px; justify-content:space-between;">
+          <button class="btn" onclick="App.closeCustomerWizard()">Cancel</button>
+          <div class="row" style="gap:8px;">
+            ${stepIdx > 0 ? `<button class="btn" onclick="App.customerWizardBack()">← Back</button>` : ''}
+            ${step.key !== 'review'
+              ? `<button class="btn btn-primary" ${canNext?'':'disabled title="Enter a company name first"'} onclick="App.customerWizardNext()">Next →</button>`
+              : `<button class="btn btn-primary" ${canSave?'':'disabled'} onclick="App.customerWizardSave()">✓ Save Customer</button>`}
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// =================================================================
 // v7.62: EXTRACTION TRAINING — labeled document samples per vendor + customer.
 // Each sample = { id, filename, mimeType, sizeBytes, addedAt, docType,
 // parsedFields, notes }. The parsedFields is the structured extraction
@@ -16217,6 +16717,26 @@ async function generateQuotePDF(quote) {
 }
 
 const App = {
+  // v7.69: Manual save button in the header. Every state change already
+  // saves automatically, so this is mostly a confirmation — useful when the
+  // user wants to be sure their work is committed before refreshing or
+  // closing the tab, and as a "panic save" if cloud sync is misbehaving.
+  manualSave() {
+    try {
+      saveStateLocal();
+      saveWizardDrafts();
+      markLastSaved();
+      if (SyncEngine.isEnabled() && !SyncEngine.applyingRemote) {
+        SyncEngine.push();
+        showToast('✓ Saved locally + pushed to cloud sync.');
+      } else {
+        showToast('✓ Saved locally.');
+      }
+    } catch (e) {
+      alert('Save failed: ' + (e.message || e));
+    }
+  },
+
   go(view) {
     // v7.27: Clean up any pending PDF dock blob when navigating away — otherwise
     // its blob URL would leak in memory until page reload.
@@ -16224,6 +16744,10 @@ const App = {
       try { URL.revokeObjectURL(state.ui.pdfDock.blobUrl); } catch(_) {}
       state.ui.pdfDock = null;
     }
+    // v7.67.1: Hard-close every modal on navigation. Stale modal flags would
+    // otherwise leave an invisible high-z-index backdrop swallowing clicks on
+    // the destination view (e.g. user can't open a quote from the list).
+    closeAllModals();
     update(s => { s.ui.view = view; s.ui.activeQuoteId = null; });
   },
   goTab(tab) { update(s => { s.ui.activeQuoteTab = tab; }); },
@@ -16898,6 +17422,11 @@ const App = {
     showToast(`Appended ${sourceParts.length} part(s) from quote ${source.quoteNum || sourceId}.`);
   },
   openQuote(id) {
+    // v7.67.1: defensive — close any stuck modal before switching views, so a
+    // zombie backdrop from a prior interaction can't make the click look like
+    // a no-op. Also log so DevTools shows whether the click ever fired.
+    console.log('[openQuote]', id, 'view→quote');
+    closeAllModals();
     update(s => { s.ui.view = 'quote'; s.ui.activeQuoteId = id; s.ui.activeQuoteTab = 'info'; });
   },
   deleteQuote(id) {
@@ -16909,13 +17438,12 @@ const App = {
     });
   },
 
-  newCustomer() {
-    update(s => {
-      s.customers.unshift(newCustomer());
-      logActivity('Added customer', '(new)');
-      s.ui.view = 'customers';
-    });
-  },
+  // v7.68: + Add Customer launches the wizard. Old behavior — push an empty
+  // customer and let the user fill it in inline — was confusing because the
+  // new row appeared at the top with no fields filled.
+  newCustomer() { this.openCustomerWizard(); },
+  // Used by "+ New" button inline on a quote — we DO want the row created
+  // immediately so the quote gets a customerId; the wizard model doesn't fit.
   newCustomerInline(quoteId) {
     update(s => {
       const c = newCustomer(); c.name = 'New customer';
@@ -16923,6 +17451,99 @@ const App = {
       const q = s.quotes.find(x => x.id === quoteId);
       if (q) q.customerId = c.id;
     });
+  },
+
+  openCustomerWizard() {
+    update(s => {
+      closeAllModals();
+      s.ui.customerWizard = {
+        open: true,
+        step: 0,
+        draft: {
+          name:'', code:'', contact:'', email:'', phone:'',
+          billStreet:'', billCity:'', billState:'', billZip:'',
+          shipSameAsBill: true,
+          shipStreet:'', shipCity:'', shipState:'', shipZip:'',
+          salesRep:'', paymentTerms:'', status:'Active', notes:'',
+        },
+      };
+    });
+  },
+  closeCustomerWizard() {
+    // v7.69: same confirm-before-discard treatment as the vendor wizard.
+    const d = (state.ui.customerWizard || {}).draft || {};
+    const hasContent = !!(d.name||d.code||d.contact||d.email||d.phone||d.billStreet||d.billCity||d.salesRep||d.paymentTerms||d.notes);
+    if (hasContent && !confirm('Discard this customer draft? Anything you typed will be lost.')) return;
+    update(s => { s.ui.customerWizard = null; });
+    localStorage.removeItem(WIZARD_DRAFTS_KEY);
+  },
+  customerWizardSet(field, value) {
+    if (!state.ui.customerWizard) return;
+    state.ui.customerWizard.draft[field] = value;
+    // Re-render when toggles flip OR when name changes (Next button enable state)
+    if (field === 'name' || field === 'shipSameAsBill' || field === 'status' || field === 'paymentTerms') {
+      renderCustomerWizardModal();
+    }
+  },
+  customerWizardNext() {
+    if (!state.ui.customerWizard) return;
+    const steps = customerWizardSteps(state.ui.customerWizard.draft);
+    const cur = state.ui.customerWizard.step || 0;
+    if (cur < steps.length - 1) {
+      state.ui.customerWizard.step = cur + 1;
+      renderCustomerWizardModal();
+    }
+  },
+  customerWizardBack() {
+    if (!state.ui.customerWizard) return;
+    const cur = state.ui.customerWizard.step || 0;
+    if (cur > 0) {
+      state.ui.customerWizard.step = cur - 1;
+      renderCustomerWizardModal();
+    }
+  },
+  customerWizardGoTo(i) {
+    if (!state.ui.customerWizard) return;
+    state.ui.customerWizard.step = i;
+    renderCustomerWizardModal();
+  },
+  customerWizardSave() {
+    if (!state.ui.customerWizard) return;
+    const d = state.ui.customerWizard.draft;
+    if (!(d.name || '').trim()) { alert('Company name is required.'); return; }
+    update(s => {
+      const c = newCustomer();
+      c.name = d.name.trim();
+      c.code = d.code || '';
+      c.contact = d.contact || '';
+      c.email = d.email || '';
+      c.phone = d.phone || '';
+      c.billStreet = d.billStreet || '';
+      c.billCity = d.billCity || '';
+      c.billState = d.billState || '';
+      c.billZip = d.billZip || '';
+      c.shipSameAsBill = !!d.shipSameAsBill;
+      if (d.shipSameAsBill) {
+        c.shipStreet = c.billStreet;
+        c.shipCity = c.billCity;
+        c.shipState = c.billState;
+        c.shipZip = c.billZip;
+      } else {
+        c.shipStreet = d.shipStreet || '';
+        c.shipCity = d.shipCity || '';
+        c.shipState = d.shipState || '';
+        c.shipZip = d.shipZip || '';
+      }
+      c.salesRep = d.salesRep || '';
+      c.paymentTerms = d.paymentTerms || '';
+      c.status = d.status || 'Active';
+      c.notes = d.notes || '';
+      s.customers.unshift(c);
+      logActivity('Added customer', c.name, `via wizard${c.salesRep?` · rep: ${c.salesRep}`:''}${c.paymentTerms?` · ${c.paymentTerms}`:''}`);
+      s.ui.customerWizard = null;
+      s.ui.view = 'customers';
+    });
+    showToast(`Customer "${d.name.trim()}" added.`);
   },
   deleteCustomer(id) {
     if (!confirm('Delete this customer? Existing quotes referencing them will keep working.')) return;
@@ -18017,7 +18638,148 @@ const App = {
   },
   removeMaterial(idx) { update(s => { s.settings.materials.splice(idx, 1); }); },
 
-  addVendor() { update(s => { s.settings.vendors.push({ id:uid(), name:'', contact:'', email:'', phone:'', fax:'', accountNum:'', address:'', notes:'', favorite:false, type:'material', types:['material'], cutProcesses:[], services:[] }); }); },
+  // v7.68: Add Vendor now opens a guided wizard. Old inline-create behavior
+  // (push empty row, scroll-to-bottom) lives in addVendorInline() for any
+  // legacy callers still wired to it.
+  addVendor() { this.openVendorWizard(); },
+  addVendorInline() { update(s => { s.settings.vendors.push({ id:uid(), name:'', contact:'', email:'', phone:'', fax:'', accountNum:'', address:'', notes:'', favorite:false, type:'material', types:['material'], cutProcesses:[], services:[] }); }); },
+
+  openVendorWizard() {
+    update(s => {
+      closeAllModals();
+      s.ui.vendorWizard = {
+        open: true,
+        step: 0,
+        draft: {
+          name:'', contact:'', email:'', phone:'', fax:'', accountNum:'',
+          address:'', notes:'', favorite:false,
+          types: ['material'],
+          services: [],
+          materialIds: [],
+        },
+      };
+    });
+  },
+  closeVendorWizard() {
+    // v7.69: confirm before discarding a non-empty draft so an accidental
+    // backdrop-click or Esc doesn't wipe what the user typed.
+    const d = (state.ui.vendorWizard || {}).draft || {};
+    const hasContent = !!(d.name||d.contact||d.email||d.phone||d.address||d.notes||(d.services||[]).length||(d.materialIds||[]).length);
+    if (hasContent && !confirm('Discard this vendor draft? Anything you typed will be lost.')) return;
+    update(s => { s.ui.vendorWizard = null; });
+    localStorage.removeItem(WIZARD_DRAFTS_KEY);
+  },
+  vendorWizardSet(field, value) {
+    if (!state.ui.vendorWizard) return;
+    state.ui.vendorWizard.draft[field] = value;
+    // For the basics step we re-render on each keystroke only to update the
+    // disabled state of the Next button. Skip render on text inputs where
+    // possible to keep typing snappy — but Next's disabled state needs it.
+    if (field === 'name' || field === 'favorite' || field === 'shipSameAsBill') {
+      renderVendorWizardModal();
+    }
+  },
+  vendorWizardToggleType(t) {
+    if (!state.ui.vendorWizard) return;
+    const d = state.ui.vendorWizard.draft;
+    if (!Array.isArray(d.types)) d.types = [];
+    const i = d.types.indexOf(t);
+    if (i >= 0) d.types.splice(i, 1); else d.types.push(t);
+    // Drop services that no longer match the type set
+    const validCats = new Set();
+    if (d.types.includes('cut')) validCats.add('cut');
+    if (d.types.includes('finishing')) validCats.add('finishing');
+    d.services = (d.services || []).filter(v => {
+      const def = ALL_SERVICES.find(s => s.value === v);
+      return def && validCats.has(def.category);
+    });
+    if (!d.types.includes('material')) d.materialIds = [];
+    renderVendorWizardModal();
+  },
+  vendorWizardToggleService(v) {
+    if (!state.ui.vendorWizard) return;
+    const d = state.ui.vendorWizard.draft;
+    if (!Array.isArray(d.services)) d.services = [];
+    const i = d.services.indexOf(v);
+    if (i >= 0) d.services.splice(i, 1); else d.services.push(v);
+    renderVendorWizardModal();
+  },
+  vendorWizardToggleMaterial(matId) {
+    if (!state.ui.vendorWizard) return;
+    const d = state.ui.vendorWizard.draft;
+    if (!Array.isArray(d.materialIds)) d.materialIds = [];
+    const i = d.materialIds.indexOf(matId);
+    if (i >= 0) d.materialIds.splice(i, 1); else d.materialIds.push(matId);
+    renderVendorWizardModal();
+  },
+  vendorWizardNext() {
+    if (!state.ui.vendorWizard) return;
+    const steps = vendorWizardSteps(state.ui.vendorWizard.draft);
+    const cur = state.ui.vendorWizard.step || 0;
+    if (cur < steps.length - 1) {
+      state.ui.vendorWizard.step = cur + 1;
+      renderVendorWizardModal();
+    }
+  },
+  vendorWizardBack() {
+    if (!state.ui.vendorWizard) return;
+    const cur = state.ui.vendorWizard.step || 0;
+    if (cur > 0) {
+      state.ui.vendorWizard.step = cur - 1;
+      renderVendorWizardModal();
+    }
+  },
+  vendorWizardGoTo(i) {
+    if (!state.ui.vendorWizard) return;
+    state.ui.vendorWizard.step = i;
+    renderVendorWizardModal();
+  },
+  vendorWizardSave() {
+    if (!state.ui.vendorWizard) return;
+    const d = state.ui.vendorWizard.draft;
+    if (!(d.name || '').trim()) { alert('Vendor name is required.'); return; }
+    update(s => {
+      const types = (d.types || []).filter(Boolean);
+      const services = (d.services || []).filter(Boolean);
+      // Legacy `type` field — 'both' if material+cut, otherwise primary
+      const legacyType = types.includes('material') && types.includes('cut') ? 'both'
+                       : types.includes('cut') ? 'cut'
+                       : 'material';
+      const cutProcesses = services.filter(v => {
+        const def = ALL_SERVICES.find(x => x.value === v);
+        return def && def.category === 'cut';
+      });
+      const vendorId = uid();
+      s.settings.vendors.push({
+        id: vendorId,
+        name: d.name.trim(),
+        contact: d.contact || '',
+        email: d.email || '',
+        phone: d.phone || '',
+        fax: d.fax || '',
+        accountNum: d.accountNum || '',
+        address: d.address || '',
+        notes: d.notes || '',
+        favorite: !!d.favorite,
+        type: legacyType,
+        types: types.length ? types : ['material'],
+        cutProcesses,
+        services,
+      });
+      // Wire to selected materials
+      (d.materialIds || []).forEach(matId => {
+        const mIdx = s.settings.materials.findIndex(m => (m.id || '') === matId);
+        const mat = mIdx >= 0 ? s.settings.materials[mIdx] : s.settings.materials[parseInt((matId.match(/^mat_(\d+)$/)||[])[1] || -1, 10)];
+        if (mat) {
+          if (!Array.isArray(mat.vendorIds)) mat.vendorIds = [];
+          if (!mat.vendorIds.includes(vendorId)) mat.vendorIds.push(vendorId);
+        }
+      });
+      logActivity('Added vendor', d.name.trim(), `via wizard · ${types.join('+')}${services.length?` · ${services.length} svc`:''}${(d.materialIds||[]).length?` · ${(d.materialIds||[]).length} mat`:''}`);
+      s.ui.vendorWizard = null;
+    });
+    showToast(`Vendor "${d.name.trim()}" added.`);
+  },
   setVendorSearch(v) {
     state.ui.vendorSearch = v;
     clearTimeout(window._venSearchT);
@@ -21161,6 +21923,8 @@ window.App = App;
 loadState();
 migrateState();
 saveStateLocal();    // persist any migrations (don't push yet)
+loadWizardDrafts();  // v7.69: restore any half-filled "+ Add Vendor / + Add Customer" wizard
+markLastSaved();     // v7.69: stamp the "Saved Xs ago" pill on load
 loadTheme();
 
 // v7.35: Load Outlook persistent state (refresh token + user info) so the
