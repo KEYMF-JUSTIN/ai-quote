@@ -303,6 +303,25 @@
   .wizard-lineitems input { border:1px solid var(--line); background:white; }
   .wizard-lineitems input:focus { border-color:var(--orange); outline:none; }
 
+  /* v7.67: Material dropdown — color-coded category groups via <optgroup>.
+     Browser support for option-level CSS is unreliable, but optgroup labels
+     style consistently. We tint the label bg + bold/uppercase it. The emoji
+     prefix inside groupLabel gives an extra visual cue when the system
+     theme dims the optgroup styling. */
+  select optgroup { font-weight:700; font-style:normal; text-transform:none; letter-spacing:0.04em; padding:4px 0; }
+  select optgroup[label*="Stainless"] { color:#1E5BAE; }
+  select optgroup[label*="Aluminum"]  { color:#16A34A; }
+  select optgroup[label*="Tool"]      { color:#7C3AED; }
+  select optgroup[label*="Alloy"]     { color:#C56B1C; }
+  select optgroup[label*="Carbon"]    { color:#64748B; }
+  select optgroup[label*="Cast"]      { color:#92400E; }
+  select optgroup[label*="Brass"]     { color:#CA8A04; }
+  select optgroup[label*="Copper"]    { color:#DC2626; }
+  select optgroup[label*="Titanium"]  { color:#475569; }
+  select optgroup[label*="Plastic"]   { color:#0EA5E9; }
+  select optgroup[label*="Other"]     { color:#94A3B8; }
+  select optgroup option { color:var(--text); font-weight:normal; padding-left:8px; }
+
   /* v7.61: Type picker modal cards */
   .type-picker-card { display:flex; align-items:stretch; padding:0; background:var(--paper); border:1px solid var(--line-dark); border-radius:5px; cursor:pointer; text-align:left; font:inherit; color:var(--text); overflow:hidden; transition:all 0.12s ease; min-height:80px; }
   .type-picker-card:hover { border-color:var(--type-color, var(--orange)); box-shadow:0 4px 10px rgba(0,0,0,0.08); transform:translateY(-1px); }
@@ -703,7 +722,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.66.0';
+const APP_VERSION = '7.67.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -4388,6 +4407,73 @@ function unitLabel(units) { return units === 'mm' ? 'mm' : 'in'; }
 // CALCULATIONS
 // =================================================================
 function densityFor(name) { const m = state.settings.materials.find(x => x.name === name); return m ? m.density : 0; }
+
+// v7.67: Material categories — used to group the material dropdown into
+// color-coded sections (Steel / Stainless / Aluminum / etc.). Each category
+// has a name-pattern regex for auto-detection, an emoji prefix shown in the
+// option label, and a color used to tint the optgroup label.
+//
+// Patterns are evaluated in order, first match wins. Anything not matching
+// falls into 'Other'. Materials can also carry an explicit `category` field
+// (set in Settings → Materials) which overrides the auto-detection.
+const MATERIAL_CATEGORIES = [
+  { id:'stainless',  label:'Stainless Steel', icon:'✨', color:'#1E5BAE',
+    pattern:/\b(stainless|17-?4|17-?7|13-?8|15-?5|303|304[lL]?|316[lL]?|410|416|420|430|440|2205|2507|nitronic|inconel|monel|hastelloy)\b/i },
+  { id:'aluminum',   label:'Aluminum',        icon:'🪶', color:'#16A34A',
+    pattern:/\b(alum(inum|inium)?|2024|3003|5052|5083|6061[-\s]?T?\d*|6063|7050|7075|MIC[-\s]?6|al\b)\b/i },
+  { id:'tool_steel', label:'Tool Steel',      icon:'⚙', color:'#7C3AED',
+    pattern:/\b(A-?2|A-?6|D-?2|H-?13|M-?2|O-?1|P-?20|S-?7|W-?1|tool\s*steel)\b/i },
+  { id:'alloy_steel',label:'Alloy Steel',     icon:'🔩', color:'#C56B1C',
+    pattern:/\b(4140|4150|4340|4130|4142|4145|8620|9310|6150|52100|chrom(e|oly))\b/i },
+  { id:'carbon_steel',label:'Carbon Steel',   icon:'🔧', color:'#64748B',
+    pattern:/\b(1018|1020|1045|1050|1095|1117|1141|1144|1215|12L14|A36|A572|carbon\s*steel|HR|CR|hot[-\s]?rolled|cold[-\s]?rolled|MS\b|mild\s*steel)\b/i },
+  { id:'cast_iron',  label:'Cast Iron',       icon:'🟫', color:'#92400E',
+    pattern:/\b(cast\s*iron|ductile\s*iron|gray\s*iron|class\s*\d{2})\b/i },
+  { id:'brass',      label:'Brass / Bronze',  icon:'🟨', color:'#CA8A04',
+    pattern:/\b(brass|bronze|C\d{3}|360\s*brass|932|954|aluminum\s*bronze)\b/i },
+  { id:'copper',     label:'Copper',          icon:'🟧', color:'#DC2626',
+    pattern:/\b(copper|cu\b|C110|C145|tellurium)\b/i },
+  { id:'titanium',   label:'Titanium',        icon:'⚪', color:'#475569',
+    pattern:/\b(titan(ium)?|Ti-?6Al-?4V|grade\s*[1-5]\s*ti|cp\s*ti)\b/i },
+  { id:'plastic',    label:'Plastic',         icon:'🟦', color:'#0EA5E9',
+    pattern:/\b(delrin|acetal|nylon|UHMW|HDPE|LDPE|PEEK|PTFE|teflon|polycarb|lexan|acrylic|plexiglas|PVC|ABS|PET|G-?10|garolite|phenolic)\b/i },
+];
+function categorizeMaterial(name, explicitCategory) {
+  if (explicitCategory) {
+    const found = MATERIAL_CATEGORIES.find(c => c.id === explicitCategory);
+    if (found) return found;
+  }
+  if (!name) return { id:'other', label:'Other', icon:'⚙', color:'#94A3B8' };
+  for (const cat of MATERIAL_CATEGORIES) {
+    if (cat.pattern.test(name)) return cat;
+  }
+  return { id:'other', label:'Other', icon:'⚙', color:'#94A3B8' };
+}
+// Return an options array suitable for bind({type:'select'}) — flat optgroup
+// shape: [{ groupLabel: 'Steel', options: ['1018', '4140', ...] }, ...]
+// Categories present in the list appear in MATERIAL_CATEGORIES order; empty
+// categories are skipped. Within each group, names are sorted alphabetically.
+function groupedMaterialOptions(materials) {
+  if (!Array.isArray(materials) || materials.length === 0) return [];
+  const buckets = new Map();
+  materials.forEach(m => {
+    const cat = categorizeMaterial(m.name, m.category);
+    if (!buckets.has(cat.id)) buckets.set(cat.id, { cat, names: [] });
+    buckets.get(cat.id).names.push(m.name);
+  });
+  const orderedIds = [...MATERIAL_CATEGORIES.map(c => c.id), 'other'];
+  const out = [];
+  for (const id of orderedIds) {
+    if (!buckets.has(id)) continue;
+    const b = buckets.get(id);
+    b.names.sort((a, b) => a.localeCompare(b));
+    out.push({
+      groupLabel: `${b.cat.icon}  ${b.cat.label}`,
+      options: b.names,
+    });
+  }
+  return out;
+}
 function setupRateFor(name) { const r = state.settings.rates.find(x => x.name === name); return r ? num(r.setupRate ?? r.rate) : 0; }
 function runRateFor(name) { const r = state.settings.rates.find(x => x.name === name); return r ? num(r.runRate ?? r.rate) : 0; }
 function num(v) { const n = parseFloat(v); return isFinite(n) ? n : 0; }
@@ -5367,9 +5453,19 @@ function bind(props) {
 
   let html;
   if (type === 'select') {
-    const opts = props.options.map(o => {
+    // v7.67: support optgroup-style options. An option entry shaped like
+    // { groupLabel, options: [...] } renders as <optgroup>; everything else
+    // falls through to the original string|{value,label} pattern.
+    const renderOpt = (o) => {
       if (typeof o === 'string') return `<option value="${esc(o)}" ${o===props.value?'selected':''}>${esc(o)}</option>`;
       return `<option value="${esc(o.value)}" ${o.value===props.value?'selected':''}>${esc(o.label)}</option>`;
+    };
+    const opts = props.options.map(o => {
+      if (o && typeof o === 'object' && Array.isArray(o.options)) {
+        const inner = o.options.map(renderOpt).join('');
+        return `<optgroup label="${esc(o.groupLabel || '')}">${inner}</optgroup>`;
+      }
+      return renderOpt(o);
     }).join('');
     html = `<select id="${id}" ${props.attrs||''}><option value="">${esc(props.placeholder||'—')}</option>${opts}</select>`;
   } else if (type === 'textarea') {
@@ -13271,8 +13367,9 @@ function renderDxfCard(q, p) {
   const files = p.dxfFiles || [];
   const isOpen = isSectionOpen(p.id, 'dxf', files.length > 0);
   // v7.55: material dropdown options for per-DXF cut material spec
+  // v7.67: grouped by category for color-coded visual scan
   const matOpts = (state.settings && Array.isArray(state.settings.materials))
-    ? state.settings.materials.map(m => m.name)
+    ? groupedMaterialOptions(state.settings.materials)
     : [];
   const cutVendors = (state.settings.vendors || []).filter(v => vendorTypes(v).includes('cut'));
   cutVendors.sort((a,b) => {
@@ -13600,7 +13697,8 @@ function renderSimilarPartsCard(q, p) {
 }
 
 function renderPartEditor(q, p) {
-  const matOpts = state.settings.materials.map(m => m.name);
+  // v7.67: grouped by category (Steel / Stainless / Aluminum / etc.) for the dropdown
+  const matOpts = groupedMaterialOptions(state.settings.materials || []);
   const machineOpts = state.settings.rates.map(r => r.name);
   const u = p.stock.units || 'in';
   const ul = unitLabel(u);
