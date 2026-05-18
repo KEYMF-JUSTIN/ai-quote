@@ -601,7 +601,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.54.0';
+const APP_VERSION = '7.55.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -1117,6 +1117,11 @@ function migrateState() {
       if (p.csmHandlingFeePct === undefined) p.csmHandlingFeePct = null;
       if (p.csmNotes === undefined) p.csmNotes = '';
       if (!Array.isArray(p.dxfFiles)) p.dxfFiles = [];
+      // v7.55: backfill DXF row material/thickness fields for existing rows
+      p.dxfFiles.forEach(f => {
+        if (f.material === undefined) f.material = '';
+        if (f.thicknessIn === undefined) f.thicknessIn = null;
+      });
       if (!Array.isArray(p.specialtyTooling)) p.specialtyTooling = [];
       // v7.26: per-item opt-in for showing tooling on customer PDF
       p.specialtyTooling.forEach(t => {
@@ -2566,6 +2571,14 @@ function newDxfFile() {
     pricePerPiece: null,  // $/piece quoted by the cut vendor
     setupCost: 0,         // one-time setup/programming charge
     notes: '',
+    // v7.55: cut-blank material/thickness lives on the DXF row itself.
+    // For cut-only parts (where the DXF IS the part), the part-level material
+    // and stock.partHeight are usually empty — the cut vendor needs material
+    // spec + thickness, and that belongs on the DXF row, not the part header.
+    // The AI estimator (App.estimateDxfRow) reads these first, falls back to
+    // part.material + part.stock.partHeight if unset.
+    material: '',          // material spec for this cut (e.g. "A36", "1018", "304 SS", "6061-T6")
+    thicknessIn: null,     // plate thickness in inches (vendor needs this to price)
   };
 }
 function newSpecialtyTool() {
@@ -11997,6 +12010,10 @@ function renderOutsideServicesCard(q, p) {
 function renderDxfCard(q, p) {
   const files = p.dxfFiles || [];
   const isOpen = isSectionOpen(p.id, 'dxf', files.length > 0);
+  // v7.55: material dropdown options for per-DXF cut material spec
+  const matOpts = (state.settings && Array.isArray(state.settings.materials))
+    ? state.settings.materials.map(m => m.name)
+    : [];
   const cutVendors = (state.settings.vendors || []).filter(v => vendorTypes(v).includes('cut'));
   cutVendors.sort((a,b) => {
     if (!!a.favorite !== !!b.favorite) return a.favorite ? -1 : 1;
@@ -12035,12 +12052,14 @@ function renderDxfCard(q, p) {
           ` : `
             <table class="tbl">
               <thead><tr>
-                <th style="width:22%;">Filename</th>
-                <th style="width:12%;">Process</th>
-                <th style="width:18%;">Cut Vendor</th>
-                <th class="num" style="width:8%;">Qty / part</th>
-                <th class="num" style="width:11%;">$ / piece</th>
-                <th class="num" style="width:11%;">Setup (NRE)</th>
+                <th style="width:16%;">Filename</th>
+                <th style="width:11%;">Process</th>
+                <th style="width:14%;">Cut Vendor</th>
+                <th style="width:11%;">Material</th>
+                <th class="num" style="width:7%;">Thk (in)</th>
+                <th class="num" style="width:7%;">Qty / part</th>
+                <th class="num" style="width:10%;">$ / piece</th>
+                <th class="num" style="width:9%;">Setup (NRE)</th>
                 <th>Notes</th>
                 <th class="action"></th>
               </tr></thead>
@@ -12056,16 +12075,24 @@ function renderDxfCard(q, p) {
                   const canEstimate = !!f.process && !!p.material;
                   const isEstimating = f._aiEstimating === true;
                   const aiBadge = f._aiEstimate ? `<div class="text-mute small" style="font-size:10px; line-height:1.2; margin-top:2px;" title="${esc(f._aiEstimate.reasoning || '')}">✨ AI · ${esc(f._aiEstimate.confidence || '')}${f._aiEstimate.perPieceRangeLow != null && f._aiEstimate.perPieceRangeHigh != null ? ' · '+fmtMoney(f._aiEstimate.perPieceRangeLow)+'-'+fmtMoney(f._aiEstimate.perPieceRangeHigh) : ''}</div>` : '';
+                  // v7.55: estimator now works if EITHER the DXF row carries
+                  // material+thickness OR the part header does. Default behavior
+                  // for cut-only parts is to skip part.material and put it here.
+                  const effectiveMat   = f.material   || p.material   || '';
+                  const effectiveThick = num(f.thicknessIn) || num(p.stock && p.stock.partHeight) || 0;
+                  const canEstimate2   = !!f.process && !!effectiveMat;
                   return `
                     <tr>
                       <td>${bind({label:'DXF filename',value:f.filename, onChange:v=>{p.dxfFiles[fi].filename=v;}, placeholder:'BRACKET-PLATE.dxf'})}</td>
                       <td>${bind({label:'Cut process',value:f.process, type:'select', options:procOpts, onChange:v=>{p.dxfFiles[fi].process=v;}})}</td>
                       <td>${bind({label:'Cut vendor',value:f.vendorId||'', type:'select', options:vendorOpts, placeholder:matchingVendors.length===0?'(no vendor for this process)':'— pick —', onChange:v=>{p.dxfFiles[fi].vendorId=v||null;}})}</td>
+                      <td>${bind({label:'Cut material',value:f.material||'', type:'select', options:matOpts, placeholder:p.material ? '(uses part: ' + p.material + ')' : '— pick —', onChange:v=>{p.dxfFiles[fi].material=v;}})}</td>
+                      <td class="num">${bind({label:'Thickness',value:f.thicknessIn, type:'number', placeholder:(p.stock&&p.stock.partHeight)?String(p.stock.partHeight):'', onChange:v=>{p.dxfFiles[fi].thicknessIn=v;}, attrs:'step="any" min="0"'})}</td>
                       <td class="num">${bind({label:'Qty per part',value:f.qtyPerPart, type:'number', onChange:v=>{p.dxfFiles[fi].qtyPerPart=v;}, attrs:'step="1" min="1"'})}</td>
                       <td class="num">
                         ${bind({label:'Price per piece',value:f.pricePerPiece, type:'number', onChange:v=>{p.dxfFiles[fi].pricePerPiece=v; p.dxfFiles[fi]._aiEstimate=null;}, attrs:'step="any" min="0"'})}
                         ${aiBadge}
-                        <button class="btn btn-sm" style="margin-top:3px; font-size:10px; padding:2px 6px; white-space:nowrap;" ${(!canEstimate || isEstimating) ? 'disabled' : ''} onclick="App.estimateDxfRow('${p.id}',${fi})" title="${canEstimate ? 'Get an AI cost estimate based on process, material, and part dimensions' : 'Set Process and ensure the part has a Material first'}">
+                        <button class="btn btn-sm" style="margin-top:3px; font-size:10px; padding:2px 6px; white-space:nowrap;" ${(!canEstimate2 || isEstimating) ? 'disabled' : ''} onclick="App.estimateDxfRow('${p.id}',${fi})" title="${canEstimate2 ? 'Get an AI cost estimate based on process, material, and part dimensions' : 'Set Process and Material first (on this row, or at the part level)'}">
                           ${isEstimating ? '⏳ Estimating…' : '✨ Get AI Estimate'}
                         </button>
                       </td>
@@ -12076,7 +12103,7 @@ function renderDxfCard(q, p) {
                   `;
                 }).join('')}
                 <tr class="total">
-                  <td colspan="4"><strong>DXF SUBTOTAL / PART</strong></td>
+                  <td colspan="6"><strong>DXF SUBTOTAL / PART</strong></td>
                   <td class="num"><strong>${fmtMoney(perPartTotal)}</strong></td>
                   <td class="num text-mute small">${setupTotal > 0 ? 'Setup: ' + fmtMoney(setupTotal) + ' (NRE)' : ''}</td>
                   <td colspan="2"></td>
@@ -15469,6 +15496,58 @@ const App = {
       p.dxfFiles.splice(idx, 1);
     });
   },
+  // v7.55: drop CAD files (DWG / DXF / STEP / SLDPRT / etc.) directly onto
+  // the active quote view — auto-creates one DXF cut entry per file on the
+  // active part (or first part), pre-fills filename, guesses process from
+  // file extension. Reads ASCII DXF content if available and pushes a few
+  // hints into the notes field; binary formats just land as filename.
+  async dropCadFilesToActivePart(fileList) {
+    const q = getActiveQuote();
+    if (!q) { alert('Open a quote first, then drop CAD files on it.'); return; }
+    if (!fileList || fileList.length === 0) return;
+    // Resolve target part — prefer the part currently being edited in the tab,
+    // otherwise default to the first part.
+    let targetPartId = null;
+    const t = state.ui.activeQuoteTab || '';
+    if (t.startsWith('part-')) targetPartId = t.slice(5);
+    if (!targetPartId && q.parts && q.parts[0]) targetPartId = q.parts[0].id;
+    if (!targetPartId) { alert('No parts on this quote yet — add a part first.'); return; }
+    // Build the rows. ASCII DXF files (text) can be quickly scanned for
+    // header HEADER section to grab $ACADVER / units; we keep this lightweight.
+    const newRows = [];
+    for (const file of fileList) {
+      const m = file.name.match(/\.(dwg|dxf|step|stp|iges|igs|sldprt|sldasm|slddrw|stl)$/i);
+      if (!m) continue;  // not a CAD file
+      const ext = m[1].toLowerCase();
+      // Guess default process from common shop conventions
+      let guess = 'laser';
+      if (ext === 'dwg' || ext === 'dxf') guess = 'laser';      // flat 2D usually
+      if (ext === 'step' || ext === 'stp' || ext === 'iges' || ext === 'igs') guess = 'waterjet';
+      if (ext === 'sldprt' || ext === 'sldasm' || ext === 'slddrw' || ext === 'stl') guess = 'machining';
+      const row = newDxfFile();
+      row.filename = file.name;
+      row.process  = guess;
+      row.notes    = `Dropped on ${new Date().toISOString().slice(0,10)} · ${file.size} bytes`;
+      newRows.push(row);
+    }
+    if (newRows.length === 0) return;
+    update(s => {
+      const quote = s.quotes.find(x => x.id === q.id);
+      if (!quote) return;
+      const part = quote.parts.find(x => x.id === targetPartId);
+      if (!part) return;
+      if (!Array.isArray(part.dxfFiles)) part.dxfFiles = [];
+      part.dxfFiles.push(...newRows);
+      // Open the DXF section so the rows are visible right away
+      if (!s.ui.partSections) s.ui.partSections = {};
+      if (!s.ui.partSections[part.id]) s.ui.partSections[part.id] = {};
+      s.ui.partSections[part.id].dxf = true;
+      // Switch to the part editor if user wasn't already in it
+      if (!t.startsWith('part-')) s.ui.activeQuoteTab = 'part-' + part.id;
+    });
+    showToast(`Added ${newRows.length} DXF cut entr${newRows.length===1?'y':'ies'}. Set material, thickness, and vendor, then click ✨ Get AI Estimate.`, 5000);
+  },
+
   // v7.53: Call the Worker's estimate-outside-service endpoint for this DXF
   // row. Inputs come from: the part's material + dimensions + qty[0] from the
   // first tier, plus the DXF row's process + qtyPerPart + any thickness/material
@@ -15480,19 +15559,28 @@ const App = {
     const row = part && (part.dxfFiles || [])[idx];
     if (!part || !row) return;
     if (!row.process) { showToast('Set the Process first (laser / waterjet / plasma / etc.)', 3000); return; }
-    if (!part.material) { showToast('Set the part Material first', 3000); return; }
-    // Pull thickness/material override from notes if user (or Claude) parked it there
+    // v7.55: material/thickness can live on the DXF row OR on the part header.
+    // Prefer row-level since for cut-only parts the part header is often blank.
+    // Also still check notes for legacy "Mat:" / "Thk:" fields parked there
+    // by earlier Claude suggestions.
     const noteThickMatch = (row.notes || '').match(/Thk[:\s]*([\d.]+)/i);
     const noteMatMatch   = (row.notes || '').match(/Mat[:\s]*([^·\n]+)/i);
-    const thickness = noteThickMatch ? parseFloat(noteThickMatch[1]) : num(part.stock && part.stock.partHeight);
-    const materialOverride = noteMatMatch ? noteMatMatch[1].trim() : '';
+    const effectiveMaterial = row.material
+      || (noteMatMatch ? noteMatMatch[1].trim() : '')
+      || part.material
+      || '';
+    const effectiveThickness = num(row.thicknessIn)
+      || (noteThickMatch ? parseFloat(noteThickMatch[1]) : 0)
+      || num(part.stock && part.stock.partHeight)
+      || 0;
+    if (!effectiveMaterial) { showToast('Set a material on the DXF row or the part header first', 3500); return; }
     const firstTierQty = (part.qtyTiers && part.qtyTiers[0]) || 1;
     const totalQty = num(firstTierQty) * (num(row.qtyPerPart) || 1);
     const vendor = (state.settings.vendors || []).find(v => v.id === row.vendorId);
     const payload = {
       process: row.process,
-      material: materialOverride || part.material,
-      thicknessIn: thickness || null,
+      material: effectiveMaterial,
+      thicknessIn: effectiveThickness || null,
       lengthIn: num(part.stock && part.stock.partLength) || null,
       widthIn: num(part.stock && part.stock.partWidth) || null,
       qty: totalQty,
@@ -18761,10 +18849,11 @@ Online Metals,Brass,Round,1.25 dia,per_lb,5.20`;
       row.filename     = dxf.filename || '';
       if (dxf.suggestedProcess) row.process = dxf.suggestedProcess;
       if (dxf.qtyPerPart) row.qtyPerPart = num(dxf.qtyPerPart) || 1;
-      // Park material/thickness hints in notes so they're visible when estimating later
+      // v7.55: route material/thickness to the new first-class row fields
+      if (dxf.materialNote) row.material = dxf.materialNote;
+      if (dxf.thicknessIn)  row.thicknessIn = num(dxf.thicknessIn);
+      // Notes keep just the free-text + Claude's reasoning quote
       const noteBits = [];
-      if (dxf.materialNote) noteBits.push('Mat: ' + dxf.materialNote);
-      if (dxf.thicknessIn)  noteBits.push('Thk: ' + dxf.thicknessIn + '"');
       if (dxf.notes)        noteBits.push(dxf.notes);
       if (dxf.reasoning)    noteBits.push('From email: "' + dxf.reasoning + '"');
       if (noteBits.length)  row.notes = noteBits.join(' · ');
@@ -19443,6 +19532,16 @@ setTimeout(() => {
     const isMsg = /\.msg$/i.test(file.name) || /vnd\.ms-outlook/i.test(file.type || '');
     const isSpreadsheet = /\.(xlsx|xlsm|xls|csv|tsv)$/i.test(file.name) ||
       /spreadsheet|excel|csv/i.test(file.type || '');
+    // v7.55: dropping CAD/engineering files directly onto the active quote
+    // creates a DXF cut entry per file on the first part (or the open part if
+    // we're in the part editor). Routes laser/waterjet/plasma work into the
+    // outside-services pipeline without having to manually click "+ Add DXF".
+    const isCad = /\.(dwg|dxf|step|stp|iges|igs|sldprt|sldasm|slddrw|stl)$/i.test(file.name);
+    if (isCad && state.ui.view === 'quote') {
+      e.preventDefault();
+      App.dropCadFilesToActivePart(e.dataTransfer.files);
+      return;
+    }
     // v7.31/v7.33: .msg dropped → either RFQ Inbox or per-quote import modal
     if (isMsg) {
       e.preventDefault();
