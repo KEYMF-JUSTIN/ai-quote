@@ -703,7 +703,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.65.1';
+const APP_VERSION = '7.65.2';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -1339,13 +1339,41 @@ function migrateState() {
   // that v7.63+ will pass to Claude as few-shot examples for that entity's
   // future docs. Receipts ride under the vendor record (Home Depot, Amazon,
   // etc. as vendors); RFQs/POs ride under the customer record.
+  // v7.65.2: backfill unified references.docNum + dates.docDate on existing
+  // samples so the wizard reads them at the correct path. Earlier Worker
+  // versions wrote to type-specific keys (orderNum, invoiceNum, etc.) which
+  // didn't match the wizard's docNum/docDate schema — every prior sample
+  // looked "blank" in the wizard. This migration copies whichever
+  // type-specific value is present into the unified field.
+  function _backfillTrainingDocFields(samples) {
+    if (!Array.isArray(samples)) return;
+    samples.forEach(s => {
+      const f = s && s.parsedFields;
+      if (!f || typeof f !== 'object') return;
+      if (!f.references) f.references = {};
+      if (!f.dates) f.dates = {};
+      // docNum ← whichever type-specific id is present
+      if (!f.references.docNum) {
+        f.references.docNum = f.references.orderNum || f.references.invoiceNum
+          || f.references.packingNum || f.references.rfqNum
+          || (s.docType === 'quote' && f.references.poNum)  // quotes sometimes show only their own quote # under poNum-ish slots
+          || '';
+      }
+      // docDate ← whichever type-specific date is present
+      if (!f.dates.docDate) {
+        f.dates.docDate = f.dates.orderDate || f.dates.invoiceDate || f.dates.shipDate || '';
+      }
+    });
+  }
   (state.settings && state.settings.vendors || []).forEach(v => {
     if (!v.extractionTraining) v.extractionTraining = { samples: [], lastTrainedAt: null };
     if (!Array.isArray(v.extractionTraining.samples)) v.extractionTraining.samples = [];
+    _backfillTrainingDocFields(v.extractionTraining.samples);
   });
   (state.customers || []).forEach(c => {
     if (!c.extractionTraining) c.extractionTraining = { samples: [], lastTrainedAt: null };
     if (!Array.isArray(c.extractionTraining.samples)) c.extractionTraining.samples = [];
+    _backfillTrainingDocFields(c.extractionTraining.samples);
   });
 }
 
