@@ -601,7 +601,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.58.0';
+const APP_VERSION = '7.59.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -5039,6 +5039,22 @@ function renderHeaderConnPill() {
 }
 
 function render() {
+  // v7.59: snapshot scroll position + focused input BEFORE we rebuild the DOM
+  // so a re-render triggered by typing a single character doesn't bounce the
+  // user back to scrollY=0 and steal focus. Restored at the end of render().
+  // Especially important since v7.57 inlined all parts on one big page — a
+  // full re-render now spans 1000s of pixels, not just one tab's worth.
+  const _prevScrollY = window.scrollY || window.pageYOffset || 0;
+  const _prevScrollX = window.scrollX || window.pageXOffset || 0;
+  const _focusedEl = document.activeElement;
+  let _focusInfo = null;
+  if (_focusedEl && _focusedEl.id && (_focusedEl.tagName === 'INPUT' || _focusedEl.tagName === 'TEXTAREA' || _focusedEl.tagName === 'SELECT')) {
+    _focusInfo = {
+      id: _focusedEl.id,
+      selStart: (_focusedEl.selectionStart != null) ? _focusedEl.selectionStart : null,
+      selEnd:   (_focusedEl.selectionEnd != null)   ? _focusedEl.selectionEnd   : null,
+    };
+  }
   // clear bindings registry every render
   Object.keys(_bindings).forEach(k => delete _bindings[k]);
   renderHeaderConnPill();
@@ -5089,6 +5105,33 @@ function render() {
   const inviteHost = document.getElementById('invite-modal-host');
   if (inviteHost) {
     inviteHost.innerHTML = renderInviteDialog() + renderAcceptInviteDialog();
+  }
+  // v7.59: restore scroll position + re-focus the input the user was typing in.
+  // Because we cleared _bindings and rebuilt DOM, the bound input now has a
+  // NEW id (the bind() id is generated fresh each render). The OLD id won't
+  // resolve to anything. Two strategies, in order:
+  //   1. If the new DOM has a SAME-id node still focused (rare — happens for
+  //      static inputs we built without bind, like search boxes with a stable id),
+  //      just re-focus it.
+  //   2. For bind()-generated inputs, the id changes every render. We can't
+  //      re-acquire focus on the new element by id. Instead we use the
+  //      attachBindings _refocus hook below which tracks the LAST typed-into
+  //      input via data-bind-key.
+  if (_focusInfo) {
+    const target = document.getElementById(_focusInfo.id);
+    if (target && typeof target.focus === 'function') {
+      try {
+        target.focus();
+        if (_focusInfo.selStart != null && typeof target.setSelectionRange === 'function') {
+          target.setSelectionRange(_focusInfo.selStart, _focusInfo.selEnd != null ? _focusInfo.selEnd : _focusInfo.selStart);
+        }
+      } catch (_) { /* select elements throw on setSelectionRange — ignore */ }
+    }
+  }
+  // Restore scroll. Use window.scrollTo (async/instant) so it doesn't fight
+  // smooth-scroll the user may have triggered via App.scrollToPart.
+  if (_prevScrollY > 0 || _prevScrollX > 0) {
+    window.scrollTo(_prevScrollX, _prevScrollY);
   }
 }
 
@@ -11824,7 +11867,7 @@ function renderSetupsCard(q, p, machineOpts) {
           <div class="setup-block-header">
             <div style="flex:1; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
               <span class="setup-pill">${esc(st.name || 'Setup ' + (si+1))}</span>
-              <input class="setup-name-input" value="${esc(st.name||'')}" placeholder="Setup name (e.g. OP10)" oninput="App.setSetupField('${p.id}','${st.id}','name',this.value)" style="width:160px; padding:4px 8px; font-size:13px;">
+              <input class="setup-name-input" value="${esc(st.name||'')}" placeholder="Setup name (e.g. OP10)" onchange="App.setSetupField('${p.id}','${st.id}','name',this.value)" style="width:160px; padding:4px 8px; font-size:13px;">
             </div>
             <div class="header-actions">
               <button class="btn btn-sm" title="Add operation" onclick="App.addSetupOp('${p.id}','${st.id}')">+ Op</button>
@@ -12179,7 +12222,7 @@ function renderDxfCard(q, p) {
                       <td>${bind({label:'Cut process',value:f.process, type:'select', options:procOpts, onChange:v=>{p.dxfFiles[fi].process=v;}})}</td>
                       <td>${bind({label:'Cut vendor',value:f.vendorId||'', type:'select', options:vendorOpts, placeholder:matchingVendors.length===0?'(no vendor for this process)':'— pick —', onChange:v=>{p.dxfFiles[fi].vendorId=v||null;}})}</td>
                       <td>${bind({label:'Cut material',value:f.material||'', type:'select', options:matOpts, placeholder:p.material ? '(uses part: ' + p.material + ')' : '— pick —', onChange:v=>{p.dxfFiles[fi].material=v;}})}</td>
-                      <td class="num">${bind({label:'Thickness',value:f.thicknessIn, type:'number', placeholder:(p.stock&&p.stock.partHeight)?String(p.stock.partHeight):'', onChange:v=>{p.dxfFiles[fi].thicknessIn=v;}, attrs:'step="any" min="0"'})}</td>
+                      <td class="num">${bind({label:'Thickness',value:f.thicknessIn, type:'number', placeholder:(p.stock&&p.stock.partHeight)?String(p.stock.partHeight):'', onChange:v=>{p.dxfFiles[fi].thicknessIn=v;}, attrs:'step="0.125" min="0"'})}</td>
                       <td class="num">${bind({label:'Qty per part',value:f.qtyPerPart, type:'number', onChange:v=>{p.dxfFiles[fi].qtyPerPart=v;}, attrs:'step="1" min="1"'})}</td>
                       <td class="num">
                         ${bind({label:'Price per piece',value:f.pricePerPiece, type:'number', onChange:v=>{p.dxfFiles[fi].pricePerPiece=v; p.dxfFiles[fi]._aiEstimate=null;}, attrs:'step="any" min="0"'})}
@@ -12613,7 +12656,7 @@ function renderPartEditor(q, p) {
           <div class="field"><label>Stock Form</label>${bind({value:p.stock.form, type:'select', options:STOCK_FORMS, onChange:v=>{p.stock.form=v||'Bar/Block';}})}</div>
           <div class="field"><label>Part Length (${ul})</label>${bind({label:'Part length',value:dispLen, type:'number', format:fmt2, onChange:v=>{p.stock.partLength=toIn(v,u);}, attrs:'step="any" min="0"'})}</div>
           <div class="field"><label>${p.stock.form==='Round'?'Diameter':'Width'} (${ul})</label>${bind({label:p.stock.form==='Round'?'Diameter':'Width',value:dispW, type:'number', format:fmt2, onChange:v=>{p.stock.partWidth=toIn(v,u);}, attrs:'step="any" min="0"'})}</div>
-          <div class="field"><label>${p.stock.form==='Round'?'(n/a)':'Height/Thickness ('+ul+')'}</label>${bind({label:'Height/Thickness',value:dispH, type:'number', format:fmt2, onChange:v=>{p.stock.partHeight=toIn(v,u);}, attrs:'step="any" min="0"'+(p.stock.form==='Round'?' disabled':'')})}</div>
+          <div class="field"><label>${p.stock.form==='Round'?'(n/a)':'Height/Thickness ('+ul+')'}</label>${bind({label:'Height/Thickness',value:dispH, type:'number', format:fmt2, onChange:v=>{p.stock.partHeight=toIn(v,u);}, attrs:'step="0.125" min="0"'+(p.stock.form==='Round'?' disabled':'')})}</div>
           <div class="field"><label>Material Allowance %</label>${bind({label:'Allowance %',value:(num(p.stock.allowance)*100).toFixed(1), type:'number', onChange:v=>{p.stock.allowance=(v??0)/100;}, attrs:'step="0.5" min="0"'})}<div class="hint">general waste added to weight per piece</div></div>
           <div class="field"><label>Density (lb/in³)</label><input type="text" disabled value="${fmtNum(densityFor(p.material),3)}"><div class="hint">auto from material</div></div>
           ${p.stock.form !== 'Sheet' ? `
