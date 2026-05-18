@@ -223,6 +223,20 @@
   .claude-section > div[style*="background:white"] { color:#0F172A; }
   .claude-section ul li { color:#0F172A; }
 
+  /* v7.60: Parts chip selector — horizontal row above the active part editor */
+  .parts-chips { display:flex; flex-wrap:wrap; gap:6px; align-items:center; padding:8px 10px; background:var(--bg); border:1px solid var(--line-dark); border-radius:3px; margin-bottom:12px; }
+  .parts-chips-label { font-family:var(--font-display); font-size:10px; letter-spacing:0.14em; color:var(--steel); font-weight:700; margin-right:6px; }
+  .parts-chip { display:inline-flex; align-items:center; gap:6px; padding:4px 10px 4px 6px; background:var(--paper); border:1px solid var(--line-dark); border-radius:14px; cursor:pointer; font-size:12px; color:var(--text); transition:all 0.12s ease; }
+  .parts-chip:hover:not(:disabled) { border-color:var(--orange); background:#FFF7ED; }
+  .parts-chip.active { background:var(--orange); color:white; border-color:var(--orange); font-weight:600; }
+  .parts-chip.active:hover { background:var(--orange); color:white; }
+  .parts-chip-num { display:inline-flex; align-items:center; justify-content:center; min-width:18px; height:18px; padding:0 4px; background:var(--steel); color:white; border-radius:9px; font-size:10px; font-weight:700; font-family:var(--font-mono); }
+  .parts-chip.active .parts-chip-num { background:white; color:var(--orange); }
+  .parts-chip-label { line-height:1.2; }
+  .parts-chip-add { border-style:dashed; color:var(--steel); }
+  .parts-chip-add:hover { color:var(--orange); border-style:solid; }
+  .parts-chip:disabled { cursor:not-allowed; }
+
   /* v7.50: Similar Parts analytics grid */
   .similar-analytics { display:grid; grid-template-columns:repeat(6, 1fr); gap:8px; padding:8px; background:var(--bg); border:1px solid var(--line); border-radius:3px; }
   .similar-analytics > div { display:flex; flex-direction:column; gap:2px; }
@@ -601,7 +615,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.59.0';
+const APP_VERSION = '7.60.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -826,7 +840,8 @@ const state = {
     msgImport: null,            // v7.31: { filename, parsed, matches, partHints, pdfUrls } — RFQ-from-email import modal
     healthCheckOpen: {},        // v7.50: per-quote expand state for the Health Check card, keyed 'hc_'+quoteId
     similarPartsOpen: {},       // v7.50: per-part expand state for the Similar Parts card, keyed 'sim_'+partId
-    partsExpanded: {},          // v7.57: per-part expand state for inline parts on Quote Info page, keyed partId
+    partsExpanded: {},          // v7.57: per-part expand state for inline parts on Quote Info page, keyed partId (deprecated by v7.60 chip selector but kept for migration safety)
+    activePartIdForInfo: {},    // v7.60: per-quote chip selector — which part is currently visible on the Quote Info page, keyed quoteId
     activePurchaseId: null,     // v7.50: currently-open purchase in the Purchasing workspace
     purchaseFilters: { search:'', hiddenStatuses:[], vendor:'all' },
     activeInboxEntryId: null,   // v7.33: which RFQ Inbox entry is expanded
@@ -11429,10 +11444,10 @@ function renderQuoteInfo(q) {
   `;
 }
 
-// v7.57: render every part on the quote as a collapsible card inline on the
-// Info page (instead of forcing a tab switch). First part defaults to expanded,
-// rest collapsed. Click header to toggle. The "+ Add Part" + per-part actions
-// (Duplicate / Remove) live in each card's header strip.
+// v7.60: render parts as a chip-selected tab view — ONE part visible at a time.
+// Replaces the v7.57 all-stacked layout which produced duplicate-looking cards
+// (Machine Setups + Material Stock × N parts). Single-part quotes skip the chip
+// row entirely. Active part persists per-quote via state.ui.activePartIdForInfo.
 function renderInlineParts(q) {
   if (!q || !Array.isArray(q.parts) || q.parts.length === 0) {
     return `
@@ -11443,45 +11458,70 @@ function renderInlineParts(q) {
     `;
   }
   const lockedSingle = q.kind === 'machining' && q.parts.length >= 1;
-  if (!state.ui.partsExpanded) state.ui.partsExpanded = {};
+  if (!state.ui.activePartIdForInfo) state.ui.activePartIdForInfo = {};
+  // Resolve the active part: stored choice if still valid, else first part
+  let activeId = state.ui.activePartIdForInfo[q.id];
+  if (!activeId || !q.parts.find(p => p.id === activeId)) activeId = q.parts[0].id;
+  const activePart = q.parts.find(p => p.id === activeId);
+  const activeIdx  = q.parts.findIndex(p => p.id === activeId);
+
+  // Chip selector — only shown when more than one part on the quote
+  const chips = q.parts.length <= 1 ? '' : `
+    <div class="parts-chips no-print">
+      <span class="parts-chips-label">PART:</span>
+      ${q.parts.map((p, i) => {
+        const isActive = p.id === activeId;
+        const label = p.partNum ? esc(p.partNum) : `Part ${i+1}`;
+        const sub   = (p.partNum && p.description) ? ` · ${esc(p.description.slice(0,30))}${p.description.length>30?'…':''}` : '';
+        return `
+          <button class="parts-chip ${isActive?'active':''}" onclick="App.selectPartChip('${q.id}','${p.id}')" title="${esc(p.description || '')}">
+            <span class="parts-chip-num">${i+1}</span>
+            <span class="parts-chip-label">${label}${sub}</span>
+          </button>
+        `;
+      }).join('')}
+      ${lockedSingle
+        ? `<button class="parts-chip" disabled style="opacity:0.5;" title="Single-part machining quote — change quote type if you want multiple parts">+ Add (locked)</button>`
+        : `<button class="parts-chip parts-chip-add" onclick="App.addPart()" title="Add a new part to this quote">+ Add Part</button>`
+      }
+    </div>
+  `;
+
+  // The active part's editor block
+  const partNumLabel = activePart.partNum ? esc(activePart.partNum) : '(no part #)';
+  const descLabel    = activePart.description ? esc(activePart.description) : '(no description)';
+  const matLabel     = activePart.material ? esc(materialLabelFor(activePart)) : '';
+  const firstTierUnit = unitPriceAt(activePart, 0);
   return `
     <div class="section-divider" id="parts-section">
       <span class="label">Parts (${q.parts.length})</span>
-      <span class="hint-text">click a header to expand · ${q.parts.length === 1 ? 'one part' : 'all parts on this quote'}</span>
+      <span class="hint-text">${q.parts.length === 1 ? 'one part on this quote' : `viewing Part ${activeIdx+1} of ${q.parts.length} · click a chip below to switch`}</span>
     </div>
-    ${q.parts.map((p, i) => {
-      const explicit = state.ui.partsExpanded['part_' + p.id];
-      const isOpen = explicit != null ? explicit : (i === 0);  // first part open by default
-      const partNumLabel = p.partNum ? esc(p.partNum) : '(no part #)';
-      const descLabel    = p.description ? esc(p.description) : '(no description)';
-      const matLabel     = p.material ? esc(materialLabelFor(p)) : '';
-      const firstTierUnit = unitPriceAt(p, 0);
-      return `
-        <div class="card part-card" id="part-anchor-${p.id}" style="margin-bottom:14px; border-left:4px solid ${isOpen ? 'var(--orange)' : 'var(--line-dark)'};">
-          <div class="card-header" style="cursor:pointer; ${isOpen ? '' : 'background:#FAFAF7; color:var(--text);'}" onclick="App.togglePartExpanded('${p.id}')">
-            <span style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
-              <span style="font-size:14px;">${isOpen ? '▾' : '▸'}</span>
-              <span style="font-family:var(--font-display); letter-spacing:0.04em;">PART ${i+1}</span>
-              <span class="mono" style="font-weight:600; ${isOpen ? '' : 'color:var(--text);'}">${partNumLabel}</span>
-              <span style="font-weight:normal; letter-spacing:0; text-transform:none; opacity:${isOpen?'0.85':'0.65'}; font-size:13px;">${descLabel}</span>
-              ${matLabel ? `<span class="pill" style="background:var(--bg); color:var(--steel); font-size:10px; border:1px solid var(--line-dark);">${matLabel}</span>` : ''}
-              ${firstTierUnit > 0 ? `<span class="text-mute small" style="font-size:11px;">$${fmtMoney(firstTierUnit).replace('$','')}/ea @ qty ${fmtInt((p.qtyTiers||[1])[0])}</span>` : ''}
-            </span>
-            <span class="header-actions" onclick="event.stopPropagation()">
-              <button class="btn btn-sm" title="Duplicate this part" onclick="App.duplicatePart('${p.id}')">⎘</button>
-              <button class="btn btn-sm btn-danger" title="Remove this part" onclick="App.deletePart('${p.id}')">×</button>
-            </span>
-          </div>
-          ${isOpen ? `<div class="card-body" style="padding:0;"><div style="padding:14px 16px;">${renderPartEditor(q, p)}</div></div>` : ''}
-        </div>
-      `;
-    }).join('')}
-    <div style="text-align:center; padding:12px 0;">
-      ${lockedSingle
-        ? `<button class="btn" disabled title="Single-part machining quote — change quote type if you want multiple parts">+ Add Part (locked — single-part kind)</button>`
-        : `<button class="btn btn-primary" onclick="App.addPart()">+ Add Part</button>`
-      }
+    ${chips}
+    <div class="card part-card" id="part-anchor-${activePart.id}" style="border-left:4px solid var(--orange);">
+      <div class="card-header">
+        <span style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+          <span style="font-family:var(--font-display); letter-spacing:0.04em;">PART ${activeIdx+1}</span>
+          <span class="mono" style="font-weight:600;">${partNumLabel}</span>
+          <span style="font-weight:normal; letter-spacing:0; text-transform:none; opacity:0.85; font-size:13px;">${descLabel}</span>
+          ${matLabel ? `<span class="pill" style="background:var(--bg); color:var(--steel); font-size:10px; border:1px solid var(--line-dark);">${matLabel}</span>` : ''}
+          ${firstTierUnit > 0 ? `<span class="text-mute small" style="font-size:11px;">$${fmtMoney(firstTierUnit).replace('$','')}/ea @ qty ${fmtInt((activePart.qtyTiers||[1])[0])}</span>` : ''}
+        </span>
+        <span class="header-actions">
+          <button class="btn btn-sm" title="Duplicate this part" onclick="App.duplicatePart('${activePart.id}')">⎘ Duplicate</button>
+          <button class="btn btn-sm btn-danger" title="Remove this part" onclick="App.deletePart('${activePart.id}')">× Remove</button>
+        </span>
+      </div>
+      <div class="card-body" style="padding:0;"><div style="padding:14px 16px;">${renderPartEditor(q, activePart)}</div></div>
     </div>
+    ${q.parts.length === 1 ? `
+      <div style="text-align:center; padding:12px 0;">
+        ${lockedSingle
+          ? `<button class="btn" disabled title="Single-part machining quote — change quote type if you want multiple parts">+ Add Part (locked — single-part kind)</button>`
+          : `<button class="btn btn-primary" onclick="App.addPart()">+ Add Another Part</button>`
+        }
+      </div>
+    ` : ''}
   `;
 }
 
@@ -15169,6 +15209,13 @@ const App = {
   },
   // v7.50: Health Check card expand/collapse — explicit user toggle overrides
   // the default open-when-failing behavior
+  // v7.60: switch the active part chip on the Quote Info page
+  selectPartChip(quoteId, partId) {
+    update(s => {
+      if (!s.ui.activePartIdForInfo) s.ui.activePartIdForInfo = {};
+      s.ui.activePartIdForInfo[quoteId] = partId;
+    });
+  },
   // v7.57: collapse/expand a part on the Quote Info page (inline parts layout)
   togglePartExpanded(partId) {
     update(s => {
@@ -15183,18 +15230,19 @@ const App = {
       s.ui.partsExpanded[key] = !currentlyOpen;
     });
   },
-  // v7.57: scroll-to a specific part anchor on the Quote Info page. If we're
-  // not on Info tab, switch first; if the part is collapsed, expand it; then
-  // smooth-scroll its card into view. Used by the sidebar Part 1/2/3 links.
+  // v7.57+v7.60: scroll-to a specific part anchor on the Quote Info page.
+  // Ensures Info tab is active, selects the part's chip (so it's the visible
+  // one), then smooth-scrolls its card into view.
   scrollToPart(partId) {
     update(s => {
-      // Ensure we're on the Info tab (this is the only place parts render inline)
       if (s.ui.activeQuoteTab !== 'info') s.ui.activeQuoteTab = 'info';
-      // Force-expand the target part so the card is visible to scroll to
+      // v7.60: select chip so the part is actually visible (not just expanded)
+      if (!s.ui.activePartIdForInfo) s.ui.activePartIdForInfo = {};
+      if (s.ui.activeQuoteId) s.ui.activePartIdForInfo[s.ui.activeQuoteId] = partId;
+      // Legacy v7.57 expand state (harmless to leave in)
       if (!s.ui.partsExpanded) s.ui.partsExpanded = {};
       s.ui.partsExpanded['part_' + partId] = true;
     });
-    // Defer scroll until after the next render paint
     setTimeout(() => {
       const el = document.getElementById('part-anchor-' + partId);
       if (el && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
