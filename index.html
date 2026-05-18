@@ -601,7 +601,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.57.0';
+const APP_VERSION = '7.58.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -15056,7 +15056,26 @@ const App = {
     showToast(`Preparing ${files.length} file${files.length!==1?'s':''}…`, 2500);
     const ensure = await ensureJobFolder(quote);
     if (!ensure.ok) {
-      alert('Cannot upload to job folder.\n\nReason: ' + ensure.error);
+      // v7.58: non-blocking toast (was alert which locked the UI).
+      // Diagnostic message + throttle so repeats don't spam.
+      const cust = quote && quote.customerId ? getCustomer(quote.customerId) : null;
+      let detail = ensure.error || 'unknown';
+      let action = '';
+      if (/no customer set/i.test(detail)) {
+        detail = 'No customer is assigned to this quote';
+        action = ' — pick a customer in the Quote Information section first.';
+      } else if (/customer folder not set/i.test(detail) || /cloud path/i.test(detail)) {
+        detail = cust ? `Customer "${cust.name}" has no OneDrive folder set` : detail;
+        action = cust ? ' — open the Customers page and fill in this customer\'s OneDrive Folder field.' : '';
+      } else if (/Outlook \(Graph\) not connected/i.test(detail)) {
+        action = ' — go to RFQ Inbox tab and connect to Outlook.';
+      } else if (/Graph getItem failed \(400\)/i.test(detail)) {
+        action = ' — the SharePoint site path in Settings looks wrong, or a folder name has unsupported characters.';
+      }
+      const now = Date.now();
+      if (window._lastUploadErr && window._lastUploadErr.msg === detail && (now - window._lastUploadErr.time) < 8000) return;
+      window._lastUploadErr = { msg: detail, time: now };
+      showToast(`⚠ Couldn't upload to OneDrive: ${detail}${action}`, 8000);
       return;
     }
     const uploaded = [], failed = [];
@@ -15076,7 +15095,11 @@ const App = {
       const summary = Object.entries(breakdown).map(([sub,n]) => `${n}→${sub}`).join(', ');
       showToast(`✓ Uploaded ${uploaded.length} file${uploaded.length!==1?'s':''} to OneDrive (${summary}).`, 6000);
     } else {
-      alert(`Uploaded ${uploaded.length}, failed ${failed.length}.\n\nFailures:\n${failed.map(f => '• ' + f.name + ': ' + f.error).join('\n')}`);
+      // v7.58: non-blocking toast (was alert). Show counts inline; first failure
+      // detail in the toast for quick context. Full list shows in console.
+      const first = failed[0];
+      console.warn('OneDrive upload failures:', failed);
+      showToast(`⚠ Uploaded ${uploaded.length}, ${failed.length} failed (${first.name}: ${(first.error||'error').slice(0,80)}). See console for the full list.`, 9000);
     }
     render();
   },
