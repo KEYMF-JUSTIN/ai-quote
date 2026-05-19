@@ -322,6 +322,38 @@
   select optgroup[label*="Other"]     { color:#94A3B8; }
   select optgroup option { color:var(--text); font-weight:normal; padding-left:8px; }
 
+  /* v7.71: Inline chip strips on vendor + customer cards — services + materials
+     with click-to-remove chips and a "+" add button that pops a small picker. */
+  .entity-chip-row { display:flex; flex-wrap:wrap; gap:5px; align-items:center; padding:4px 0; }
+  .entity-chip {
+    display:inline-flex; align-items:center; gap:4px;
+    padding:3px 9px; border-radius:14px; font-size:11px; font-weight:600;
+    background:var(--paper); border:1px solid var(--line-dark); color:var(--text);
+    cursor:pointer; user-select:none; transition:all 0.1s;
+  }
+  .entity-chip:hover { background:#FDEDEA; border-color:#C73E1D; color:#C73E1D; }
+  .entity-chip.cut       { background:#F3E8FF; border-color:#7C3AED; color:#7C3AED; }
+  .entity-chip.finishing { background:#CFFAFE; border-color:#0891B2; color:#0891B2; }
+  .entity-chip.material  { background:#FEF3C7; border-color:#B45309; color:#B45309; }
+  .entity-chip-add {
+    padding:3px 9px; border-radius:14px; font-size:11px; font-weight:600;
+    background:transparent; border:1px dashed var(--line-dark); color:var(--text-mute);
+    cursor:pointer; transition:all 0.1s;
+  }
+  .entity-chip-add:hover { background:var(--orange); color:white; border-color:var(--orange); border-style:solid; }
+  .entity-chip-picker {
+    margin-top:6px; padding:8px 10px; background:var(--bg); border:1px solid var(--orange); border-radius:4px;
+  }
+  .entity-chip-picker input[type="search"] { width:100%; padding:5px 8px; font-size:13px; margin-bottom:6px; }
+  .entity-chip-picker-list { display:flex; flex-wrap:wrap; gap:4px; max-height:180px; overflow-y:auto; }
+  .entity-chip-picker-list .entity-chip { font-weight:500; }
+  .entity-chip-quick-create {
+    padding:5px 10px; margin-top:5px; background:#FFF7ED; border:1px dashed var(--orange); border-radius:3px;
+    cursor:pointer; font-size:12px; color:var(--orange); font-weight:600;
+  }
+  .entity-chip-quick-create:hover { background:var(--orange); color:white; }
+  .entity-chip-section-label { font-family:var(--font-display); font-size:10px; letter-spacing:0.08em; color:var(--text-mute); font-weight:700; }
+
   /* v7.61: Type picker modal cards */
   .type-picker-card { display:flex; align-items:stretch; padding:0; background:var(--paper); border:1px solid var(--line-dark); border-radius:5px; cursor:pointer; text-align:left; font:inherit; color:var(--text); overflow:hidden; transition:all 0.12s ease; min-height:80px; }
   .type-picker-card:hover { border-color:var(--type-color, var(--orange)); box-shadow:0 4px 10px rgba(0,0,0,0.08); transform:translateY(-1px); }
@@ -728,7 +760,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.70.0';
+const APP_VERSION = '7.71.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -4370,6 +4402,8 @@ function newCustomer() {
     salesRep:'', paymentTerms:'', status:'Active', notes:'',
     pricingHistory: [],
     contacts: [],     // v7.48: multiple people per customer — {id, name, email, phone, role, isPrimary, notes}
+    services: [],     // v7.71: what this customer typically orders from us (slugs from ALL_SERVICES)
+    materialIds: [],  // v7.71: which materials this customer typically buys (ids from settings.materials)
   };
 }
 // v7.48: separate-person contact under a customer
@@ -22343,14 +22377,78 @@ setTimeout(() => {
   });
 })();
 
-// Auto-reconnect cloud sync if previously enabled
+// =================================================================
+// v7.71: Cloud sync auto-reconnect — robust, lazy, multi-trigger.
+//
+// OLD (pre-v7.71) behavior: one-shot SyncEngine.connect() at page boot.
+// If the network was flaky at that moment, sync stayed offline for the
+// rest of the session unless the user went to Settings and manually
+// reconnected. That's exactly what the user kept hitting.
+//
+// NEW behavior: ensureSyncConnected() is idempotent and throttled. It
+// fires on every signal that "the user might be doing something":
+//   - Initial page load
+//   - Tab becomes visible (visibilitychange)
+//   - Window gains focus (focus)
+//   - Network comes back online (online) — force-bypasses throttle
+//   - Any click anywhere on the page (capture phase, debounced)
+//
+// Throttle = 30s between attempts (so we don't hammer Firebase if it's
+// genuinely down). Concurrent calls coalesce via _ensureConnectingPromise.
+// =================================================================
 SyncEngine.loadConfig();
-if (SyncEngine.config && SyncEngine.config.enabled) {
-  SyncEngine.connect().catch(e => {
-    console.warn('Auto-reconnect to sync failed:', e);
-    showToast('Cloud sync reconnect failed — running in local mode.');
-  });
+
+let _ensureConnectingPromise = null;
+let _lastSyncConnectAttempt = 0;
+const SYNC_CONNECT_THROTTLE_MS = 30000;
+
+async function ensureSyncConnected(opts) {
+  opts = opts || {};
+  // Fast paths — quick check to skip the throttle.
+  if (SyncEngine.connected) return;
+  if (!SyncEngine.config || !SyncEngine.config.enabled) return;
+  // For password-mode sync we need credentials. Bail silently if missing —
+  // user has to set up Settings → Sync first.
+  const mode = SyncEngine.config.authMode || 'password';
+  if (mode === 'password' && (!SyncEngine.config.email || !SyncEngine.config.password)) return;
+  // Throttle (unless force=true, e.g. network came back online)
+  const now = Date.now();
+  if (!opts.force && now - _lastSyncConnectAttempt < SYNC_CONNECT_THROTTLE_MS) return;
+  // Coalesce concurrent attempts
+  if (_ensureConnectingPromise) return _ensureConnectingPromise;
+  _lastSyncConnectAttempt = now;
+  _ensureConnectingPromise = (async () => {
+    try {
+      await SyncEngine.connect();
+      if (typeof showToast === 'function') showToast('☁ Cloud sync connected.', 2500);
+      try { renderHeaderConnPill(); } catch (_) {}
+    } catch (e) {
+      console.warn('[ensureSyncConnected] connect failed (will retry on next signal):', e && e.message ? e.message : e);
+    } finally {
+      _ensureConnectingPromise = null;
+    }
+  })();
+  return _ensureConnectingPromise;
 }
+
+// Initial attempt at page boot
+ensureSyncConnected();
+
+// Retry whenever the page comes back into focus / view
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') ensureSyncConnected();
+});
+window.addEventListener('focus', () => ensureSyncConnected());
+
+// Network came back — force-bypass throttle
+window.addEventListener('online', () => ensureSyncConnected({ force: true }));
+
+// Any click anywhere — capture phase so we run even if the target stops
+// propagation. The throttle keeps this cheap.
+document.addEventListener('click', () => ensureSyncConnected(), true);
+
+// Expose for manual debugging from DevTools
+window.ensureSyncConnected = ensureSyncConnected;
 
 // Theme persistence (separate from main state — local-machine preference)
 function loadTheme() {
