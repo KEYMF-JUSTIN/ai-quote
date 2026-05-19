@@ -728,7 +728,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.69.1';
+const APP_VERSION = '7.70.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -12507,6 +12507,33 @@ function vendorWizardSteps(draft) {
   return steps;
 }
 
+// v7.70: shared drop-to-prefill zone used by every wizard. Renders a tagged
+// drop area + status banners (loading / error / success). The actual drop
+// event is handled globally in setupGlobalPdfDrop — we just provide the
+// visual target and the post-extraction confirmation UI.
+function renderWizardDropZone(entityType, wizardState) {
+  const meta = wizardState && wizardState.lastDropMeta;
+  const loading = wizardState && wizardState.loading;
+  const error = wizardState && wizardState.dropError;
+  // Status row — shows what happened on the most recent drop
+  let status = '';
+  if (loading && meta) {
+    status = `<div style="margin-top:8px; font-size:12px; color:var(--orange); font-weight:600;">⏳ Reading <strong>${esc(meta.filename)}</strong> with Claude… (15–30s)</div>`;
+  } else if (error) {
+    status = `<div style="margin-top:8px; font-size:12px; color:#C73E1D; background:#FDEDEA; padding:6px 10px; border-radius:3px;">⚠ ${esc(error)}</div>`;
+  } else if (meta && meta.completedAt) {
+    status = `<div style="margin-top:8px; font-size:12px; color:#16A34A; background:#ECFDF3; padding:6px 10px; border-radius:3px;">✨ Auto-filled <strong>${meta.filled}</strong> field${meta.filled===1?'':'s'} from <strong>${esc(meta.filename)}</strong> — review &amp; edit anywhere.</div>`;
+  }
+  return `
+    <div class="wizard-drop-zone" data-wizard-drop="${esc(entityType)}" style="border:2px dashed var(--orange); background:#FFF7ED; border-radius:6px; padding:14px 18px; margin-bottom:14px; text-align:center; cursor:pointer; transition:background 0.15s;" onclick="document.getElementById('wizard-drop-input-${esc(entityType)}').click()">
+      <div style="font-size:14px; font-weight:600; color:var(--navy);">✨ Drop a file here to auto-fill</div>
+      <div style="font-size:11px; color:var(--text-mute); margin-top:3px;">PDF, image, screenshot, .msg email, or text — Claude reads it and pre-populates the fields below</div>
+      <input type="file" id="wizard-drop-input-${esc(entityType)}" style="display:none;" accept=".pdf,.png,.jpg,.jpeg,.gif,.webp,.msg,.txt,.csv,image/*,application/pdf" onchange="if(this.files[0]){App.wizardDropFile('${esc(entityType)}', this.files[0]); this.value='';}">
+      ${status}
+    </div>
+  `;
+}
+
 function renderVendorWizardModal() {
   let host = document.getElementById('vendor-wizard-host');
   if (!host) {
@@ -12671,11 +12698,16 @@ function renderVendorWizardModal() {
   const canSave = step.key === 'review' && (d.name||'').trim().length > 0;
   const canNext = step.key !== 'basics' || (d.name||'').trim().length > 0;
 
+  // v7.70: drop-to-prefill zone — visible on every step. Dropping any file
+  // (PDF / image / .msg / text) fires App.wizardDropFile('vendor', file).
+  const dropZone = renderWizardDropZone('vendor', w);
+
   host.innerHTML = `
     <div class="modal-backdrop" onclick="App.closeVendorWizard()">
       <div class="modal" style="width:640px; max-width:96vw; max-height:90vh; display:flex; flex-direction:column;" onclick="event.stopPropagation()">
         <div class="modal-header">+ Add Vendor &middot; ${esc(step.label)} (${stepIdx+1}/${steps.length})</div>
         <div class="modal-body" style="overflow-y:auto;">
+          ${dropZone}
           <div class="wizard-dots" style="margin-bottom:14px;">${dots}</div>
           <div class="wizard-section" style="margin:0;">
             ${body}
@@ -12851,11 +12883,15 @@ function renderCustomerWizardModal() {
   const canSave = step.key === 'review' && (d.name||'').trim().length > 0;
   const canNext = step.key !== 'basics' || (d.name||'').trim().length > 0;
 
+  // v7.70: drop-to-prefill zone — visible on every step.
+  const dropZone = renderWizardDropZone('customer', w);
+
   host.innerHTML = `
     <div class="modal-backdrop" onclick="App.closeCustomerWizard()">
       <div class="modal" style="width:640px; max-width:96vw; max-height:90vh; display:flex; flex-direction:column;" onclick="event.stopPropagation()">
         <div class="modal-header">+ Add Customer &middot; ${esc(step.label)} (${stepIdx+1}/${steps.length})</div>
         <div class="modal-body" style="overflow-y:auto;">
+          ${dropZone}
           <div class="wizard-dots" style="margin-bottom:14px;">${dots}</div>
           <div class="wizard-section" style="margin:0;">
             ${body}
@@ -17466,6 +17502,10 @@ const App = {
           shipStreet:'', shipCity:'', shipState:'', shipZip:'',
           salesRep:'', paymentTerms:'', status:'Active', notes:'',
         },
+        // v7.70: drop-to-prefill status fields
+        loading: false,
+        dropError: '',
+        lastDropMeta: null,
       };
     });
   },
@@ -17583,6 +17623,129 @@ const App = {
         showToast('💾 ' + toastMsg.replace(/synced to cloud/i, 'saved locally'));
       }
     } catch (_) { /* non-fatal */ }
+  },
+
+  // =============================================================
+  // v7.70: DROP-TO-PREFILL — a first-class principle of this app.
+  //
+  // Any time the user is creating a record (vendor, customer,
+  // contact, material, part, future ones too), they should be able
+  // to drag-and-drop a file (PDF, image, email, screenshot, text)
+  // and have Claude auto-populate the form fields.
+  //
+  // Wiring a new wizard?
+  //   1. In the Worker (worker/src/index.js), add an entry to
+  //      ENTITY_SCHEMAS keyed by your entityType, with the
+  //      tool definition that matches your wizard draft shape.
+  //   2. In the wizard render function, include a <div data-wizard-drop>
+  //      drop zone (the global drop handler will route there).
+  //   3. In your wizard state object include `loading`, `dropError`,
+  //      and `lastDropMeta` fields.
+  //   4. Use App.wizardDropFile(entityType, file) — no other wiring
+  //      needed.
+  //
+  // Don't build one-off file-drop logic for each new wizard. Add to
+  // this pipeline so the behavior is consistent (loading state, error
+  // handling, toast confirmation, draft persistence, cloud sync).
+  // =============================================================
+  async wizardDropFile(entityType, file) {
+    if (!file) return;
+    // Resolve which wizard slot to write into
+    const wizardKey = entityType === 'vendor' ? 'vendorWizard'
+                    : entityType === 'customer' ? 'customerWizard'
+                    : null;
+    if (!wizardKey || !state.ui[wizardKey]) {
+      console.warn('[wizardDropFile] no active wizard for', entityType);
+      return;
+    }
+    const wizard = state.ui[wizardKey];
+    wizard.loading = true;
+    wizard.dropError = '';
+    wizard.lastDropMeta = { filename: file.name, size: file.size, startedAt: Date.now() };
+    if (entityType === 'vendor')   renderVendorWizardModal();
+    if (entityType === 'customer') renderCustomerWizardModal();
+
+    try {
+      // Build the attachment payload. .msg files we can't ship as-is — they're
+      // binary CFB containers that Claude can't parse. We extract sender+body
+      // text using the existing parseOutlookMsg helper and ship that as text.
+      let attachments = [];
+      let hint = '';
+      const isMsg = /\.msg$/i.test(file.name) || /vnd\.ms-outlook/i.test(file.type || '');
+      if (isMsg && typeof parseOutlookMsg === 'function') {
+        try {
+          const parsed = await parseOutlookMsg(file);
+          hint = [
+            parsed.senderEmail ? 'From email: ' + parsed.senderEmail : '',
+            parsed.sender      ? 'Sender name: ' + parsed.sender : '',
+            parsed.subject     ? 'Subject: ' + parsed.subject : '',
+            parsed.body        ? 'Body:\n' + (parsed.body || '').slice(0, 8000) : '',
+          ].filter(Boolean).join('\n');
+          // If the .msg had embedded PDF attachments, ship those too — they
+          // often have the customer letterhead / address block.
+          if (Array.isArray(parsed.pdfs) && parsed.pdfs.length) {
+            for (const p of parsed.pdfs.slice(0, 3)) {
+              if (p && p.data) attachments.push({ name: p.name || 'embedded.pdf', mimeType: 'application/pdf', data: p.data });
+            }
+          }
+        } catch (_) {
+          hint = `(dropped a .msg file we couldn't parse — filename: ${file.name})`;
+        }
+      } else if (/^text\//.test(file.type || '') || /\.(txt|csv|tsv|json)$/i.test(file.name)) {
+        // Plain text — read inline as a hint, no binary upload
+        try { hint = await file.text(); hint = hint.slice(0, 50000); } catch (_) {}
+      } else {
+        // PDF / image / other — base64 it for the Worker
+        const data = await blobToBase64(file);
+        attachments.push({
+          name: file.name,
+          mimeType: file.type || (/\.pdf$/i.test(file.name) ? 'application/pdf' : 'application/octet-stream'),
+          data,
+        });
+      }
+
+      const response = await workerCall('/api/claude/extract-entity', {
+        entityType, attachments, hint,
+      }, { timeoutMs: 90000 });
+
+      const parsed = response.parsed || {};
+      // Merge into the draft. Only overwrite empty fields by default — the
+      // user may have already typed things they don't want clobbered.
+      const w2 = state.ui[wizardKey];
+      if (!w2) return; // wizard was closed mid-flight
+      const draft = w2.draft;
+      let filled = 0;
+      Object.keys(parsed).forEach(k => {
+        const v = parsed[k];
+        if (v == null || v === '' || (Array.isArray(v) && v.length === 0)) return;
+        const cur = draft[k];
+        const curEmpty = cur == null || cur === '' || (Array.isArray(cur) && cur.length === 0);
+        if (curEmpty) { draft[k] = v; filled++; }
+      });
+      w2.loading = false;
+      w2.lastDropMeta = {
+        filename: file.name,
+        size: file.size,
+        filled,
+        model: response.model,
+        completedAt: Date.now(),
+      };
+      saveWizardDrafts();
+      markLastSaved();
+      if (entityType === 'vendor')   renderVendorWizardModal();
+      if (entityType === 'customer') renderCustomerWizardModal();
+      showToast(`✨ Auto-filled ${filled} field${filled===1?'':'s'} from ${file.name}.`, 4000);
+    } catch (err) {
+      console.error('[wizardDropFile] failed', err);
+      const w3 = state.ui[wizardKey];
+      if (w3) {
+        w3.loading = false;
+        w3.dropError = err && err.message ? err.message : String(err);
+        if (entityType === 'vendor')   renderVendorWizardModal();
+        if (entityType === 'customer') renderCustomerWizardModal();
+      }
+      showToast(`⚠ Could not extract from ${file.name}: ${err.message || err}`, 6000);
+    }
   },
   deleteCustomer(id) {
     if (!confirm('Delete this customer? Existing quotes referencing them will keep working.')) return;
@@ -18696,6 +18859,10 @@ const App = {
           services: [],
           materialIds: [],
         },
+        // v7.70: drop-to-prefill status fields
+        loading: false,
+        dropError: '',
+        lastDropMeta: null,
       };
     });
   },
@@ -22094,6 +22261,19 @@ setTimeout(() => {
     if (state.ui.trainingPicker && state.ui.trainingPicker.open !== false) {
       e.preventDefault();
       App.handleTrainingFile(file);
+      return;
+    }
+    // v7.70: if an Add Vendor / Add Customer wizard is open, route the drop
+    // there. Don't filter by file type — Claude can read PDFs, images,
+    // screenshots, .msg, plain text; let the wizard handler decide.
+    if (state.ui.vendorWizard && state.ui.vendorWizard.open) {
+      e.preventDefault();
+      App.wizardDropFile('vendor', file);
+      return;
+    }
+    if (state.ui.customerWizard && state.ui.customerWizard.open) {
+      e.preventDefault();
+      App.wizardDropFile('customer', file);
       return;
     }
     // v7.55: dropping CAD/engineering files directly onto the active quote

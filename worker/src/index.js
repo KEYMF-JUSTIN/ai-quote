@@ -62,6 +62,16 @@ export default {
         return jsonResponse(result, 200, env, origin);
       }
 
+      // POST /api/claude/extract-entity
+      // Drop-anywhere pipeline: any feature that adds a record (vendor, customer,
+      // future: contact, material, part) can drop a file (PDF / image / .msg /
+      // plain text) at this endpoint to get back structured field values.
+      if (request.method === 'POST' && path === '/api/claude/extract-entity') {
+        const body = await request.json();
+        const result = await handleExtractEntity(env, body);
+        return jsonResponse(result, 200, env, origin);
+      }
+
       return errorResponse(`Not found: ${request.method} ${path}`, 404, env, origin);
     } catch (err) {
       console.error('worker error', err && err.stack || err);
@@ -539,6 +549,127 @@ async function handleEstimateOutsideService(env, body) {
   return {
     estimate: result.data,
     inputs,
+    model: result.model,
+    usage: result.usage,
+  };
+}
+
+// =================================================================
+// /api/claude/extract-entity
+// Generic "drop-a-file-to-prefill" extraction for any place in the UI
+// where the user is creating a record (vendor, customer, future: contact,
+// material, part, etc.). The frontend hands us the entityType + the
+// dropped file(s), we hand back a structured object whose keys match the
+// wizard draft schema for that entity.
+//
+// Why this exists: see v7.70 in index.html. Drag-and-drop-to-prefill is
+// a first-class principle in this app — every new wizard / add-form gets
+// it. Adding a new entity type? Extend ENTITY_SCHEMAS below and the
+// frontend will pick it up automatically.
+//
+// Input  : { entityType: 'vendor'|'customer', attachments: [{name, mimeType, data}], hint? }
+// Output : { parsed: {...matches wizard draft shape}, model, usage }
+// =================================================================
+const ENTITY_SCHEMAS = {
+  customer: {
+    name: 'submit_extracted_customer',
+    description: 'Submit the structured customer-record data extracted from the dropped document. The user is adding a new CUSTOMER (a buyer who places orders at our machine shop). ALL fields are optional — leave blank/null anything you cannot confidently determine. A wrong value is worse than a missing one.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        name:        { type: 'string', description: 'Company name. NOT a person — e.g. "Acme Manufacturing", not "Sarah Lee".' },
+        code:        { type: 'string', description: 'Short alphanumeric code if visible (rare on emails, common on POs). e.g. "ACME-01"' },
+        contact:     { type: 'string', description: 'Primary contact person — usually the email signer or buyer name on the PO.' },
+        email:       { type: 'string', description: 'Best email address for this customer (their domain, not gmail.com unless that\'s clearly business).' },
+        phone:       { type: 'string', description: 'Phone number from signature, header, or letterhead.' },
+        billStreet:  { type: 'string', description: 'Billing street address (or just "address" if only one is given).' },
+        billCity:    { type: 'string' },
+        billState:   { type: 'string', description: '2-letter US state code (PA, OH, MI, etc.) when possible.' },
+        billZip:     { type: 'string' },
+        shipSameAsBill: { type: 'boolean', description: 'True if no separate ship-to address is given.' },
+        shipStreet:  { type: 'string', description: 'Only set if a distinct shipping address is shown (different from billing).' },
+        shipCity:    { type: 'string' },
+        shipState:   { type: 'string' },
+        shipZip:     { type: 'string' },
+        salesRep:    { type: 'string', description: 'If document mentions which of our salespeople owns this account.' },
+        paymentTerms:{ type: 'string', description: 'e.g. "Net 30", "Due on receipt", "COD".' },
+        notes:       { type: 'string', description: 'One short sentence summarizing anything unusual or worth remembering.' },
+      },
+    },
+    promptIntro: `You are pre-filling a "+ Add Customer" form at Keystone Machine & Fab, a precision machining shop. The user has dropped a file (RFQ email, PO, letterhead, business card, screenshot, etc.) and wants the customer's contact + address info extracted into the form fields. Be conservative — only populate fields you can read with confidence. Leave the rest blank.`,
+  },
+  vendor: {
+    name: 'submit_extracted_vendor',
+    description: 'Submit the structured vendor-record data extracted from the dropped document. The user is adding a new VENDOR (a supplier we BUY from — steel mill, plating shop, tooling distributor, laser cutting service, etc.). ALL fields are optional — leave blank/null what you cannot determine.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        name:        { type: 'string', description: 'Vendor company name. NOT a person.' },
+        contact:     { type: 'string', description: 'Sales rep / contact person name.' },
+        email:       { type: 'string' },
+        phone:       { type: 'string' },
+        fax:         { type: 'string', description: 'Only if explicitly labeled.' },
+        accountNum:  { type: 'string', description: 'OUR account # with them (often shown on quotes / invoices addressed to Keystone Machine & Fab).' },
+        address:     { type: 'string', description: 'Full mailing address as one string, comma-separated.' },
+        types: {
+          type: 'array',
+          items: { type: 'string', enum: ['material','cut','finishing','tooling'] },
+          description: 'What categories this vendor supplies. INFER from the document: a steel mill catalog → ["material"]; a laser cutting flyer → ["cut"]; a plating shop quote → ["finishing"]; a tooling distributor (McMaster, MSC, KBC) → ["material","tooling"]. Choose 1-3 categories — most vendors specialize.',
+        },
+        services: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Specific service slugs the document indicates this vendor offers. Pick from: laser, waterjet, plasma, wire_edm, sinker_edm, oxy_fuel, shear, machining, turret, heat_treat, black_oxide, anodize, paint, powder_coat, plating, passivate, deburring, media_blast, grinding, bending, rolling, welding, assembly, inspection, kitting, engraving, silkscreen. Empty if the document doesn\'t make this clear.',
+        },
+        notes:       { type: 'string', description: 'One sentence on lead times / specialty / anything unusual.' },
+      },
+    },
+    promptIntro: `You are pre-filling a "+ Add Vendor" form at Keystone Machine & Fab, a precision machining shop. The user has dropped a file (vendor quote, invoice, business card, website screenshot, capability sheet, email signature, etc.) and wants the supplier's info extracted. Identify WHAT they supply (material / cut / finishing / tooling) and which specific services. Be conservative — only populate fields you can read with confidence.`,
+  },
+};
+
+async function handleExtractEntity(env, body) {
+  if (!body || typeof body !== 'object') throw badRequest('Body must be JSON');
+  const entityType = body.entityType;
+  if (!entityType || !ENTITY_SCHEMAS[entityType]) {
+    throw badRequest(`Unknown entityType: ${entityType}. Supported: ${Object.keys(ENTITY_SCHEMAS).join(', ')}`);
+  }
+  const schema = ENTITY_SCHEMAS[entityType];
+  const attachments = Array.isArray(body.attachments) ? body.attachments : [];
+  const hint = (body.hint || '').toString().slice(0, 2000);
+
+  // Build content blocks
+  const contentBlocks = [];
+  contentBlocks.push({
+    type: 'text',
+    text: [
+      schema.promptIntro,
+      '',
+      hint ? `USER HINT: ${hint}` : '',
+      attachments.length
+        ? `Files dropped (${attachments.length}): ${attachments.map(a => `${a.name} (${a.mimeType || 'unknown type'})`).join(', ')}`
+        : `No files attached — extract from the hint text only.`,
+    ].filter(Boolean).join('\n'),
+  });
+  for (const att of attachments) {
+    const block = attachmentToContentBlock(att);
+    if (block) contentBlocks.push(block);
+  }
+
+  if (contentBlocks.length === 1 && !hint) {
+    throw badRequest('No content to extract from (no attachments and no hint).');
+  }
+
+  const result = await extractWithTool(env, {
+    tool: { name: schema.name, description: schema.description, input_schema: schema.input_schema },
+    content: contentBlocks,
+    model: body.model || env.CLAUDE_MODEL,
+    max_tokens: 2048,
+  });
+
+  return {
+    parsed: result.data,
+    entityType,
     model: result.model,
     usage: result.usage,
   };
