@@ -769,7 +769,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '8.12.1';
+const APP_VERSION = '8.12.2';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -1671,6 +1671,38 @@ function closeAllModals() {
 // Per-machine config (NOT synced — each PC needs its own connection setup)
 const SYNC_CONFIG_KEY = 'keystone-sync-config';
 
+// v8.12.2: self-bootstrapping Firebase module loader. The top-of-file
+// inline <script> sets up window._firebase normally, but browser
+// extensions / CSP / bfcache restoration can occasionally drop it. This
+// function rebuilds the loader from scratch if missing so the app doesn't
+// fail with "Firebase loader not initialized" on every retry. Called
+// before every loadModules() invocation in SyncEngine.
+function ensureFirebaseLoader() {
+  if (window._firebase && typeof window._firebase.loadModules === 'function') return;
+  window._firebase = window._firebase || {};
+  window._firebase.loadModules = async () => {
+    if (window._firebase._loaded) return window._firebase._loaded;
+    const [fbApp, fbDb, fbAuth] = await Promise.all([
+      import('https://www.gstatic.com/firebasejs/10.7.0/firebase-app.js'),
+      import('https://www.gstatic.com/firebasejs/10.7.0/firebase-database.js'),
+      import('https://www.gstatic.com/firebasejs/10.7.0/firebase-auth.js'),
+    ]);
+    window._firebase._loaded = {
+      initializeApp: fbApp.initializeApp,
+      getDatabase: fbDb.getDatabase, ref: fbDb.ref, onValue: fbDb.onValue,
+      set: fbDb.set, off: fbDb.off, onDisconnect: fbDb.onDisconnect,
+      serverTimestamp: fbDb.serverTimestamp, push: fbDb.push,
+      get: fbDb.get, remove: fbDb.remove,
+      getAuth: fbAuth.getAuth, signInAnonymously: fbAuth.signInAnonymously,
+      signInWithEmailAndPassword: fbAuth.signInWithEmailAndPassword,
+      createUserWithEmailAndPassword: fbAuth.createUserWithEmailAndPassword,
+      sendPasswordResetEmail: fbAuth.sendPasswordResetEmail,
+      signOut: fbAuth.signOut,
+    };
+    return window._firebase._loaded;
+  };
+}
+
 const SyncEngine = {
   config: null,
   fb: null, app: null, db: null, auth: null, user: null,
@@ -1752,15 +1784,13 @@ const SyncEngine = {
     if (!this.config.apiKey || !this.config.databaseURL) {
       throw new Error('Firebase apiKey and databaseURL are required.');
     }
-    // v8.8.1: defensive — the Firebase loader is set up by an inline
-    // <script> block at the very top of the page. If something blocks it
-    // (CSP, certain Chrome extensions, network error on initial parse),
-    // window._firebase is undefined and we'd crash with the cryptic
-    // "Cannot read properties of undefined (reading 'loadModules')".
-    // Surface a clearer message so the retry loop logs something useful.
-    if (!window._firebase || typeof window._firebase.loadModules !== 'function') {
-      throw new Error('Firebase loader not initialized. Hard-refresh the page (Ctrl+F5) — if it persists, check the browser console for blocked scripts.');
-    }
+    // v8.12.2: self-bootstrap the Firebase loader if it's missing. v8.8.1
+    // surfaced a clearer error here, but ironically the message was the
+    // problem — users hit it constantly because browser extensions or
+    // CSP rules sometimes prevent the inline <script> block at the top
+    // of the file from sticking. Instead of throwing, install the loader
+    // inline RIGHT HERE so the app self-heals.
+    ensureFirebaseLoader();
     const fb = await window._firebase.loadModules();
     this.fb = fb;
     try {
@@ -2055,9 +2085,7 @@ const SyncEngine = {
   // by their email, creates the Firebase Auth user with their chosen password,
   // and removes the invite. Called by the in-app invite-acceptance flow.
   async acceptInviteAndSignUp(email, password, displayName) {
-    if (!window._firebase || typeof window._firebase.loadModules !== 'function') {
-      throw new Error('Firebase loader not initialized. Hard-refresh the page (Ctrl+F5).');
-    }
+    ensureFirebaseLoader();
     const fb = await window._firebase.loadModules();
     if (!this.config) throw new Error('Sync config missing.');
     // Initialize a temporary app/auth just for signup (we may not have an app instance yet)
@@ -2116,9 +2144,7 @@ const SyncEngine = {
     return { uid, name: displayName || inviteData.name || email.split('@')[0] };
   },
   async sendPasswordReset(email) {
-    if (!window._firebase || typeof window._firebase.loadModules !== 'function') {
-      throw new Error('Firebase loader not initialized. Hard-refresh the page (Ctrl+F5).');
-    }
+    ensureFirebaseLoader();
     const fb = await window._firebase.loadModules();
     if (!this.config) throw new Error('Sync config missing.');
     let app;
@@ -13668,7 +13694,25 @@ function renderQuoteWizardView(q) {
 
 function renderQuote() {
   const q = getActiveQuote();
-  if (!q) return `<p>No quote selected.</p>`;
+  // v8.12.2: dead-end "No quote selected." gets a real escape hatch. Used
+  // to happen when the quote you were viewing got deleted (locally or via
+  // remote sync) and the view stayed parked on 'quote' with a stale id.
+  if (!q) return `
+    <div class="page-header">
+      <div>
+        <div class="page-title">No quote selected</div>
+        <div class="page-subtitle">The quote you were viewing isn't on this list anymore — it might have been deleted, or the id is stale.</div>
+      </div>
+      <div class="header-actions">
+        <button class="btn btn-primary" onclick="App.go('quotes')">← Back to Quotes</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-body" style="padding:24px; text-align:center;">
+        <p class="text-mute">Click the button above (or any nav item on the left) to get unstuck.</p>
+      </div>
+    </div>
+  `;
   // v8.10: wizard is now the only quote view. Classic killed. The top-tab
   // strip below routes between Parts (the wizard proper) and the
   // quote-level views (Summary / Materials / BOM) that used to be classic
