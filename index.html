@@ -769,7 +769,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '8.5.0';
+const APP_VERSION = '8.6.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -1002,6 +1002,8 @@ const state = {
     entityChipPicker: null,     // v7.72: { kind:'service'|'material', entityType:'vendor'|'customer', entityId, search } — inline picker shown under a chip strip when user clicks "+ Add"
     iconPicker: null,           // v7.74: { typeIdx } when the Part Type icon picker modal is open. Caller writes the picked emoji to settings.partTypes[idx].icon.
     colorPicker: null,          // v8.4: { action, args, currentColor } when the 128-swatch color picker is open. Picked color is delivered by calling App[action](...args, color). Replaces native <input type=color>.
+    expandedNotes: {},          // v8.6: per-entity collapsible state for notes — keyed `${entityType}:${entityId}` → true when expanded. Empty notes show as a "+ Add note" link; non-empty notes show as a collapsed preview that expands on click.
+    expandedOneDrive: {},       // v8.6: per-customer collapsible state for the OneDrive config block — keyed customerId → true when expanded.
     wizardMode: false,          // v8.0: toggle for the new wizard-style quote page. When false, falls back to classic all-cards view. Set per session — not persisted.
     wizardStep: {},             // v8.0: keyed partId → step index. Tracks where in the wizard each part is, so switching chips remembers your spot.
     trainingPicker: null,       // v7.62: { entityType, entityId, sampleId?, file?, parsed?, docType, notes, error, loading } for the training sample editor
@@ -6955,11 +6957,18 @@ function renderVendorsCards(vendors) {
     return `
       <div class="card"${v.favorite ? ' style="border-left:4px solid var(--orange);"' : ''}>
         <div class="card-header">
-          <span><span style="cursor:pointer; user-select:none; margin-right:8px;" onclick="App.toggleVendorFavorite('${v.id}')" title="${v.favorite ? 'Remove from favorites' : 'Mark as favorite'}">${v.favorite ? '★' : '<span style="opacity:0.4;">☆</span>'}</span>${esc(v.name || '(unnamed vendor)')}</span>
-          <div class="header-actions">
-            <span class="pill draft">${mats.length} material${mats.length!==1?'s':''}</span>
-            <button class="btn btn-sm btn-danger" onclick="App.removeVendor('${v.id}')">Delete</button>
-          </div>
+          <!-- v8.6: header wraps the name row + training gauge in a column so
+               the gauge sits under the name without breaking the original layout. -->
+          <span style="display:flex; flex-direction:column; gap:6px; flex:1;">
+            <span style="display:flex; align-items:center; justify-content:space-between;">
+              <span><span style="cursor:pointer; user-select:none; margin-right:8px;" onclick="App.toggleVendorFavorite('${v.id}')" title="${v.favorite ? 'Remove from favorites' : 'Mark as favorite'}">${v.favorite ? '★' : '<span style="opacity:0.4;">☆</span>'}</span>${esc(v.name || '(unnamed vendor)')}</span>
+              <span class="header-actions" style="display:flex; gap:6px; align-items:center;">
+                <span class="pill draft">${mats.length} material${mats.length!==1?'s':''}</span>
+                <button class="btn btn-sm btn-danger" onclick="App.removeVendor('${v.id}')">Delete</button>
+              </span>
+            </span>
+            ${renderTrainingGauge('vendor', v)}
+          </span>
         </div>
         <div class="card-body">
           <div class="form-grid cols-3">
@@ -6971,7 +6980,10 @@ function renderVendorsCards(vendors) {
             <div class="field"><label>Fax</label>${bind({label:'Vendor fax',value:v.fax, type:'tel', onChange:val=>{state.settings.vendors[i].fax=val;}})}</div>
             <div class="field" style="grid-column:span 3;"><label>Type</label>${renderVendorTypePicker(i, types)}</div>
             <div class="field" style="grid-column:span 3;"><label>Address</label>${bind({label:'Vendor address',value:v.address, onChange:val=>{state.settings.vendors[i].address=val;}})}</div>
-            <div class="field" style="grid-column:span 3;"><label>Notes</label>${bind({label:'Vendor notes',value:v.notes, type:'textarea', onChange:val=>{state.settings.vendors[i].notes=val;}})}</div>
+            <!-- v8.6: vendor notes are now a collapsible (empty = "+ Add note" link,
+                 filled = collapsed preview chip). Wrapped in a span-3 field so the
+                 form-grid layout stays aligned. -->
+            <div class="field" style="grid-column:span 3;">${renderCollapsibleNotes('vendor', v, val => { state.settings.vendors[i].notes = val; })}</div>
           </div>
           <hr>
           <!-- v7.72: inline chip strips for services + materials. Replaces the
@@ -11222,13 +11234,20 @@ function renderCustomersCards(list) {
       const same = c.shipSameAsBill;
       return `
         <div class="card">
-          <div class="card-header">
-            <span>${esc(c.name || '(unnamed)')}${c.code?` <span style="opacity:0.6; font-family:var(--font-mono); font-size:10px; margin-left:8px;">${esc(c.code)}</span>`:''}</span>
-            <div class="header-actions">
-              <span class="pill ${c.status==='Active'?'accepted':'draft'}">${esc(c.status||'Active')}</span>
-              <span class="pill draft">${quotesForC.length} quote${quotesForC.length!==1?'s':''}</span>
-              <button class="btn btn-sm btn-danger" onclick="App.deleteCustomer('${c.id}')">Delete</button>
-            </div>
+          <!-- v8.6: header wraps the name row + training gauge so we can
+               see at a glance which docs we've trained Claude on per customer. -->
+          <div class="card-header" style="flex-direction:column; align-items:stretch; gap:0;">
+            <span style="display:flex; flex-direction:column; gap:6px; flex:1;">
+              <span style="display:flex; align-items:center; justify-content:space-between;">
+                <span>${esc(c.name || '(unnamed)')}${c.code?` <span style="opacity:0.6; font-family:var(--font-mono); font-size:10px; margin-left:8px;">${esc(c.code)}</span>`:''}</span>
+                <span class="header-actions" style="display:flex; gap:6px; align-items:center;">
+                  <span class="pill ${c.status==='Active'?'accepted':'draft'}">${esc(c.status||'Active')}</span>
+                  <span class="pill draft">${quotesForC.length} quote${quotesForC.length!==1?'s':''}</span>
+                  <button class="btn btn-sm btn-danger" onclick="App.deleteCustomer('${c.id}')">Delete</button>
+                </span>
+              </span>
+              ${renderTrainingGauge('customer', c)}
+            </span>
           </div>
           <div class="card-body">
             <div class="form-grid cols-4">
@@ -11265,44 +11284,11 @@ function renderCustomersCards(list) {
             ${renderCustomerContactsSection(c)}
             ${renderTrainingSection('customer', c)}
             <hr>
-            <div style="font-family:var(--font-display); font-size:11px; letter-spacing:0.12em; color:var(--steel); margin-bottom:8px;">ONEDRIVE</div>
-            <div class="row" style="gap:8px; align-items:end;">
-              <div class="field grow">
-                <label>Folder name or subpath (under OneDrive root, used to build local quote folder paths)</label>
-                <input type="text" value="${esc(c.oneDriveFolder||'')}"
-                  oninput="App.setCustomerOneDriveFolder('${c.id}', this.value)"
-                  placeholder="e.g. Acme Manufacturing  or  IPS Group\\IPS Akron"
-                  style="font-family:var(--font-mono);">
-              </div>
-              <button class="btn" style="flex:0 0 auto;" onclick="App.openCustomerFolder('${c.id}')"
-                title="Opens this customer's folder in File Explorer (creates it if missing). The OneDrive desktop client syncs it.">
-                📁 Open Folder
-              </button>
-            </div>
-            <div class="row" style="gap:8px; align-items:end; margin-top:8px;">
-              <div class="field grow">
-                <label>OneDrive web share link (optional, paste from "Share → Copy link")</label>
-                <input type="text" value="${esc(c.oneDriveUrl||'')}"
-                  oninput="App.setCustomerOneDriveUrl('${c.id}', this.value)"
-                  placeholder="https://keymf-my.sharepoint.com/…"
-                  style="font-family:var(--font-mono);">
-              </div>
-              ${c.oneDriveUrl ? `
-                <a class="btn" style="flex:0 0 auto;" href="${esc(c.oneDriveUrl)}" target="_blank" rel="noopener"
-                  title="Opens this customer's folder in the OneDrive web app">
-                  ↗ Open in Web
-                </a>
-              ` : `
-                <button class="btn" style="flex:0 0 auto; opacity:0.5;" disabled title="Paste a OneDrive share URL above to enable">
-                  ↗ Open in Web
-                </button>
-              `}
-            </div>
-            <div class="hint" style="margin-top:4px;">
-              ${c.oneDriveFolder
-                ? `Quotes for this customer save under <span class="mono">${esc(sanitizeFolderSubpath(c.oneDriveFolder))}\\${esc(suggestedFolderName({customerId:c.id, quoteNum:'NNNN', date:new Date().toISOString().slice(0,10), parts:[]}))}</span>`
-                : `Folder name not set yet — you'll be prompted the first time you open a quote folder for this customer.`}
-            </div>
+            <!-- v8.6: compact OneDrive status — green ✓ when configured,
+                 warning when partial, red × when empty. Click to expand
+                 the full config. Replaces the four-input vertical layout
+                 that took 100px of vertical space per card. -->
+            ${renderCompactOneDriveStatus(c)}
             <hr>
             <div style="font-family:var(--font-display); font-size:11px; letter-spacing:0.12em; color:var(--steel); margin-bottom:8px;">BILL-TO ADDRESS</div>
             <div class="form-grid cols-6">
@@ -11328,8 +11314,10 @@ function renderCustomersCards(list) {
                 <div class="field" style="grid-column:span 2;"><label>ZIP</label>${bind({label:'Ship ZIP',value:c.shipZip, onChange:v=>{c.shipZip=v;}})}</div>
               </div>
             ` : ''}
-            <hr>
-            <div class="field"><label>Notes</label>${bind({label:'Customer notes',value:c.notes, type:'textarea', onChange:v=>{c.notes=v;}})}</div>
+            <!-- v8.6: collapsible notes — empty = "+ Add note" link only;
+                 filled = collapsed preview chip that expands on click. No
+                 more permanent textarea taking vertical space. -->
+            ${renderCollapsibleNotes('customer', c, v => { c.notes = v; })}
           </div>
         </div>
       `;
@@ -11402,6 +11390,7 @@ function renderCustomerSettingsMatrix() {
         <span>Customer Settings · Excel-style matrix</span>
         <div class="header-actions">
           <span class="text-mute small" style="font-weight:normal; margin-right:10px;">${state.customers.length} on file · ${activeCount} active · ${inactiveCount} inactive</span>
+          <button class="btn btn-sm" onclick="App.distillAllCustomerCodes()" title="Auto-generate 3-4 letter codes for every customer. Sister locations get disambiguating suffixes (IPSA, IPSB, IPSC, ...).">✨ Distill codes</button>
           <button class="btn btn-sm" onclick="App.resetMatrixColumns()" title="Reset column widths to defaults">⤺ Reset columns</button>
           <button class="btn btn-sm btn-primary" onclick="App.newCustomer()">+ Add Customer</button>
         </div>
@@ -11463,7 +11452,10 @@ function renderCustomerSettingsMatrix() {
                       </td>
                       <td>${renderColorSwatchButton(c.color, 'setCustomerColor', c.id)}</td>
                       <td><input type="text" value="${esc(c.name||'')}" onchange="App.setCustomerField('${c.id}','name', this.value)" style="${inputStyle} font-weight:600;" onfocus="${inputFocus}" onblur="${inputBlur}"></td>
-                      <td><input type="text" value="${esc(c.code||'')}" onchange="App.setCustomerField('${c.id}','code', this.value)" style="${inputStyle} font-family:var(--font-mono);" onfocus="${inputFocus}" onblur="${inputBlur}"></td>
+                      <td style="position:relative; padding-right:18px;">
+                        <input type="text" value="${esc(c.code||'')}" onchange="App.setCustomerField('${c.id}','code', this.value)" style="${inputStyle} font-family:var(--font-mono); padding-right:18px;" onfocus="${inputFocus}" onblur="${inputBlur}">
+                        <button onclick="App.distillCustomerCode('${c.id}')" title="Auto-distill code from name" style="position:absolute; right:2px; top:50%; transform:translateY(-50%); padding:0 4px; font-size:9px; background:transparent; border:none; color:var(--orange); cursor:pointer; opacity:0.6;" onmouseover="this.style.opacity='1';" onmouseout="this.style.opacity='0.6';">✨</button>
+                      </td>
                       <td><input type="text" value="${esc(c.contact||'')}" onchange="App.setCustomerField('${c.id}','contact', this.value)" style="${inputStyle}" onfocus="${inputFocus}" onblur="${inputBlur}"></td>
                       <td><input type="email" value="${esc(c.email||'')}" onchange="App.setCustomerField('${c.id}','email', this.value)" style="${inputStyle}" onfocus="${inputFocus}" onblur="${inputBlur}"></td>
                       <td><input type="tel" value="${esc(c.phone||'')}" onchange="App.setCustomerField('${c.id}','phone', this.value)" style="${inputStyle}" onfocus="${inputFocus}" onblur="${inputBlur}"></td>
@@ -13660,10 +13652,18 @@ function renderIconPickerModal() {
 // Click → modal pops with: favorites strip → 128-swatch grid → hex input.
 function renderColorSwatchButton(currentColor, action, ...args) {
   const safeColor = currentColor || '';
-  const argsJson = JSON.stringify(args).replace(/"/g, '&quot;');
+  // v8.6: pass args as a real inline JS-array literal so openColorPicker
+  // receives an actual Array. v8.4-8.5 used JSON.stringify + esc(), but the
+  // browser decoded &quot; back to " BEFORE openColorPicker ran — so the
+  // function got a real Array. Then JSON.parse on that array stringified it
+  // to "abc..." which isn't valid JSON, threw, fell through to args=[].
+  // Result: every color click silently called the setter with no entity id.
+  // Now we emit the args directly as a JS literal — single-quoted strings
+  // inside an array — which the browser parses correctly into a real Array.
+  const argsLiteral = '[' + args.map(a => `'${String(a == null ? '' : a).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`).join(',') + ']';
   return `
     <button type="button"
-            onclick="App.openColorPicker('${esc(action)}', ${esc(JSON.stringify(args))}, '${esc(safeColor)}')"
+            onclick="App.openColorPicker('${esc(action)}', ${argsLiteral}, '${esc(safeColor)}')"
             title="Click to pick a color${safeColor ? ' (current: ' + safeColor + ')' : ''}"
             style="display:inline-flex; align-items:center; gap:4px; padding:2px 6px 2px 2px; border:1px solid var(--line-dark); background:var(--paper); border-radius:3px; cursor:pointer; font-size:11px;">
       <span style="width:24px; height:24px; border-radius:2px; background:${safeColor || 'repeating-linear-gradient(45deg, var(--bg), var(--bg) 4px, var(--line) 4px, var(--line) 6px)'}; display:inline-block; border:1px solid var(--line);"></span>
@@ -14602,6 +14602,209 @@ function renderTrainingSection(entityType, entity) {
       </div>
     </div>
   `;
+}
+
+// v8.6: Training gauge — one chip per doc type relevant to this entity,
+// each showing a 5-segment progress bar that fills with sample count.
+// Lives in the card header (vendor + customer + any other entity using
+// training). At a glance: which docs we're well-trained on, which we're
+// not. Doc types per entity come from TRAINING_DOC_TYPES filtered by
+// entityType (so vendors see Receipts/Invoices/Quotes/etc., customers
+// see RFQs/POs/Drawings/etc.).
+//
+// Trained-ness rubric (samples per doc type):
+//   0   → "untrained" red
+//   1-2 → "learning" amber
+//   3-4 → "trained" green
+//   5+  → "well-trained" deep emerald
+function _trainingGaugeColor(n) {
+  if (n >= 5) return { fill:'#059669', empty:'#ECFDF3', label:'#065F46' };
+  if (n >= 3) return { fill:'#16A34A', empty:'#F0FDF4', label:'#15803D' };
+  if (n >= 1) return { fill:'#D97706', empty:'#FFFBEB', label:'#92400E' };
+  return            { fill:'#CBD5E1', empty:'#F8FAFC', label:'#94A3B8' };
+}
+function renderTrainingGauge(entityType, entity) {
+  if (!entity) return '';
+  const samples = (entity.extractionTraining && Array.isArray(entity.extractionTraining.samples))
+    ? entity.extractionTraining.samples : [];
+  const docTypes = (typeof docTypesFor === 'function') ? docTypesFor(entityType) : [];
+  if (docTypes.length === 0) return '';
+  const TARGET = 5;  // samples required to count as "fully trained"
+  const chips = docTypes.map(dt => {
+    const n = samples.filter(s => s.docType === dt.id).length;
+    const col = _trainingGaugeColor(n);
+    const filled = Math.min(TARGET, n);
+    const segments = Array.from({length: TARGET}, (_, i) => `
+      <span style="display:inline-block; width:7px; height:7px; border-radius:1px; background:${i < filled ? col.fill : col.empty}; ${i < filled ? '' : 'border:1px solid #E2E8F0;'}"></span>
+    `).join('');
+    const label = n === 0 ? 'untrained' : n >= 5 ? 'well-trained' : `${n}/${TARGET}`;
+    return `
+      <span title="${esc(dt.label)} — ${n} sample${n===1?'':'s'} (${label})"
+            style="display:inline-flex; align-items:center; gap:4px; padding:3px 8px; background:rgba(255,255,255,0.10); border-radius:12px; font-size:11px; color:white;">
+        <span style="font-size:13px;">${dt.icon}</span>
+        <span style="opacity:0.9; font-weight:600;">${esc(dt.label.replace(/^(Vendor |Customer )/, ''))}</span>
+        <span style="display:inline-flex; gap:2px; padding:2px; background:rgba(0,0,0,0.18); border-radius:2px;">${segments}</span>
+        <span style="opacity:0.7; font-size:10px; font-family:var(--font-mono);">${n}</span>
+      </span>
+    `;
+  }).join('');
+  return `
+    <div style="display:flex; flex-wrap:wrap; gap:4px; align-items:center; padding-top:6px; margin-top:6px; border-top:1px dashed rgba(255,255,255,0.18);">
+      <span style="font-size:10px; opacity:0.7; letter-spacing:0.06em; font-weight:700; margin-right:4px;">📚 TRAINED ON:</span>
+      ${chips}
+    </div>
+  `;
+}
+
+// v8.6: Collapsible notes — replaces the always-on notes textarea. Empty
+// notes collapse to a single "+ Add note" link (zero footprint). Filled
+// notes collapse to a preview chip; click expands the textarea editor.
+function renderCollapsibleNotes(entityType, entity, onChangeFn) {
+  if (!entity) return '';
+  const notes = (entity.notes || '').trim();
+  const key = `${entityType}:${entity.id}`;
+  const expanded = !!(state.ui.expandedNotes && state.ui.expandedNotes[key]);
+  if (!notes && !expanded) {
+    return `
+      <div style="margin-top:6px;">
+        <a href="javascript:App.toggleExpandedNotes('${esc(entityType)}','${esc(entity.id)}')"
+           style="font-size:11px; color:var(--text-mute); text-decoration:none;">+ Add note</a>
+      </div>
+    `;
+  }
+  if (!expanded) {
+    const preview = notes.length > 80 ? notes.slice(0, 78) + '…' : notes;
+    return `
+      <div style="margin-top:6px;">
+        <button onclick="App.toggleExpandedNotes('${esc(entityType)}','${esc(entity.id)}')"
+                style="width:100%; text-align:left; padding:6px 10px; background:#FEF9C3; border:1px solid #FDE68A; border-radius:3px; cursor:pointer; font-size:12px;">
+          💬 <strong style="color:#92400E;">Note</strong>
+          <span style="color:var(--text);">${esc(preview)}</span>
+          <span style="float:right; color:var(--text-mute); font-size:10px;">▾ click to edit</span>
+        </button>
+      </div>
+    `;
+  }
+  // Expanded — show textarea
+  return `
+    <div style="margin-top:6px;">
+      <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:4px;">
+        <label style="font-size:11px; text-transform:uppercase; letter-spacing:0.06em; color:var(--text-mute); font-weight:600;">💬 Note</label>
+        <button class="btn btn-sm" onclick="App.toggleExpandedNotes('${esc(entityType)}','${esc(entity.id)}')" style="padding:0 6px; font-size:10px;">▴ Collapse</button>
+      </div>
+      ${bind({label:'Notes', value:entity.notes, type:'textarea', onChange:onChangeFn, attrs:'rows="3"'})}
+    </div>
+  `;
+}
+
+// v8.6: Compact OneDrive status block — green checkmark when fully
+// configured, yellow warning when partially, red × when empty. Click
+// the badge to expand the full config inputs. Lets the user scan
+// customer cards for unconfigured OneDrive folders fast.
+function renderCompactOneDriveStatus(c) {
+  const hasFolder = !!(c.oneDriveFolder || '').trim();
+  const hasUrl    = !!(c.oneDriveUrl || '').trim();
+  const expanded = !!(state.ui.expandedOneDrive && state.ui.expandedOneDrive[c.id]);
+  // Status badge
+  let badge, sublabel;
+  if (hasFolder && hasUrl) {
+    badge = `<span style="color:#16A34A; font-weight:700;">✓ OneDrive configured</span>`;
+    sublabel = `<span style="color:var(--text-mute); font-size:11px; margin-left:8px; font-family:var(--font-mono);">${esc(c.oneDriveFolder)}</span>`;
+  } else if (hasFolder) {
+    badge = `<span style="color:#D97706; font-weight:700;">⚠ Folder set, no web link</span>`;
+    sublabel = `<span style="color:var(--text-mute); font-size:11px; margin-left:8px; font-family:var(--font-mono);">${esc(c.oneDriveFolder)}</span>`;
+  } else if (hasUrl) {
+    badge = `<span style="color:#D97706; font-weight:700;">⚠ Web link set, no folder</span>`;
+    sublabel = '';
+  } else {
+    badge = `<span style="color:#C73E1D; font-weight:700;">× OneDrive not configured</span>`;
+    sublabel = `<span style="color:var(--text-mute); font-size:11px; margin-left:8px;">— click to set up</span>`;
+  }
+  const collapsedRow = `
+    <div onclick="App.toggleExpandedOneDrive('${c.id}')"
+         style="cursor:pointer; padding:8px 10px; background:${hasFolder && hasUrl ? '#ECFDF3' : hasFolder || hasUrl ? '#FFFBEB' : '#FDEDEA'};
+                border:1px solid ${hasFolder && hasUrl ? '#16A34A55' : hasFolder || hasUrl ? '#D9770655' : '#C73E1D55'};
+                border-radius:4px; display:flex; align-items:center; gap:8px;">
+      <span style="flex:1; font-size:12px;">📁 ${badge}${sublabel}</span>
+      <span style="font-size:10px; color:var(--text-mute);">${expanded ? '▴ collapse' : '▾ expand'}</span>
+    </div>
+  `;
+  if (!expanded) return collapsedRow;
+  // Expanded — show the full config form below the badge
+  return `
+    ${collapsedRow}
+    <div style="margin-top:6px; padding:10px 12px; background:var(--bg); border:1px solid var(--line-dark); border-radius:4px;">
+      <div class="row" style="gap:8px; align-items:end;">
+        <div class="field grow">
+          <label>Folder name or subpath (under OneDrive root)</label>
+          <input type="text" value="${esc(c.oneDriveFolder||'')}"
+            oninput="App.setCustomerOneDriveFolder('${c.id}', this.value)"
+            placeholder="e.g. Acme Manufacturing  or  IPS Group\\IPS Akron"
+            style="font-family:var(--font-mono);">
+        </div>
+        <button class="btn" style="flex:0 0 auto;" onclick="App.openCustomerFolder('${c.id}')"
+          title="Opens this customer's folder in File Explorer (creates it if missing).">
+          📁 Open Folder
+        </button>
+      </div>
+      <div class="row" style="gap:8px; align-items:end; margin-top:8px;">
+        <div class="field grow">
+          <label>OneDrive web share link (optional)</label>
+          <input type="text" value="${esc(c.oneDriveUrl||'')}"
+            oninput="App.setCustomerOneDriveUrl('${c.id}', this.value)"
+            placeholder="https://keymf-my.sharepoint.com/…"
+            style="font-family:var(--font-mono);">
+        </div>
+        ${c.oneDriveUrl ? `
+          <a class="btn" style="flex:0 0 auto;" href="${esc(c.oneDriveUrl)}" target="_blank" rel="noopener">↗ Open in Web</a>
+        ` : `
+          <button class="btn" style="flex:0 0 auto; opacity:0.5;" disabled>↗ Open in Web</button>
+        `}
+      </div>
+      <div class="hint" style="margin-top:4px;">
+        ${c.oneDriveFolder
+          ? `Quotes save under <span class="mono">${esc(sanitizeFolderSubpath(c.oneDriveFolder))}\\${esc(suggestedFolderName({customerId:c.id, quoteNum:'NNNN', date:new Date().toISOString().slice(0,10), parts:[]}))}</span>`
+          : `Folder name not set — you'll be prompted the first time you open a quote folder for this customer.`}
+      </div>
+    </div>
+  `;
+}
+
+// v8.6: distill a 3-4 char ALL-CAPS code from a customer/vendor name.
+// Used by App.distillCustomerCode + App.distillAllCustomerCodes.
+const _CODE_STOP_WORDS = new Set([
+  'the','and','of','a','an','co','corp','inc','llc','ltd','company',
+  'group','manufacturing','mfg','fab','fabrication','industries',
+  'industrial','machine','services','service','technologies','technology',
+  'tech','systems','system','solutions','enterprise','enterprises','partners','products',
+]);
+function _distillCode(name, takenList) {
+  const taken = new Set((takenList || []).filter(Boolean).map(c => (c || '').toUpperCase()));
+  const cleaned = (name || '').replace(/[^a-zA-Z0-9\s]/g, ' ');
+  const words = cleaned.split(/\s+/).filter(Boolean);
+  const sig = words.filter(w => !_CODE_STOP_WORDS.has(w.toLowerCase()));
+  let base;
+  if (sig.length >= 3) {
+    base = sig.slice(0, 4).map(w => w[0]).join('').toUpperCase();
+  } else if (sig.length === 2) {
+    // 2 of first word + 1 of second  →  e.g. "Alro Steel" → "ALRS"
+    base = (sig[0].slice(0, 3) + sig[1][0]).toUpperCase().slice(0, 4);
+  } else if (sig.length === 1) {
+    base = sig[0].slice(0, 4).toUpperCase();
+  } else {
+    // No significant words after dropping noise — use raw first 4 chars
+    base = (cleaned.replace(/\s+/g, '').slice(0, 4) || 'XXXX').toUpperCase();
+  }
+  if (base.length < 3) base = (base + 'XXX').slice(0, 3);
+  if (!taken.has(base)) return base;
+  // Collision — append A, B, C, ... (or 1, 2, 3 if base is already 4 chars)
+  for (let i = 1; i < 100; i++) {
+    const candidate = base.length >= 4
+      ? base.slice(0, 3) + String.fromCharCode(64 + i)   // bump last char: IPSA, IPSB, IPSC
+      : base + String.fromCharCode(64 + i);              // append: ALR + A → ALRA
+    if (!taken.has(candidate)) return candidate;
+  }
+  return base + Math.random().toString(36).slice(2, 4).toUpperCase();
 }
 
 // v7.61: look up a part type by id. Falls back to a sane default if the id
@@ -18968,6 +19171,34 @@ const App = {
       c[field] = value;
     });
   },
+  // v8.6: auto-distill a 3-4 char code from a customer name. Strategy:
+  // first letter of each significant word, skipping noise words (the,
+  // and, inc, llc, mfg, etc.). If a code collides, append A, B, C, …
+  // Designed for sister-location disambiguation: "Integrated Power Akron"
+  // → IPSA, "Integrated Power Battle Creek" → IPSB.
+  distillCustomerCode(customerId) {
+    update(s => {
+      const c = (s.customers || []).find(cc => cc.id === customerId);
+      if (!c) return;
+      const taken = (s.customers || []).filter(cc => cc.id !== customerId).map(cc => (cc.code || '').toUpperCase());
+      c.code = _distillCode(c.name, taken);
+      logActivity('Distilled customer code', c.name, c.code);
+    });
+  },
+  distillAllCustomerCodes() {
+    if (!confirm('Auto-generate 3-4 letter codes for ALL customers? Existing codes will be replaced.\n\nSister locations get disambiguating suffixes (IPSA, IPSB, ...) so you can tell them apart at a glance.')) return;
+    update(s => {
+      // Sort alpha so suffix assignment is stable across runs
+      const sorted = (s.customers || []).slice().sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+      const taken = [];
+      sorted.forEach(c => {
+        c.code = _distillCode(c.name, taken);
+        taken.push(c.code.toUpperCase());
+      });
+      logActivity('Auto-distilled all customer codes', '', `${sorted.length} customers`);
+    });
+    showToast(`✨ Codes distilled for ${state.customers.length} customer${state.customers.length===1?'':'s'}.`, 3500);
+  },
   // v8.5: matrix column resize. Captures the mouse, listens for move/up,
   // updates the column width state + DOM live. Persists on mouseup.
   startMatrixColumnResize(ev, colKey, startWidth) {
@@ -19010,6 +19241,20 @@ const App = {
       sm.sortDir = 'asc';
     }
     render();
+  },
+  // v8.6: collapsibles for notes + OneDrive on customer/vendor cards
+  toggleExpandedNotes(entityType, entityId) {
+    update(s => {
+      if (!s.ui.expandedNotes) s.ui.expandedNotes = {};
+      const key = entityType + ':' + entityId;
+      s.ui.expandedNotes[key] = !s.ui.expandedNotes[key];
+    });
+  },
+  toggleExpandedOneDrive(customerId) {
+    update(s => {
+      if (!s.ui.expandedOneDrive) s.ui.expandedOneDrive = {};
+      s.ui.expandedOneDrive[customerId] = !s.ui.expandedOneDrive[customerId];
+    });
   },
 
   // v8.0: wizard mode toggle + step navigation handlers
@@ -20547,11 +20792,13 @@ const App = {
 
   // v8.4: 128-color palette picker. Caller passes an action name + args;
   // when user picks, App[action](...args, color) is invoked.
-  openColorPicker(action, argsJson, currentColor) {
-    let args = [];
-    try { args = JSON.parse(argsJson || '[]'); } catch (_) { args = []; }
+  // v8.6: args now arrive as a real Array (inline literal from
+  // renderColorSwatchButton), not a JSON-encoded string. See the comment
+  // in renderColorSwatchButton for why the v8.4 dispatch was broken.
+  openColorPicker(action, args, currentColor) {
+    const argsArr = Array.isArray(args) ? args : [];
     update(s => {
-      s.ui.colorPicker = { action, args, currentColor: currentColor || '' };
+      s.ui.colorPicker = { action, args: argsArr, currentColor: currentColor || '' };
     });
   },
   closeColorPicker() {
