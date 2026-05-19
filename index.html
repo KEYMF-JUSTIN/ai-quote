@@ -760,7 +760,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.73.0';
+const APP_VERSION = '7.74.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -991,6 +991,7 @@ const state = {
     vendorWizard: null,         // v7.68: { open, step, draft } for "+ Add Vendor" guided flow
     customerWizard: null,       // v7.68: { open, step, draft } for "+ Add Customer" guided flow
     entityChipPicker: null,     // v7.72: { kind:'service'|'material', entityType:'vendor'|'customer', entityId, search } — inline picker shown under a chip strip when user clicks "+ Add"
+    iconPicker: null,           // v7.74: { typeIdx } when the Part Type icon picker modal is open. Caller writes the picked emoji to settings.partTypes[idx].icon.
     trainingPicker: null,       // v7.62: { entityType, entityId, sampleId?, file?, parsed?, docType, notes, error, loading } for the training sample editor
     activePurchaseId: null,     // v7.50: currently-open purchase in the Purchasing workspace
     purchaseFilters: { search:'', hiddenStatuses:[], vendor:'all' },
@@ -1550,6 +1551,7 @@ function closeAllModals() {
   state.ui.vendorWizard = null;     // v7.68
   state.ui.customerWizard = null;   // v7.68
   state.ui.entityChipPicker = null; // v7.72
+  state.ui.iconPicker = null;       // v7.74
   state.ui.mcMasterPaste = null;
   state.ui.missingCustFolder = null;
   state.ui.inviteDialog = null;
@@ -4557,6 +4559,20 @@ function densityFor(name) { const m = state.settings.materials.find(x => x.name 
 // Patterns are evaluated in order, first match wins. Anything not matching
 // falls into 'Other'. Materials can also carry an explicit `category` field
 // (set in Settings → Materials) which overrides the auto-detection.
+// v7.74: Curated icon library for the Part Types editor. Grouped so the
+// picker modal shows headers — "Manufacturing", "Assembly", "Finishing",
+// "Materials", "Misc". Add new icons here; the picker auto-paints them.
+// Keep these to single Unicode emoji glyphs — they render the same on
+// Windows, Mac, and the PDF generator. No multi-codepoint sequences.
+const ICON_LIBRARY = [
+  { group:'Manufacturing', icons:['🔧','⚙','📐','🛠','🔨','🪚','🗜','⚡','🔥','💎','⚗','🧱','📏','⚖','🪛','🔩','🪤','🧲'] },
+  { group:'Assembly',      icons:['🧩','📦','🏗','🪜','🔗','⛓','🪝','🧰','🎛','🪞','🎚','🔘','🧿'] },
+  { group:'Finishing',     icons:['🎨','🖌','🧴','✨','🌟','💧','🫧','🪟','🪥','🧽'] },
+  { group:'Materials',     icons:['🟦','🟨','🟧','🟩','🟫','⚪','🪶','🥁','🧊','💠'] },
+  { group:'Inspection',    icons:['🔬','🔍','📋','📊','📈','🎯','📌','📝','🧪','🌡'] },
+  { group:'Logistics',     icons:['🚚','🏭','📅','⏱','💰','💼','🗂','📁','📇','🪧'] },
+];
+
 const MATERIAL_CATEGORIES = [
   { id:'stainless',  label:'Stainless Steel', icon:'✨', color:'#1E5BAE',
     pattern:/\b(stainless|17-?4|17-?7|13-?8|15-?5|303|304[lL]?|316[lL]?|410|416|420|430|440|2205|2507|nitronic|inconel|monel|hastelloy)\b/i },
@@ -5860,6 +5876,7 @@ function render() {
   renderQuoteArchiveImportModal();
   renderNewQuoteKindPickerModal();
   renderPartTypePickerModal();
+  renderIconPickerModal();      // v7.74
   renderVendorWizardModal();    // v7.68
   renderCustomerWizardModal();  // v7.68
   renderTrainingModal();
@@ -11483,6 +11500,86 @@ function renderSettings() {
 
     ${renderUserMgmtCard()}
 
+    <!-- v7.74: User-editable part types. Drives the "What kind of part?"
+         picker modal + (eventually) the v8 per-part wizard's step set. -->
+    <div class="card">
+      <div class="card-header">
+        <span>Part Types · what kinds of parts you quote</span>
+        <div class="header-actions">
+          <button class="btn btn-sm btn-primary" onclick="App.addPartType()">+ Add Part Type</button>
+        </div>
+      </div>
+      <div class="card-body" style="padding:8px 0;">
+        <p class="text-mute small" style="margin:0 14px 10px;">
+          Each part type gets a color-coded card on the "+ Add Part" picker. In v8, the type also determines which wizard steps appear when you build the part. Add custom types here (e.g. "Sheet Metal Brake-Forming", "Tube Bending", "EDM Wire Burn") to expand your shop's vocabulary.
+        </p>
+        <table class="tbl" style="margin:0;">
+          <thead>
+            <tr>
+              <th style="width:30px;"></th>
+              <th style="width:50px; text-align:center;">Icon</th>
+              <th style="width:25%;">Label</th>
+              <th style="width:90px;">Color</th>
+              <th>Description</th>
+              <th style="width:90px;">ID (slug)</th>
+              <th class="action" style="width:90px;"></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${(s.partTypes || []).map((t, i) => `
+              <tr style="border-left:4px solid ${esc(t.color)};">
+                <td style="text-align:center; padding:2px;">
+                  <button class="btn btn-sm" onclick="App.movePartType(${i}, -1)" title="Move up" ${i===0?'disabled style="opacity:0.3;"':''} style="padding:0 4px; font-size:10px;">↑</button>
+                  <button class="btn btn-sm" onclick="App.movePartType(${i}, 1)"  title="Move down" ${i===(s.partTypes.length-1)?'disabled style="opacity:0.3;"':''} style="padding:0 4px; font-size:10px;">↓</button>
+                </td>
+                <td style="text-align:center;">
+                  <button onclick="App.openIconPicker(${i})" title="Pick a different icon"
+                          style="font-size:24px; padding:4px 8px; background:transparent; border:1px dashed var(--line-dark); border-radius:3px; cursor:pointer;">
+                    ${t.icon || '⚙'}
+                  </button>
+                </td>
+                <td>
+                  <input type="text" value="${esc(t.label || '')}" placeholder="e.g. Tube Bending"
+                         onchange="App.setPartTypeField(${i}, 'label', this.value)"
+                         style="width:100%; padding:5px 7px; font-weight:600;">
+                </td>
+                <td>
+                  <div class="row" style="gap:4px; align-items:center;">
+                    <input type="color" value="${esc(t.color || '#64748B')}"
+                           onchange="App.setPartTypeField(${i}, 'color', this.value)"
+                           style="width:36px; height:28px; padding:0; border:1px solid var(--line-dark); cursor:pointer;">
+                    <span class="mono small" style="color:var(--text-mute);">${esc(t.color || '')}</span>
+                  </div>
+                </td>
+                <td>
+                  <input type="text" value="${esc(t.desc || '')}" placeholder="What's this type for? Helps users pick."
+                         onchange="App.setPartTypeField(${i}, 'desc', this.value)"
+                         style="width:100%; padding:5px 7px;">
+                </td>
+                <td>
+                  <input type="text" value="${esc(t.id || '')}"
+                         onchange="App.setPartTypeField(${i}, 'id', this.value)"
+                         title="Internal slug — change only if you know what you're doing (existing parts reference this id)"
+                         style="width:100%; padding:5px 7px; font-family:var(--font-mono); font-size:11px; color:var(--text-mute);">
+                </td>
+                <td class="action">
+                  <button class="btn btn-sm btn-danger" onclick="App.removePartType(${i})" title="Delete this type">×</button>
+                </td>
+              </tr>
+            `).join('')}
+            ${(!s.partTypes || s.partTypes.length === 0) ? `
+              <tr><td colspan="7" style="text-align:center; padding:20px; color:var(--text-mute);">
+                No part types yet. Click <strong>+ Add Part Type</strong> above to create your first.
+              </td></tr>
+            ` : ''}
+          </tbody>
+        </table>
+        <div style="padding:10px 14px; border-top:1px solid var(--line); font-size:11px; color:var(--text-mute);">
+          <strong>Tips:</strong> Click an icon to open the icon library, or type any emoji directly. The color shows up as a stripe on the part chip in the parts row. The slug is what gets saved on each part (<code>p.typeId</code>) — be careful renaming.
+        </div>
+      </div>
+    </div>
+
     <div class="card">
       <div class="card-header">
         <span>Material Densities (lb/in³) &amp; Vendor Assignments</span>
@@ -12670,6 +12767,52 @@ function renderPartTypePickerModal() {
         </div>
         <div class="modal-footer">
           <button class="btn" onclick="App.closePartTypePicker()">Cancel</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// v7.74: Icon picker modal — opened from the Part Types editor when the user
+// clicks a part type's icon. Shows the ICON_LIBRARY grouped by category.
+// Click an icon → writes it back to state.settings.partTypes[idx].icon and
+// closes the modal.
+function renderIconPickerModal() {
+  let host = document.getElementById('icon-picker-host');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'icon-picker-host';
+    document.body.appendChild(host);
+  }
+  const p = state.ui.iconPicker;
+  if (!p) { host.innerHTML = ''; return; }
+  const groups = ICON_LIBRARY.map(g => `
+    <div style="margin-bottom:14px;">
+      <div style="font-family:var(--font-display); font-size:10px; letter-spacing:0.08em; color:var(--text-mute); font-weight:700; margin-bottom:6px;">${esc(g.group).toUpperCase()}</div>
+      <div style="display:grid; grid-template-columns:repeat(10, 1fr); gap:4px;">
+        ${g.icons.map(ic => `
+          <button onclick="App.pickIcon('${esc(ic)}')" title="${esc(ic)}"
+                  style="font-size:22px; padding:6px; background:var(--paper); border:1px solid var(--line-dark); border-radius:3px; cursor:pointer; transition:all 0.08s;"
+                  onmouseover="this.style.borderColor='var(--orange)'; this.style.background='#FFF7ED'; this.style.transform='scale(1.15)';"
+                  onmouseout="this.style.borderColor='var(--line-dark)'; this.style.background='var(--paper)'; this.style.transform='scale(1)';">
+            ${ic}
+          </button>
+        `).join('')}
+      </div>
+    </div>
+  `).join('');
+  host.innerHTML = `
+    <div class="modal-backdrop" onclick="App.closeIconPicker()">
+      <div class="modal" style="width:560px; max-width:96vw;" onclick="event.stopPropagation()">
+        <div class="modal-header">Pick an icon</div>
+        <div class="modal-body" style="max-height:60vh; overflow-y:auto;">
+          ${groups}
+          <div style="margin-top:6px; padding-top:10px; border-top:1px dashed var(--line); font-size:11px; color:var(--text-mute);">
+            Need a different one? Type any emoji directly in the part type's icon field.
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn" onclick="App.closeIconPicker()">Cancel</button>
         </div>
       </div>
     </div>
@@ -19162,6 +19305,82 @@ const App = {
   addRate() { update(s => { s.settings.rates.push({ name:'New machine', setupRate:100, runRate:100 }); }); },
   removeRate(idx) { update(s => { s.settings.rates.splice(idx, 1); }); },
   addMaterial() { update(s => { s.settings.materials.push({ id: uid(), name:'New material', density:0, vendorIds:[] }); }); },
+
+  // v7.74: Part Type editor handlers. The part types drive the "+ Add Part"
+  // picker modal and (in v8) which wizard steps a given part sees.
+  addPartType() {
+    update(s => {
+      if (!Array.isArray(s.settings.partTypes)) s.settings.partTypes = [];
+      // Generate a slug-safe id from a placeholder label
+      const baseId = 'custom' + (s.settings.partTypes.length + 1);
+      s.settings.partTypes.push({
+        id: baseId,
+        label: 'New Part Type',
+        icon: '⚙',
+        color: '#64748B',
+        desc: 'Describe what this type is for',
+      });
+      logActivity('Added part type', 'New Part Type');
+    });
+  },
+  removePartType(idx) {
+    const t = (state.settings.partTypes || [])[idx];
+    if (!t) return;
+    const usedBy = (state.quotes || []).reduce((n, q) => n + (q.parts || []).filter(p => p.typeId === t.id).length, 0);
+    let msg = `Delete part type "${t.label}"?`;
+    if (usedBy > 0) {
+      msg += `\n\n${usedBy} part${usedBy===1?'':'s'} on existing quotes use this type. They'll keep their old typeId but won't show a color stripe. You can re-assign them by clicking the part type pill on each part.`;
+    }
+    if (!confirm(msg)) return;
+    update(s => {
+      s.settings.partTypes.splice(idx, 1);
+      logActivity('Removed part type', t.label);
+    });
+  },
+  setPartTypeField(idx, field, value) {
+    update(s => {
+      const t = (s.settings.partTypes || [])[idx];
+      if (!t) return;
+      if (field === 'id') {
+        // Slugify: lowercase, alphanumeric + underscore only
+        const newId = String(value || '').toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '') || 'type' + idx;
+        // Cascade rename: update p.typeId on every part that referenced the old id
+        const oldId = t.id;
+        if (oldId && oldId !== newId) {
+          (s.quotes || []).forEach(q => (q.parts || []).forEach(p => {
+            if (p.typeId === oldId) p.typeId = newId;
+          }));
+        }
+        t.id = newId;
+      } else {
+        t[field] = value;
+      }
+    });
+  },
+  movePartType(idx, delta) {
+    update(s => {
+      const arr = s.settings.partTypes || [];
+      const newIdx = idx + delta;
+      if (newIdx < 0 || newIdx >= arr.length) return;
+      const [moved] = arr.splice(idx, 1);
+      arr.splice(newIdx, 0, moved);
+    });
+  },
+  openIconPicker(typeIdx) {
+    update(s => { s.ui.iconPicker = { typeIdx }; });
+  },
+  closeIconPicker() {
+    update(s => { s.ui.iconPicker = null; });
+  },
+  pickIcon(icon) {
+    const p = state.ui.iconPicker;
+    if (!p) return;
+    update(s => {
+      const t = (s.settings.partTypes || [])[p.typeIdx];
+      if (t) t.icon = icon;
+      s.ui.iconPicker = null;
+    });
+  },
 
   // --- Materials Database Picker ---
   openMaterialDbPicker() {
