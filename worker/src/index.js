@@ -72,6 +72,18 @@ export default {
         return jsonResponse(result, 200, env, origin);
       }
 
+      // POST /api/mcmaster/lookup
+      // McMaster Smart Paste assist: client posts { url, partNum } — Worker
+      // fetches the McMaster product page and asks Claude to extract structured
+      // part data (description, price, pack size, weight, dims, etc.). No
+      // McMaster API credentials needed; we just scrape the public product
+      // page. Works for catalog parts where pricing is publicly listed.
+      if (request.method === 'POST' && path === '/api/mcmaster/lookup') {
+        const body = await request.json();
+        const result = await handleMcMasterLookup(env, body);
+        return jsonResponse(result, 200, env, origin);
+      }
+
       return errorResponse(`Not found: ${request.method} ${path}`, 404, env, origin);
     } catch (err) {
       console.error('worker error', err && err.stack || err);
@@ -673,6 +685,145 @@ async function handleExtractEntity(env, body) {
     model: result.model,
     usage: result.usage,
   };
+}
+
+// =================================================================
+// /api/mcmaster/lookup
+// Public-catalog scrape. Given a McMaster URL or part #, fetches the product
+// page, strips it down to the meaningful sections, and asks Claude to
+// extract structured fields. No McMaster API credentials required — the
+// product pages are publicly accessible and publish their own price/spec
+// blocks server-rendered into the HTML.
+//
+// Input:  { url?: 'https://www.mcmaster.com/91290A115/', partNum?: '91290A115' }
+// Output: { parsed: {partNum, description, price, packSize, ...}, model, usage }
+// =================================================================
+async function handleMcMasterLookup(env, body) {
+  if (!body || typeof body !== 'object') throw badRequest('Body must be JSON');
+  let url = (body.url || '').trim();
+  let partNum = (body.partNum || '').trim().toUpperCase();
+  // Normalize: if we got just a part#, build the canonical URL.
+  // McMaster's canonical product URL is https://www.mcmaster.com/<partNum>/
+  if (!url && partNum) url = `https://www.mcmaster.com/${encodeURIComponent(partNum)}/`;
+  // If we got a URL, pull partNum out of the path for downstream use
+  if (url && !partNum) {
+    const m = url.match(/mcmaster\.com\/([0-9][0-9A-Z]{3,9})(?:[/?#]|$)/i);
+    if (m) partNum = m[1].toUpperCase();
+  }
+  if (!url) throw badRequest('Provide a McMaster url or partNum.');
+
+  // Fetch the page. McMaster doesn't aggressively block User-Agents, but we
+  // set a realistic one + Accept-Language to mimic a normal browser visit.
+  let html = '';
+  let fetchStatus = 0;
+  try {
+    const res = await fetch(url, {
+      method: 'GET',
+      redirect: 'follow',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+    });
+    fetchStatus = res.status;
+    html = await res.text();
+  } catch (e) {
+    throw new Error('Could not fetch McMaster page: ' + (e.message || e));
+  }
+  if (!html || fetchStatus >= 400) {
+    throw new Error(`McMaster returned HTTP ${fetchStatus}. The part # might be wrong or the page is restricted.`);
+  }
+
+  // Strip the HTML down so we're not feeding 500KB of styles/scripts to
+  // Claude. Keep <title>, <meta>, JSON-LD blocks, and the visible text
+  // content. Hard-cap to keep token usage sane.
+  const stripped = _stripMcMasterHtml(html).slice(0, 60000);
+
+  const tool = {
+    name: 'submit_mcmaster_part',
+    description: 'Submit the structured data extracted from the McMaster product page. All fields are optional — leave anything you cannot confidently determine as null.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        partNum:      { type: 'string', description: 'McMaster part number (e.g. 91290A115).' },
+        description:  { type: 'string', description: 'Short product description — what shows under the title on the page.' },
+        category:     { type: 'string', description: 'Category breadcrumb (e.g. "Socket Head Cap Screws").' },
+        price:        { type: 'number', description: 'Catalog price as a decimal number. Pick the most prominent price — usually the smallest pack size.' },
+        priceUnit:    { type: 'string', enum: ['each','pack','per100','per_foot','per_lb','unknown'], description: 'How the price is denominated.' },
+        packSize:     { type: 'number', description: 'Pack quantity if the price is per pack (e.g. 50 if "$8.45 per pack of 50"). Null if per-each.' },
+        material:     { type: 'string', description: 'Material called out on the page (e.g. "18-8 Stainless Steel", "Alloy Steel").' },
+        finish:       { type: 'string', description: 'Surface finish (e.g. "Black Oxide", "Zinc Plated").' },
+        threadSize:   { type: 'string', description: 'Thread size if applicable (e.g. "M6 x 1 mm", "1/4"-20").' },
+        length:       { type: 'string', description: 'Length, with units (e.g. "1\\\"", "25 mm").' },
+        weight:       { type: 'string', description: 'Item weight as listed (e.g. "0.5 oz", "12 g").' },
+        availability: { type: 'string', description: 'Availability/stock language as shown (e.g. "In Stock", "Ships in 1 business day").' },
+        imageUrl:     { type: 'string', description: 'Absolute URL of the primary product image, if present.' },
+        notes:        { type: 'string', description: 'Any other useful detail in one sentence (max 200 chars).' },
+      },
+    },
+  };
+
+  const promptText = [
+    'You are extracting structured catalog data from a McMaster-Carr product page.',
+    '',
+    `URL: ${url}`,
+    partNum ? `Expected part #: ${partNum}` : '',
+    '',
+    'Be conservative — leave fields null if the page is ambiguous. McMaster pages publish prices and pack sizes in plain text — pick the most prominently displayed pack/price (usually the smallest qty).',
+    '',
+    'PAGE CONTENT (HTML stripped to meaningful text):',
+    '----',
+    stripped,
+    '----',
+  ].filter(Boolean).join('\n');
+
+  const result = await extractWithTool(env, {
+    tool,
+    content: [{ type: 'text', text: promptText }],
+    model: body.model || env.CLAUDE_MODEL,
+    max_tokens: 1024,
+  });
+
+  return {
+    parsed: result.data,
+    sourceUrl: url,
+    fetchStatus,
+    htmlBytes: html.length,
+    model: result.model,
+    usage: result.usage,
+  };
+}
+
+// Crude HTML→text strip. Removes <script>/<style>/<svg>, collapses
+// whitespace. Keeps JSON-LD blocks since they often carry the structured
+// data we want (offers, price, sku). Good enough to feed to Claude.
+function _stripMcMasterHtml(html) {
+  if (!html) return '';
+  let s = String(html);
+  // Pull out JSON-LD blocks FIRST and reinsert them as raw at the top
+  const jsonLd = [];
+  s = s.replace(/<script[^>]*type\s*=\s*['"]application\/ld\+json['"][^>]*>([\s\S]*?)<\/script>/gi, (_, body) => {
+    jsonLd.push(body.trim());
+    return '';
+  });
+  // Strip script / style / svg blocks
+  s = s.replace(/<(script|style|svg|noscript)[^>]*>[\s\S]*?<\/\1>/gi, '');
+  // Strip HTML comments
+  s = s.replace(/<!--[\s\S]*?-->/g, '');
+  // Convert <br>, </p>, </div> to newlines for readability
+  s = s.replace(/<br\s*\/?>/gi, '\n');
+  s = s.replace(/<\/(p|div|li|tr|h\d)>/gi, '\n');
+  // Strip remaining tags
+  s = s.replace(/<[^>]+>/g, ' ');
+  // Decode common HTML entities
+  s = s.replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+  // Collapse whitespace
+  s = s.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+  if (jsonLd.length) {
+    s = '=== JSON-LD ===\n' + jsonLd.join('\n---\n') + '\n=== TEXT ===\n' + s;
+  }
+  return s;
 }
 
 // Local num() — mirrors the frontend helper for null/empty/NaN safety

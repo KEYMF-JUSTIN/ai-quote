@@ -769,7 +769,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '8.11.0';
+const APP_VERSION = '8.12.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -17244,26 +17244,41 @@ function renderSupplierCostBody(q, p) {
                   ${extracted ? `<button class="btn btn-sm btn-primary" onclick="App.applyMcMasterPaste()" title="Fill the part fields below with what was extracted">Apply →</button>` : ''}
                 </div>
               </div>
+              ${pasteState && pasteState._looking ? `
+                <div style="margin-top:6px; padding:8px 10px; background:#FFF7ED; border:1px solid #FED7AA; border-radius:4px; font-size:11px; color:var(--orange);">
+                  ⏳ <strong>Fetching from McMaster…</strong> Claude is reading the product page to pull description, price, pack size, material, etc. (~5–15s)
+                </div>
+              ` : pasteState && pasteState._lookupError ? `
+                <div style="margin-top:6px; padding:8px 10px; background:#FDEDEA; border:1px solid #FCA5A5; border-radius:4px; font-size:11px; color:#991B1B;">
+                  ⚠ <strong>Lookup failed:</strong> ${esc(pasteState._lookupError)}
+                  <div style="margin-top:4px;">Try copying the part details directly from McMaster (Settings → Copy and paste settings → "Formatted for copying and pasting") and paste those lines instead.</div>
+                </div>
+              ` : ''}
               ${extracted ? `
                 <div style="margin-top:6px; padding:8px 10px; background:#ECFDF5; border:1px solid #6EE7B7; border-radius:4px; font-size:11px;">
-                  <strong style="font-size:11px; text-transform:uppercase; letter-spacing:0.06em; color:#065F46;">${extracted.source === 'bookmarklet' ? '✓ Bookmarklet JSON detected' : '✓ Extracted from pasted text'}</strong>
+                  <strong style="font-size:11px; text-transform:uppercase; letter-spacing:0.06em; color:#065F46;">${extracted.source === 'bookmarklet' ? '✓ Bookmarklet JSON detected' : extracted.source === 'worker-claude' ? '✨ Looked up via Claude' : '✓ Extracted from pasted text'}</strong>
                   <div style="display:grid; grid-template-columns:auto 1fr; gap:4px 12px; margin-top:4px;">
                     ${extracted.partNum ? `<div style="color:var(--text-mute);">Part #</div><div><strong>${esc(extracted.partNum)}</strong></div>` : ''}
                     ${extracted.price != null ? `<div style="color:var(--text-mute);">Price</div><div><strong>${fmtMoney(extracted.price)}</strong>${extracted.priceUnit === 'pack' && extracted.packSize ? ` <span class="text-mute">(pack of ${extracted.packSize} → ${fmtMoney(extracted.price/extracted.packSize)}/pc)</span>` : extracted.priceUnit ? ` <span class="text-mute">(${esc(extracted.priceUnit)})</span>` : ''}</div>` : ''}
                     ${extracted.availability ? `<div style="color:var(--text-mute);">Availability</div><div>${esc(extracted.availability)}</div>` : ''}
                     ${extracted.url ? `<div style="color:var(--text-mute);">URL</div><div><a href="${esc(extracted.url)}" target="_blank" rel="noopener" class="mono" style="font-size:10px;">${esc(extracted.url.length > 60 ? extracted.url.slice(0,60)+'…' : extracted.url)}</a></div>` : ''}
                     ${extracted.description ? `<div style="color:var(--text-mute);">Description</div><div>${esc(extracted.description)}</div>` : ''}
+                    ${extracted._mcmExtra && extracted._mcmExtra.material ? `<div style="color:var(--text-mute);">Material</div><div>${esc(extracted._mcmExtra.material)}</div>` : ''}
+                    ${extracted._mcmExtra && extracted._mcmExtra.finish ? `<div style="color:var(--text-mute);">Finish</div><div>${esc(extracted._mcmExtra.finish)}</div>` : ''}
+                    ${extracted._mcmExtra && extracted._mcmExtra.threadSize ? `<div style="color:var(--text-mute);">Thread</div><div>${esc(extracted._mcmExtra.threadSize)}</div>` : ''}
+                    ${extracted._mcmExtra && extracted._mcmExtra.length ? `<div style="color:var(--text-mute);">Length</div><div>${esc(extracted._mcmExtra.length)}</div>` : ''}
+                    ${extracted._mcmExtra && extracted._mcmExtra.weight ? `<div style="color:var(--text-mute);">Weight</div><div>${esc(extracted._mcmExtra.weight)}</div>` : ''}
                   </div>
                 </div>
-              ` : text.trim() ? `
+              ` : text.trim() && pasteState && !pasteState._looking ? `
                 <div style="margin-top:6px; padding:8px 10px; background:#FEF3C7; border:1px solid #FCD34D; border-radius:4px; font-size:11px; color:#78350F;">
-                  ⚠ Couldn't extract anything from that text. Make sure you're logged in to McMaster when you copy (so prices are visible on the page), and copy a section that includes the price + part # together.
+                  ⚠ Nothing extracted yet. If you pasted a URL, we'll fetch it automatically — wait a few seconds. Otherwise copy a section that includes the price + part # together.
                 </div>
-              ` : `
+              ` : !text.trim() ? `
                 <div class="hint" style="margin-top:6px;">
-                <strong>Tip:</strong> in your McMaster account → Settings → Copy and paste settings, pick <strong>"Formatted for copying and pasting"</strong> — then copying a product gives clean 3-line output (part #, description, price per pack of N) that this parser handles perfectly.
+                <strong>Tip:</strong> paste a McMaster URL (e.g. <span class="mono">https://www.mcmaster.com/91290A115/</span>) and Claude will fetch the page and fill everything in. Or use the bookmarklet / "Formatted for copying and pasting" mode for instant local parsing.
               </div>
-              `}
+              ` : ''}
             `}
           </div>
         `;
@@ -21353,6 +21368,67 @@ const App = {
       const ta = document.querySelector('textarea[oninput*="setMcMasterPasteText"]');
       if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
     }, 0);
+    // v8.12: if the user pasted JUST a URL (extracted has partNum/url but
+    // no description/price), fire an async Worker lookup that fetches the
+    // McMaster product page, has Claude extract structured data, and
+    // merges the result back into the modal's `extracted` block. This
+    // makes paste-a-URL "magically work" — no need to use McMaster's
+    // formatted-copy mode anymore.
+    const ex = state.ui.mcMasterPaste.extracted;
+    if (ex && (ex.partNum || ex.url) && !ex.description && (ex.price == null)) {
+      this._mcMasterLookupAsync(ex.url, ex.partNum);
+    }
+  },
+  // v8.12: hit the Worker, fetch the McMaster page, get structured data
+  // back, merge into the open Smart Paste modal. Fire-and-forget — the
+  // modal shows a "looking up…" status while it runs.
+  async _mcMasterLookupAsync(url, partNum) {
+    const ps = state.ui.mcMasterPaste;
+    if (!ps) return;
+    // Avoid duplicate concurrent lookups for the same key
+    const key = (url || '') + '|' + (partNum || '');
+    if (ps._lookupKey === key && ps._looking) return;
+    ps._lookupKey = key;
+    ps._looking = true;
+    ps._lookupError = '';
+    render();
+    try {
+      const res = await workerCall('/api/mcmaster/lookup', { url: url || '', partNum: partNum || '' }, { timeoutMs: 30000 });
+      if (!state.ui.mcMasterPaste || state.ui.mcMasterPaste._lookupKey !== key) return; // modal closed / changed
+      const parsed = res.parsed || {};
+      // Merge into extracted — only fill empty fields so we don't clobber
+      // anything the regex got right from the pasted text.
+      const merged = Object.assign({}, ps.extracted || {});
+      if (parsed.partNum && !merged.partNum) merged.partNum = parsed.partNum;
+      if (parsed.description && !merged.description) merged.description = parsed.description;
+      if (parsed.price != null && isFinite(parsed.price) && merged.price == null) {
+        merged.price = parsed.price;
+        merged.priceUnit = parsed.priceUnit || merged.priceUnit || 'each';
+        if (parsed.packSize) merged.packSize = parsed.packSize;
+      }
+      if (parsed.imageUrl && !merged.drawingUrl) merged.drawingUrl = parsed.imageUrl;
+      if (parsed.availability && !merged.availability) merged.availability = parsed.availability;
+      // Stash everything else under _mcmExtra for the apply step to optionally append to notes
+      merged._mcmExtra = {
+        material: parsed.material, finish: parsed.finish, threadSize: parsed.threadSize,
+        length: parsed.length, weight: parsed.weight, category: parsed.category,
+        notes: parsed.notes,
+      };
+      merged.source = 'worker-claude';
+      ps.extracted = merged;
+      ps._looking = false;
+      ps._lookupError = '';
+      render();
+      showToast(`✨ McMaster ${merged.partNum || 'part'} looked up — review and Apply.`, 3500);
+    } catch (e) {
+      const ps2 = state.ui.mcMasterPaste;
+      if (ps2 && ps2._lookupKey === key) {
+        ps2._looking = false;
+        ps2._lookupError = (e && e.message) ? e.message : String(e);
+        render();
+      }
+      console.warn('[mcmaster lookup]', e);
+    }
   },
   applyMcMasterPaste() {
     const ps = state.ui.mcMasterPaste;
@@ -21401,10 +21477,20 @@ const App = {
         p.description = ex.description;
         applied.push('description');
       }
-      // Availability + drawing URL go into notes if we don't have dedicated fields
+      // Availability + drawing URL + Claude-only extras go into notes
       const noteAdditions = [];
       if (ex.availability) noteAdditions.push(`Avail: ${ex.availability}`);
       if (ex.drawingUrl) noteAdditions.push(`Drawing: ${ex.drawingUrl}`);
+      // v8.12: extra fields from the Worker lookup (material, finish, etc.)
+      if (ex._mcmExtra) {
+        const x = ex._mcmExtra;
+        if (x.material)   noteAdditions.push(`Material: ${x.material}`);
+        if (x.finish)     noteAdditions.push(`Finish: ${x.finish}`);
+        if (x.threadSize) noteAdditions.push(`Thread: ${x.threadSize}`);
+        if (x.length)     noteAdditions.push(`Length: ${x.length}`);
+        if (x.weight)     noteAdditions.push(`Weight: ${x.weight}`);
+        if (x.category)   noteAdditions.push(`Category: ${x.category}`);
+      }
       if (noteAdditions.length > 0) {
         const tag = `[McMaster ${new Date().toISOString().slice(0,10)}] ${noteAdditions.join(' · ')}`;
         p.notes = p.notes ? `${p.notes}\n${tag}` : tag;
