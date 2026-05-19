@@ -35,15 +35,24 @@
     100% { box-shadow: 0 0 0 0 rgba(34,197,94,0); }
   }
   :root {
+    /* v8.3: palette refresh to match the v8 mockup's warm cream + slate scheme.
+       Cool greys swapped for slate so the app reads as a cohesive paper feel.
+       Part-type accent colors (blue/purple/teal/amber) added as first-class
+       vars so chip/banner styling can reference them by name instead of
+       hardcoding hex. */
     --navy:#1F2937; --navy-deep:#111827; --navy-light:#374151;
-    --steel:#4B5563; --steel-l:#9CA3AF;
-    --bg:#F4F5F7; --paper:#FFFFFF; --line:#E5E7EB; --line-dark:#D1D5DB;
-    --text:#111827; --text-mute:#6B7280;
-    --input-bg:#FAFBFC; --input-bd:#D1D5DB;
-    --green:#15803D; --green-l:#DCFCE7;
-    --orange:#DC4318; --orange-l:#FFEDD5;
-    --red:#B91C1C;
-    --section-divider:#9CA3AF;
+    --steel:#64748B; --steel-l:#94A3B8;
+    --bg:#F8F4ED; --paper:#FFFFFF; --line:#E5E7EB; --line-dark:#CBD5E1;
+    --text:#1F2937; --text-mute:#64748B;
+    --input-bg:#FFFCF7; --input-bd:#CBD5E1;
+    --green:#16A34A; --green-l:#ECFDF3;
+    --orange:#DC4318; --orange-l:#FFF7ED;
+    --red:#C73E1D;
+    --blue:#1E5BAE;     /* part type: Machined, generic info banner */
+    --purple:#7C3AED;   /* part type: Cut Blank */
+    --teal:#0891B2;     /* part type: Finishing */
+    --amber:#B45309;    /* part type: Hybrid / Tooling / Material chips */
+    --section-divider:#94A3B8;
     --font-display:'Archivo Black','Impact',system-ui,sans-serif;
     --font-body:'Public Sans',system-ui,-apple-system,sans-serif;
     --font-mono:'JetBrains Mono','SF Mono','Consolas',monospace;
@@ -760,7 +769,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '8.2.0';
+const APP_VERSION = '8.3.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -1130,6 +1139,8 @@ function migrateState() {
     // customers don't crash _entityMaterialIds / matrix renderers.
     if (!Array.isArray(c.services))    c.services = [];
     if (!Array.isArray(c.materialIds)) c.materialIds = [];
+    // v8.3: customer color (empty = no custom color, use neutral default)
+    if (typeof c.color !== 'string') c.color = '';
     if (c.contacts.length === 0 && (c.email || c.contact || c.phone)) {
       c.contacts.push(newContact({
         name: c.contact || '',
@@ -4426,6 +4437,7 @@ function newCustomer() {
     contacts: [],     // v7.48: multiple people per customer — {id, name, email, phone, role, isPrimary, notes}
     services: [],     // v7.71: what this customer typically orders from us (slugs from ALL_SERVICES)
     materialIds: [],  // v7.71: which materials this customer typically buys (ids from settings.materials)
+    color: '',        // v8.3: optional custom color (hex) so the customer's chip in the picker grid + banner stands out. Use for grouping locations of a parent org (e.g. all Integrated Power locations a single color).
   };
 }
 // v7.48: separate-person contact under a customer
@@ -5810,12 +5822,23 @@ function renderHeaderConnPill() {
     aiBg='rgba(220,38,38,0.18)'; aiFg='#dc2626'; aiDot='#ef4444';
     aiLabel='AI Offline'; aiTitle='Cloudflare Worker unreachable: ' + (wh.error || 'unknown');
   }
+  // v8.3: when sync is configured but disconnected, show a small 🔄 retry
+  // button right next to the pill. Click bypasses the throttle and forces
+  // a connect attempt. Surfaces the last error message via tooltip.
+  const showRetryBtn = (state === 'disconnected' || state === 'error')
+                       && SyncEngine.config && SyncEngine.config.enabled
+                       && SyncEngine.config.email && SyncEngine.config.password;
+  const retryTitle = _lastSyncError ? ('Last error: ' + _lastSyncError + ' — click to retry') : 'Click to retry connecting to cloud sync';
   el.innerHTML = `
     <button class="btn btn-ghost" onclick="App.gotoSyncCard()" title="${title}"
       style="display:inline-flex; align-items:center; gap:6px; padding:4px 10px; background:${bg}; color:${fg}; border:none; border-radius:14px; font-size:11px; font-weight:700; letter-spacing:0.04em;">
       <span style="display:inline-block; width:7px; height:7px; border-radius:50%; background:${dot}; ${state==='connected' ? 'box-shadow:0 0 0 0 rgba(34,197,94,0.6); animation:pulseDot 2s infinite;' : ''}"></span>
       ${esc(label)}
     </button>
+    ${showRetryBtn ? `<button class="btn btn-ghost" onclick="App.manualSyncReconnect()" title="${esc(retryTitle)}"
+      style="display:inline-flex; align-items:center; gap:4px; padding:4px 8px; margin-left:4px; background:rgba(220,67,24,0.18); color:var(--orange); border:none; border-radius:14px; font-size:11px; font-weight:700;">
+      🔄 Reconnect
+    </button>` : ''}
     <button class="btn btn-ghost" onclick="App.refreshWorkerHealth()" title="${esc(aiTitle)}"
       style="display:inline-flex; align-items:center; gap:6px; padding:4px 10px; margin-left:6px; background:${aiBg}; color:${aiFg}; border:none; border-radius:14px; font-size:11px; font-weight:700; letter-spacing:0.04em;">
       <span style="display:inline-block; width:7px; height:7px; border-radius:50%; background:${aiDot};"></span>
@@ -11144,6 +11167,23 @@ function renderCustomersCards(list) {
               <div class="field"><label>Email</label>${bind({label:'Email',value:c.email, type:'email', onChange:v=>{c.email=v;}})}</div>
               <div class="field"><label>Phone</label>${bind({label:'Phone',value:c.phone, type:'tel', onChange:v=>{c.phone=v;}})}</div>
               <div class="field"><label>Sales Rep</label>${bind({label:'Sales Rep',value:c.salesRep, onChange:v=>{c.salesRep=v;}, placeholder:'HOUSE / MJ / JMJ / MM'})}</div>
+              <!-- v8.3: per-customer color. Use to group locations of the
+                   same parent org (e.g. all Integrated Power locations a
+                   single shared color) so they're visually identifiable in
+                   the customer picker grid. Blank = no custom color. -->
+              <div class="field">
+                <label>Color (optional)</label>
+                <div style="display:flex; gap:6px; align-items:center;">
+                  <input type="color" value="${esc(c.color || '#94a3b8')}"
+                         onchange="App.setCustomerColor('${c.id}', this.value)"
+                         style="width:42px; height:32px; padding:0; border:1px solid var(--line-dark); cursor:pointer; background:transparent;">
+                  ${c.color ? `
+                    <span class="mono small" style="color:var(--text-mute);">${esc(c.color)}</span>
+                    <button class="btn btn-sm" onclick="App.setCustomerColor('${c.id}','')" title="Remove custom color">×</button>
+                  ` : '<span class="text-mute small">none</span>'}
+                </div>
+                <div class="hint">Used in the customer picker grid + quote banner. Tip: pick the same color for all locations of one parent company (e.g. all Integrated Power sites).</div>
+              </div>
             </div>
             <hr>
             <!-- v7.72: services + materials chip strips. Captures what this
@@ -12316,11 +12356,16 @@ function renderQuoteCustomerBanner(q) {
   const c = getCustomer(q.customerId);
   const total = quoteTotalAt(q, 0);
   const nParts = (q.parts || []).length;
+  // v8.3: if the customer has a custom color, use it as a left-edge stripe
+  // so the banner is instantly identifiable across quotes for that
+  // customer (or grouped sibling locations of one parent org).
+  const stripe = (c && c.color) ? c.color : '';
   return `
-    <div style="background:linear-gradient(135deg, var(--navy) 0%, #2A3B52 100%); color:white; padding:10px 16px; border-radius:4px; margin-bottom:10px;">
+    <div style="background:linear-gradient(135deg, var(--navy) 0%, #2A3B52 100%); color:white; padding:10px 16px; border-radius:4px; margin-bottom:10px; ${stripe ? `border-left:6px solid ${esc(stripe)};` : ''}">
       <div style="display:flex; align-items:center; gap:14px; flex-wrap:wrap;">
         <div style="flex:1; min-width:200px;">
           <div style="font-size:18px; font-weight:700; line-height:1.1;">
+            ${stripe ? `<span style="display:inline-block; width:10px; height:10px; border-radius:50%; background:${esc(stripe)}; margin-right:8px; vertical-align:middle;"></span>` : ''}
             ${esc(c?.name || 'No customer')}
             <span style="font-size:11px; opacity:0.7; margin-left:8px; font-weight:400;">${esc(q.quoteNum || '(new)')}</span>
           </div>
@@ -12706,19 +12751,29 @@ function renderWizardCustomerStep(q) {
            </div>`
         : filtered.length === 0
           ? `<div style="padding:18px; text-align:center; color:var(--text-mute);">No customers match "${esc(search)}". <a href="javascript:App.openCustomerWizard()" style="color:var(--orange); font-weight:600;">Add as new customer?</a></div>`
-          : `<div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(260px, 1fr)); gap:8px; max-height:340px; overflow-y:auto;">
-              ${filtered.map(c => `
+          : `<!-- v8.3: bigger grid, no scrollbar — see everyone in one shot.
+                  Each tile uses customer.color as a left stripe so locations
+                  of the same parent company group visually. -->
+            <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(220px, 1fr)); gap:10px;">
+              ${filtered.map(c => {
+                const col = c.color || '#94a3b8';
+                return `
                 <button onclick="App.pickCustomerForQuote('${q.id}','${c.id}')"
-                        style="text-align:left; padding:10px 12px; cursor:pointer; border:1px solid var(--line-dark); border-radius:4px; background:var(--paper); transition:all 0.1s;"
-                        onmouseover="this.style.borderColor='var(--orange)'; this.style.background='#FFF7ED';"
-                        onmouseout="this.style.borderColor='var(--line-dark)'; this.style.background='var(--paper)';">
-                  <div style="font-weight:700; color:var(--navy);">${esc(c.name || '(unnamed)')}</div>
-                  <div style="font-size:11px; color:var(--text-mute); margin-top:2px;">
-                    ${c.code ? `<span class="mono">${esc(c.code)}</span> · ` : ''}
-                    ${esc(c.contact || '—')} · ${esc(c.email || '—')}
-                  </div>
+                        style="text-align:left; padding:0; cursor:pointer; border:1px solid var(--line-dark); border-radius:4px; background:var(--paper); transition:all 0.12s; display:flex; overflow:hidden; align-items:stretch;"
+                        onmouseover="this.style.borderColor='${col}'; this.style.transform='translateY(-1px)'; this.style.boxShadow='0 4px 10px rgba(0,0,0,0.08)';"
+                        onmouseout="this.style.borderColor='var(--line-dark)'; this.style.transform='translateY(0)'; this.style.boxShadow='none';">
+                  <span style="flex:0 0 6px; background:${col};"></span>
+                  <span style="flex:1; padding:10px 12px;">
+                    <span style="display:block; font-weight:700; color:var(--navy); line-height:1.2;">${esc(c.name || '(unnamed)')}</span>
+                    <span style="display:block; font-size:11px; color:var(--text-mute); margin-top:3px; line-height:1.3;">
+                      ${c.code ? `<span class="mono">${esc(c.code)}</span> · ` : ''}${esc(c.contact || '—')}
+                    </span>
+                    <span style="display:block; font-size:11px; color:var(--text-mute); margin-top:1px; line-height:1.3;">
+                      ${esc(c.email || '—')}
+                    </span>
+                  </span>
                 </button>
-              `).join('')}
+              `;}).join('')}
             </div>`
       }
     </div>
@@ -13862,6 +13917,20 @@ function renderCustomerWizardModal() {
           <label class="wizard-label" style="font-size:13px;">Phone</label>
           <input type="tel" value="${esc(d.phone||'')}" oninput="App.customerWizardSet('phone', this.value)" placeholder="(555) 123-4567" style="width:100%; padding:6px;">
         </div>
+      </div>
+      <!-- v8.3: optional color tag. Pick a color now or skip — used to
+           visually group sister locations of one parent company in the
+           customer picker grid (e.g. all Integrated Power locations). -->
+      <div class="row" style="gap:10px; margin-top:10px; align-items:center;">
+        <label class="wizard-label" style="font-size:13px; flex:0 0 auto;">Color tag (optional)</label>
+        <input type="color" value="${esc(d.color || '#94a3b8')}"
+               oninput="App.customerWizardSet('color', this.value)"
+               style="width:40px; height:32px; padding:0; border:1px solid var(--line-dark); cursor:pointer; background:transparent;">
+        ${d.color ? `
+          <span class="mono small" style="color:var(--text-mute);">${esc(d.color)}</span>
+          <button type="button" class="btn btn-sm" onclick="App.customerWizardSet('color','')">Clear</button>
+        ` : '<span class="text-mute small">none — uses neutral grey</span>'}
+        <span class="text-mute small" style="margin-left:auto;">Tip: same color = sister locations.</span>
       </div>
     `;
   } else if (step.key === 'billing') {
@@ -18551,6 +18620,21 @@ const App = {
     update(s => { s.ui.view = 'quote'; s.ui.activeQuoteId = id; s.ui.activeQuoteTab = 'info'; });
   },
 
+  // v8.3: manual sync reconnect (bypass throttle). Triggered by the 🔄
+  // button next to a disconnected sync pill in the header.
+  async manualSyncReconnect() {
+    if (typeof ensureSyncConnected !== 'function') return;
+    showToast('Reconnecting to cloud…', 1500);
+    await ensureSyncConnected({ force: true });
+  },
+  // v8.3: customer color setter (from inline color picker on customer card)
+  setCustomerColor(customerId, color) {
+    update(s => {
+      const c = (s.customers || []).find(cc => cc.id === customerId);
+      if (c) c.color = color || '';
+    });
+  },
+
   // v8.0: wizard mode toggle + step navigation handlers
   setWizardMode(on) {
     update(s => { s.ui.wizardMode = !!on; });
@@ -18568,7 +18652,17 @@ const App = {
       // Clear search after pick
       s.ui.wizardCustomerSearch = '';
     });
-    showToast('✓ Customer assigned. Add your first part.', 3500);
+    // v8.3: auto-open the part-type picker right after the customer is set,
+    // so the user doesn't have to hunt for the "+ Add Part" button. If the
+    // quote already has parts, skip — they probably came back to switch
+    // customer, not to add a part.
+    const q = (state.quotes || []).find(qq => qq.id === quoteId);
+    if (q && (q.parts || []).length === 0) {
+      setTimeout(() => this.promptAddPart(), 250);
+      showToast('✓ Customer assigned. Pick a part type to start.', 3500);
+    } else {
+      showToast('✓ Customer assigned.', 2500);
+    }
   },
   // v8.2: bar-calc toggle on the wizard material step
   toggleBarCalc(partId, on) {
@@ -18816,6 +18910,7 @@ const App = {
       c.salesRep = d.salesRep || '';
       c.paymentTerms = d.paymentTerms || '';
       c.status = d.status || 'Active';
+      c.color = d.color || '';       // v8.3
       c.notes = d.notes || '';
       s.customers.unshift(c);
       logActivity('Added customer', c.name, `via wizard${c.salesRep?` · rep: ${c.salesRep}`:''}${c.paymentTerms?` · ${c.paymentTerms}`:''}`);
@@ -23867,7 +23962,14 @@ SyncEngine.loadConfig();
 
 let _ensureConnectingPromise = null;
 let _lastSyncConnectAttempt = 0;
-const SYNC_CONNECT_THROTTLE_MS = 30000;
+// v8.3: lowered throttle from 30s to 5s. The original number was being too
+// pessimistic — if the first boot attempt failed (slow Firebase CDN, slow
+// auth) the user would wait 30s before the next click triggered a retry,
+// and in practice most users gave up and assumed sync was broken.
+// 5s is short enough that any click/focus event quickly recovers, but long
+// enough that we don't hammer Firebase if it's genuinely down.
+const SYNC_CONNECT_THROTTLE_MS = 5000;
+let _lastSyncError = null;  // most recent error message for diagnostic display
 
 async function ensureSyncConnected(opts) {
   opts = opts || {};
@@ -23878,7 +23980,7 @@ async function ensureSyncConnected(opts) {
   // user has to set up Settings → Sync first.
   const mode = SyncEngine.config.authMode || 'password';
   if (mode === 'password' && (!SyncEngine.config.email || !SyncEngine.config.password)) return;
-  // Throttle (unless force=true, e.g. network came back online)
+  // Throttle (unless force=true, e.g. network came back online or manual click)
   const now = Date.now();
   if (!opts.force && now - _lastSyncConnectAttempt < SYNC_CONNECT_THROTTLE_MS) return;
   // Coalesce concurrent attempts
@@ -23887,10 +23989,13 @@ async function ensureSyncConnected(opts) {
   _ensureConnectingPromise = (async () => {
     try {
       await SyncEngine.connect();
+      _lastSyncError = null;
       if (typeof showToast === 'function') showToast('☁ Cloud sync connected.', 2500);
       try { renderHeaderConnPill(); } catch (_) {}
     } catch (e) {
-      console.warn('[ensureSyncConnected] connect failed (will retry on next signal):', e && e.message ? e.message : e);
+      _lastSyncError = (e && e.message) ? e.message : String(e);
+      console.warn('[ensureSyncConnected] connect failed (will retry on next signal):', _lastSyncError);
+      try { renderHeaderConnPill(); } catch (_) {}
     } finally {
       _ensureConnectingPromise = null;
     }
