@@ -769,7 +769,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '8.17.0';
+const APP_VERSION = '8.18.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -833,6 +833,92 @@ function blobToBase64(blob) {
     reader.onerror = () => reject(reader.error || new Error('FileReader failed'));
     reader.readAsDataURL(blob);
   });
+}
+
+// v8.18: build a real RFC 822 MIME .eml file with a plain-text body and
+// one base64 attachment. Used by emailQuote so clicking "Email PDF"
+// produces an Outlook-ready draft with the PDF ALREADY ATTACHED, not a
+// bare mailto: that needs the user to re-attach manually.
+//
+// The X-Unsent: 1 header is the magic that tells Outlook to open the
+// .eml in compose mode (as a draft) rather than as an already-received
+// message. Standard MS Outlook + Outlook for Mac honor it. macOS Mail
+// and Thunderbird don't, but the file still imports as a message they
+// can edit before sending.
+async function _generateQuoteEml({ to, from, subject, body, attachment }) {
+  const boundary = '----=_AIQ_' + Math.random().toString(36).slice(2);
+  const date = new Date().toUTCString();
+  // Quoted-printable for body (handles non-ASCII safely without base64'ing
+  // the whole body). Simple impl — encode bytes > 126 / control chars / '='
+  // as =XX. Wrap soft at 76 chars to be RFC-compliant.
+  const qpEncode = (s) => {
+    const bytes = new TextEncoder().encode(s);
+    let out = '', col = 0;
+    for (let i = 0; i < bytes.length; i++) {
+      const b = bytes[i];
+      const isCRLF = (b === 0x0D || b === 0x0A);
+      let chunk;
+      if (isCRLF) {
+        out += '\r\n'; col = 0;
+        // Skip the LF in a CRLF pair so we don't double up
+        if (b === 0x0D && bytes[i+1] === 0x0A) i++;
+        continue;
+      }
+      if (b === 0x3D /*=*/ || b < 32 || b > 126) {
+        chunk = '=' + b.toString(16).toUpperCase().padStart(2, '0');
+      } else {
+        chunk = String.fromCharCode(b);
+      }
+      if (col + chunk.length > 75) { out += '=\r\n'; col = 0; }
+      out += chunk; col += chunk.length;
+    }
+    return out;
+  };
+
+  // Encode the attachment as base64, wrapped at 76 chars
+  let attB64 = '';
+  if (attachment && attachment.blob) {
+    const raw = await blobToBase64(attachment.blob);
+    attB64 = raw.replace(/(.{76})/g, '$1\r\n').replace(/\r\n$/, '');
+  }
+
+  const safeName = (attachment && attachment.name || 'attachment.bin').replace(/"/g, '');
+
+  const headers = [
+    `Date: ${date}`,
+    `From: ${from || ''}`,
+    `To: ${to}`,
+    `Subject: ${subject}`,
+    `MIME-Version: 1.0`,
+    `X-Unsent: 1`,                                       // Outlook: open as draft
+    `Content-Type: multipart/mixed; boundary="${boundary}"`,
+    ``,
+    `This is a multi-part message in MIME format.`,
+    ``,
+  ].join('\r\n');
+
+  const textPart = [
+    `--${boundary}`,
+    `Content-Type: text/plain; charset=utf-8`,
+    `Content-Transfer-Encoding: quoted-printable`,
+    ``,
+    qpEncode(body || ''),
+    ``,
+  ].join('\r\n');
+
+  const attPart = attachment && attachment.blob ? [
+    `--${boundary}`,
+    `Content-Type: ${attachment.mimeType || 'application/octet-stream'}; name="${safeName}"`,
+    `Content-Transfer-Encoding: base64`,
+    `Content-Disposition: attachment; filename="${safeName}"`,
+    ``,
+    attB64,
+    ``,
+  ].join('\r\n') : '';
+
+  const closing = `--${boundary}--\r\n`;
+  const eml = headers + textPart + attPart + closing;
+  return new Blob([eml], { type: 'message/rfc822' });
 }
 
 // v7.34.1: Pre-baked Firebase config for the Keystone shop's keystone-quoting
@@ -25438,8 +25524,6 @@ Online Metals,Brass,Round,1.25 dia,per_lb,5.20`;
       });
       lines.push('');
     });
-    // v7.26: Only mention visible specialty tooling in the email summary —
-    // internal NRE shouldn't appear here either.
     const visibleNRE = quoteVisibleNREtotal(q);
     if (visibleNRE > 0) lines.push(`One-time tooling charges: ${fmtMoney(visibleNRE)}`);
     lines.push('');
@@ -25448,22 +25532,66 @@ Online Metals,Brass,Round,1.25 dia,per_lb,5.20`;
     lines.push(shop.name);
     if (shop.phone) lines.push(shop.phone);
     if (shop.email) lines.push(shop.email);
-    if (blob) {
-      lines.push('');
-      lines.push(`[PDF: ${pdfFilename} — saved to your Downloads folder. In Outlook, click 📎 Attach file → Browse this computer → Downloads → this filename.]`);
-    }
     const body = lines.join('\n');
-    const url = `mailto:${encodeURIComponent(c.email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
-    // Move quote to "sent" if currently draft, and record the material prices
+
+    // v8.18: build a real .eml file (RFC 822 MIME) with the PDF embedded as
+    // a base64 attachment. Downloads to disk → user double-clicks → default
+    // mail client (Outlook on Windows) opens with the email fully composed
+    // INCLUDING the attached PDF. This is what "Email PDF" should always
+    // have done — mailto: can't carry attachments, so the v7.x flow asked
+    // the user to manually re-attach from Downloads.
+    let emlDownloaded = false;
+    if (blob) {
+      try {
+        const emlBlob = await _generateQuoteEml({
+          to: c.email,
+          from: shop.email || '',
+          subject,
+          body,
+          attachment: { name: pdfFilename, mimeType: 'application/pdf', blob },
+        });
+        const emlFilename = pdfFilename.replace(/\.pdf$/i, '.eml');
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(emlBlob);
+        a.download = emlFilename;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => {
+          try { URL.revokeObjectURL(a.href); } catch (_) {}
+          a.remove();
+        }, 200);
+        emlDownloaded = true;
+        showToast(`📧 ${emlFilename} downloaded — open it to launch Outlook with the PDF already attached.`, 6000);
+      } catch (e) {
+        console.warn('[emailQuote] eml generation failed, falling back to mailto:', e);
+      }
+    }
+
     if (q.status === 'draft') {
       update(s => { q.status = 'sent'; recordMaterialPrices(q); });
     } else {
-      // Re-render so the dock shows up
       render();
     }
-    logActivity('Emailed quote', q.quoteNum || '?', `to ${c.email}`);
-    // Small delay so the dock renders + Outlook starts opening before mailto fires
-    setTimeout(() => { window.location.href = url; }, 350);
+    logActivity('Emailed quote', q.quoteNum || '?', `to ${c.email}${emlDownloaded ? ' (.eml with attachment)' : ' (mailto fallback)'}`);
+
+    // Fallback for "no PDF" or .eml generation failure: open a plain
+    // mailto: with the body and a note about the PDF location.
+    if (!emlDownloaded) {
+      const bodyWithHint = blob
+        ? body + `\n\n[PDF saved to Downloads as ${pdfFilename} — attach it manually via Outlook → 📎 Attach file → Browse this computer.]`
+        : body;
+      const url = `mailto:${encodeURIComponent(c.email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(bodyWithHint)}`;
+      setTimeout(() => { window.location.href = url; }, 350);
+    }
+  },
+
+  // v8.18: tiny .eml file generator. Builds an RFC 822 multipart/mixed
+  // message with a text/plain body part + one application/pdf attachment.
+  // The X-Unsent:1 header tells Outlook to open the .eml in compose mode
+  // (as a draft) instead of as a received message — user sees the
+  // composition window, can review, then click Send.
+  async _emlGenerate(opts) {
+    return _generateQuoteEml(opts);
   },
 
   // v7.27: Dock actions — drag, save, close
