@@ -760,7 +760,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.71.0';
+const APP_VERSION = '7.72.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -990,6 +990,7 @@ const state = {
     partTypePicker: null,       // v7.61: { open: true } when "what kind of part?" modal is up
     vendorWizard: null,         // v7.68: { open, step, draft } for "+ Add Vendor" guided flow
     customerWizard: null,       // v7.68: { open, step, draft } for "+ Add Customer" guided flow
+    entityChipPicker: null,     // v7.72: { kind:'service'|'material', entityType:'vendor'|'customer', entityId, search } — inline picker shown under a chip strip when user clicks "+ Add"
     trainingPicker: null,       // v7.62: { entityType, entityId, sampleId?, file?, parsed?, docType, notes, error, loading } for the training sample editor
     activePurchaseId: null,     // v7.50: currently-open purchase in the Purchasing workspace
     purchaseFilters: { search:'', hiddenStatuses:[], vendor:'all' },
@@ -1540,6 +1541,7 @@ function closeAllModals() {
   state.ui.partTypePicker = null;
   state.ui.vendorWizard = null;     // v7.68
   state.ui.customerWizard = null;   // v7.68
+  state.ui.entityChipPicker = null; // v7.72
   state.ui.mcMasterPaste = null;
   state.ui.missingCustFolder = null;
   state.ui.inviteDialog = null;
@@ -6838,15 +6840,17 @@ function renderVendorsCards(vendors) {
             <div class="field"><label>Phone</label>${bind({label:'Vendor phone',value:v.phone, type:'tel', onChange:val=>{state.settings.vendors[i].phone=val;}})}</div>
             <div class="field"><label>Fax</label>${bind({label:'Vendor fax',value:v.fax, type:'tel', onChange:val=>{state.settings.vendors[i].fax=val;}})}</div>
             <div class="field" style="grid-column:span 3;"><label>Type</label>${renderVendorTypePicker(i, types)}</div>
-            ${offersServices ? `<div class="field" style="grid-column:span 3;"><label>Services Offered</label>${renderServicePicker(i, v.services||[], types)}</div>` : ''}
             <div class="field" style="grid-column:span 3;"><label>Address</label>${bind({label:'Vendor address',value:v.address, onChange:val=>{state.settings.vendors[i].address=val;}})}</div>
             <div class="field" style="grid-column:span 3;"><label>Notes</label>${bind({label:'Vendor notes',value:v.notes, type:'textarea', onChange:val=>{state.settings.vendors[i].notes=val;}})}</div>
           </div>
           <hr>
-          <div class="small">
-            <strong>Materials assigned:</strong>
-            ${mats.length === 0 ? '<span class="text-mute"> none — assign in Settings</span>' : ' ' + esc(mats.join(', '))}
-          </div>
+          <!-- v7.72: inline chip strips for services + materials. Replaces the
+               older renderServicePicker (different visual style) and the
+               read-only "Materials assigned" text. Click chip = remove,
+               click "+ Add" = inline picker; for materials, type a new name
+               at the end of the search box to quick-create a stub. -->
+          ${renderEntityServiceChips('vendor', v)}
+          ${renderEntityMaterialChips('vendor', v)}
         </div>
         ${renderTrainingSection('vendor', v)}
       </div>
@@ -10973,6 +10977,14 @@ function renderCustomersCards(list) {
               <div class="field"><label>Sales Rep</label>${bind({label:'Sales Rep',value:c.salesRep, onChange:v=>{c.salesRep=v;}, placeholder:'HOUSE / MJ / JMJ / MM'})}</div>
             </div>
             <hr>
+            <!-- v7.72: services + materials chip strips. Captures what this
+                 customer typically orders / buys from us, so we can match
+                 incoming RFQs against history and suggest the right material
+                 templates. Click chip = remove; "+ Add" = inline picker;
+                 type new material name to quick-create a stub. -->
+            ${renderEntityServiceChips('customer', c)}
+            ${renderEntityMaterialChips('customer', c)}
+            <hr>
             ${renderCustomerContactsSection(c)}
             ${renderTrainingSection('customer', c)}
             <hr>
@@ -12539,6 +12551,164 @@ function vendorWizardSteps(draft) {
   steps.push({ key:'address', label:'Address & notes' });
   steps.push({ key:'review', label:'Review' });
   return steps;
+}
+
+// =================================================================
+// v7.72: SHARED CHIP STRIPS — services + materials, on every entity card
+// (vendor + customer today; future: contact, supplier, etc.).
+//
+// Both strips share the same visual language:
+//   - Color-coded pills for each item (cut=purple, finishing=teal, material=amber)
+//   - Click a pill → removes it
+//   - "+ Add" button → opens an inline picker (state.ui.entityChipPicker)
+//
+// Material strip also supports quick-create-by-name: type a material that
+// doesn't exist yet → "✨ Create new: 'XYZ'" row appears at the bottom.
+// Clicking it creates a placeholder material with that name only and adds
+// it to the entity. User finishes the material definition (form, spec,
+// thickness, vendor list) later in Settings → Materials.
+//
+// Relationship asymmetry to be aware of:
+//   - vendor.services       = ['laser', ...]              (forward)
+//   - material.vendorIds    = ['vendor-id', ...]           (reverse — material owns the link)
+//   - customer.services     = ['laser', ...]              (forward)
+//   - customer.materialIds  = ['mat-id', ...]              (forward — customer owns the link)
+// _entityMaterialIds() and _entityAddMaterial() abstract over this so
+// callers don't have to think about it.
+// =================================================================
+function _entityRecord(entityType, entityId) {
+  if (entityType === 'vendor')   return (state.settings.vendors||[]).find(v => v.id === entityId);
+  if (entityType === 'customer') return (state.customers||[]).find(c => c.id === entityId);
+  return null;
+}
+function _entityServices(entity) {
+  if (!entity) return [];
+  return Array.isArray(entity.services) ? entity.services : [];
+}
+function _entityMaterialIds(entityType, entity) {
+  if (!entity) return [];
+  if (entityType === 'vendor') {
+    // Reverse lookup: which materials list this vendor in their vendorIds?
+    return (state.settings.materials || [])
+      .filter(m => Array.isArray(m.vendorIds) && m.vendorIds.includes(entity.id))
+      .map(m => m.id);
+  }
+  return Array.isArray(entity.materialIds) ? entity.materialIds : [];
+}
+
+// Service category → chip color class. Mirrors ALL_SERVICES.category.
+function _serviceChipClass(slug) {
+  const def = ALL_SERVICES.find(s => s.value === slug);
+  if (!def) return '';
+  return def.category === 'cut' ? 'cut' : 'finishing';
+}
+function _serviceLabel(slug) {
+  const def = ALL_SERVICES.find(s => s.value === slug);
+  return def ? def.label : slug;
+}
+
+function renderEntityServiceChips(entityType, entity) {
+  const services = _entityServices(entity);
+  const picker = state.ui.entityChipPicker;
+  const pickerOpen = picker && picker.kind === 'service' && picker.entityType === entityType && picker.entityId === entity.id;
+  const chips = services.map(slug => {
+    const cls = _serviceChipClass(slug);
+    return `<span class="entity-chip ${cls}" onclick="App.entityRemoveService('${entityType}','${entity.id}','${esc(slug)}')" title="Click to remove ${esc(_serviceLabel(slug))}">${esc(_serviceLabel(slug))} ×</span>`;
+  }).join('');
+  return `
+    <div>
+      <div class="entity-chip-section-label">${entityType === 'customer' ? 'SERVICES THEY ORDER' : 'SERVICES OFFERED'}</div>
+      <div class="entity-chip-row">
+        ${chips || '<span class="text-mute small">None yet —</span>'}
+        ${pickerOpen
+          ? `<button class="entity-chip-add" style="background:var(--orange); color:white; border-style:solid; border-color:var(--orange);" onclick="App.closeEntityChipPicker()">× Close picker</button>`
+          : `<button class="entity-chip-add" onclick="App.openEntityChipPicker('service','${entityType}','${entity.id}')">+ Add service</button>`}
+      </div>
+      ${pickerOpen ? renderEntityServicePicker(entityType, entity) : ''}
+    </div>
+  `;
+}
+
+function renderEntityServicePicker(entityType, entity) {
+  const selected = new Set(_entityServices(entity));
+  const cut       = ALL_SERVICES.filter(s => s.category === 'cut');
+  const finishing = ALL_SERVICES.filter(s => s.category === 'finishing');
+  const renderGroup = (label, list, cls) => {
+    if (list.length === 0) return '';
+    return `
+      <div style="margin-bottom:8px;">
+        <div class="entity-chip-section-label" style="margin-bottom:4px;">${esc(label)}</div>
+        <div class="entity-chip-picker-list">
+          ${list.map(s => {
+            const on = selected.has(s.value);
+            if (on) return `<span class="entity-chip ${cls}" style="opacity:0.55; cursor:default;" title="Already added">✓ ${esc(s.label)}</span>`;
+            return `<span class="entity-chip" style="background:var(--paper);" onclick="App.entityAddService('${entityType}','${entity.id}','${esc(s.value)}')" title="Click to add ${esc(s.label)}">+ ${esc(s.label)}</span>`;
+          }).join('')}
+        </div>
+      </div>
+    `;
+  };
+  return `
+    <div class="entity-chip-picker">
+      ${renderGroup('⚡ Cut processes', cut, 'cut')}
+      ${renderGroup('🛠 Finishing services', finishing, 'finishing')}
+    </div>
+  `;
+}
+
+function renderEntityMaterialChips(entityType, entity) {
+  const matIds = _entityMaterialIds(entityType, entity);
+  const allMats = state.settings.materials || [];
+  const picker = state.ui.entityChipPicker;
+  const pickerOpen = picker && picker.kind === 'material' && picker.entityType === entityType && picker.entityId === entity.id;
+  const chips = matIds.map(id => {
+    const m = allMats.find(mm => mm.id === id);
+    if (!m) return '';
+    return `<span class="entity-chip material" onclick="App.entityRemoveMaterial('${entityType}','${entity.id}','${esc(id)}')" title="Click to remove ${esc(m.name)}">${esc(m.name)} ×</span>`;
+  }).filter(Boolean).join('');
+  return `
+    <div>
+      <div class="entity-chip-section-label">${entityType === 'customer' ? 'MATERIALS THEY BUY' : 'MATERIALS SUPPLIED'}</div>
+      <div class="entity-chip-row">
+        ${chips || '<span class="text-mute small">None yet —</span>'}
+        ${pickerOpen
+          ? `<button class="entity-chip-add" style="background:var(--orange); color:white; border-style:solid; border-color:var(--orange);" onclick="App.closeEntityChipPicker()">× Close picker</button>`
+          : `<button class="entity-chip-add" onclick="App.openEntityChipPicker('material','${entityType}','${entity.id}')">+ Add material</button>`}
+      </div>
+      ${pickerOpen ? renderEntityMaterialPicker(entityType, entity) : ''}
+    </div>
+  `;
+}
+
+function renderEntityMaterialPicker(entityType, entity) {
+  const picker = state.ui.entityChipPicker || {};
+  const search = (picker.search || '').toLowerCase().trim();
+  const selected = new Set(_entityMaterialIds(entityType, entity));
+  const allMats = state.settings.materials || [];
+  // Filter: not already assigned, matches search if any
+  const available = allMats
+    .filter(m => !selected.has(m.id))
+    .filter(m => !search || (m.name || '').toLowerCase().includes(search));
+  const exactMatch = !!search && allMats.some(m => (m.name || '').toLowerCase() === search);
+  const showQuickCreate = !!search && !exactMatch;
+  return `
+    <div class="entity-chip-picker">
+      <input type="search" id="entity-chip-picker-search" placeholder="Search or type a new material name…"
+             value="${esc(picker.search || '')}"
+             oninput="App.setEntityChipPickerSearch(this.value)"
+             autofocus>
+      <div class="entity-chip-picker-list">
+        ${available.length === 0 && !showQuickCreate
+          ? `<span class="text-mute small">No matching materials. Type a name to create one.</span>`
+          : available.slice(0, 30).map(m => `
+              <span class="entity-chip material" style="background:var(--paper);" onclick="App.entityAddMaterial('${entityType}','${entity.id}','${esc(m.id)}')" title="Click to add ${esc(m.name)}">+ ${esc(m.name)}</span>
+            `).join('')}
+      </div>
+      ${showQuickCreate
+        ? `<div class="entity-chip-quick-create" onclick="App.entityQuickCreateMaterial('${entityType}','${entity.id}', '${esc(picker.search).replace(/'/g, '&apos;')}')">✨ Create new material: <strong>${esc(picker.search)}</strong> (finish defining in Settings → Materials)</div>`
+        : ''}
+    </div>
+  `;
 }
 
 // v7.70: shared drop-to-prefill zone used by every wizard. Renders a tagged
@@ -17657,6 +17827,149 @@ const App = {
         showToast('💾 ' + toastMsg.replace(/synced to cloud/i, 'saved locally'));
       }
     } catch (_) { /* non-fatal */ }
+  },
+
+  // =============================================================
+  // v7.72: Entity chip picker (services + materials, on vendor + customer cards)
+  // =============================================================
+  openEntityChipPicker(kind, entityType, entityId) {
+    update(s => {
+      s.ui.entityChipPicker = { kind, entityType, entityId, search: '' };
+    });
+  },
+  closeEntityChipPicker() {
+    update(s => { s.ui.entityChipPicker = null; });
+  },
+  setEntityChipPickerSearch(text) {
+    if (!state.ui.entityChipPicker) return;
+    state.ui.entityChipPicker.search = text;
+    // Don't full-render — find the picker's input and just re-render the
+    // dropdown list. But for simplicity (and since this fires on every
+    // keystroke), debounce and full-render. The input value is reflected
+    // in state so focus is preserved across the render via the value=
+    // attribute restoration. Actually no — re-render would lose focus.
+    // Strategy: only re-render the list portion using a stable container.
+    clearTimeout(window._chipPickerSearchT);
+    window._chipPickerSearchT = setTimeout(() => {
+      const p = state.ui.entityChipPicker;
+      if (!p) return;
+      // Full render is OK here because the picker re-injects autofocus on
+      // its <input>, AND the user just typed — re-focusing is the right
+      // behavior. The 220ms debounce keeps it from firing per keystroke.
+      render();
+    }, 220);
+  },
+  entityAddService(entityType, entityId, slug) {
+    update(s => {
+      const ent = entityType === 'vendor'
+        ? (s.settings.vendors || []).find(v => v.id === entityId)
+        : (s.customers || []).find(c => c.id === entityId);
+      if (!ent) return;
+      if (!Array.isArray(ent.services)) ent.services = [];
+      if (!ent.services.includes(slug)) ent.services.push(slug);
+      // Vendors: also mirror to cutProcesses for legacy DXF picker filtering
+      if (entityType === 'vendor') {
+        const def = ALL_SERVICES.find(x => x.value === slug);
+        if (def && def.category === 'cut') {
+          if (!Array.isArray(ent.cutProcesses)) ent.cutProcesses = [];
+          if (!ent.cutProcesses.includes(slug)) ent.cutProcesses.push(slug);
+        }
+        // Auto-update vendor types to reflect what they now offer
+        if (!Array.isArray(ent.types)) ent.types = ['material'];
+        const cat = def && def.category;
+        if (cat && !ent.types.includes(cat)) ent.types.push(cat);
+      }
+      logActivity(`Added ${entityType} service`, ent.name || '(unnamed)', _serviceLabel(slug));
+    });
+  },
+  entityRemoveService(entityType, entityId, slug) {
+    update(s => {
+      const ent = entityType === 'vendor'
+        ? (s.settings.vendors || []).find(v => v.id === entityId)
+        : (s.customers || []).find(c => c.id === entityId);
+      if (!ent || !Array.isArray(ent.services)) return;
+      ent.services = ent.services.filter(x => x !== slug);
+      if (entityType === 'vendor' && Array.isArray(ent.cutProcesses)) {
+        ent.cutProcesses = ent.cutProcesses.filter(x => x !== slug);
+      }
+    });
+  },
+  entityAddMaterial(entityType, entityId, matId) {
+    update(s => {
+      const mat = (s.settings.materials || []).find(m => m.id === matId);
+      if (!mat) return;
+      if (entityType === 'vendor') {
+        // Reverse relationship: material owns the vendor list
+        if (!Array.isArray(mat.vendorIds)) mat.vendorIds = [];
+        if (!mat.vendorIds.includes(entityId)) mat.vendorIds.push(entityId);
+        // Vendor implicitly supplies material now — ensure type is set
+        const v = (s.settings.vendors || []).find(vv => vv.id === entityId);
+        if (v) {
+          if (!Array.isArray(v.types)) v.types = ['material'];
+          if (!v.types.includes('material')) v.types.push('material');
+        }
+        logActivity('Assigned vendor to material', mat.name, (v && v.name) || entityId);
+      } else {
+        // Forward relationship: customer owns the material list
+        const c = (s.customers || []).find(cc => cc.id === entityId);
+        if (!c) return;
+        if (!Array.isArray(c.materialIds)) c.materialIds = [];
+        if (!c.materialIds.includes(matId)) c.materialIds.push(matId);
+        logActivity('Assigned material to customer', c.name, mat.name);
+      }
+    });
+  },
+  entityRemoveMaterial(entityType, entityId, matId) {
+    update(s => {
+      if (entityType === 'vendor') {
+        const mat = (s.settings.materials || []).find(m => m.id === matId);
+        if (!mat || !Array.isArray(mat.vendorIds)) return;
+        mat.vendorIds = mat.vendorIds.filter(id => id !== entityId);
+      } else {
+        const c = (s.customers || []).find(cc => cc.id === entityId);
+        if (!c || !Array.isArray(c.materialIds)) return;
+        c.materialIds = c.materialIds.filter(id => id !== matId);
+      }
+    });
+  },
+  // Quick-create-by-name: stub material with just a name. User finishes the
+  // definition (form, spec, thickness, vendor list, price) later in
+  // Settings → Materials. The chip strip immediately shows it on the entity.
+  entityQuickCreateMaterial(entityType, entityId, name) {
+    name = (name || '').trim();
+    if (!name) return;
+    update(s => {
+      // Don't duplicate if a same-name material already exists
+      let mat = (s.settings.materials || []).find(m => (m.name || '').toLowerCase() === name.toLowerCase());
+      if (!mat) {
+        mat = {
+          id: uid(),
+          name,
+          form: '',         // user fills in via Settings
+          spec: '',
+          thickness: null,
+          thicknesses: [],
+          vendorIds: [],
+          notes: '(stub — created from card chip strip; finish defining in Settings → Materials)',
+        };
+        s.settings.materials.push(mat);
+        logActivity('Created material (stub)', name, 'from ' + entityType + ' card');
+      }
+      // Wire to the entity
+      if (entityType === 'vendor') {
+        if (!Array.isArray(mat.vendorIds)) mat.vendorIds = [];
+        if (!mat.vendorIds.includes(entityId)) mat.vendorIds.push(entityId);
+      } else {
+        const c = (s.customers || []).find(cc => cc.id === entityId);
+        if (c) {
+          if (!Array.isArray(c.materialIds)) c.materialIds = [];
+          if (!c.materialIds.includes(mat.id)) c.materialIds.push(mat.id);
+        }
+      }
+      // Clear search but keep picker open so the user can keep adding
+      if (s.ui.entityChipPicker) s.ui.entityChipPicker.search = '';
+    });
+    showToast(`✨ Created "${name}" — finish defining in Settings → Materials`);
   },
 
   // =============================================================
