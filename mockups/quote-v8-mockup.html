@@ -1,0 +1,617 @@
+<!doctype html>
+<!--
+  AI Quote — v8 Quote Page Redesign Mockup
+  --------------------------------------------------------------
+  Static wireframe + annotations for the proposed new quote page.
+  Open in a browser side-by-side with the live app and mark up
+  with comments — what you'd keep, change, or kill.
+
+  This file is NOT wired to anything. No state, no handlers.
+  Pure visual sketch. Real implementation comes after you sign off.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>v8 Quote Page Mockup — AI Quote</title>
+<style>
+  :root {
+    --orange: #DC4318;
+    --navy: #1F2937;
+    --steel: #64748B;
+    --bg: #F8F4ED;
+    --paper: #FFFFFF;
+    --line: #E5E7EB;
+    --line-dark: #CBD5E1;
+    --text: #1F2937;
+    --text-mute: #64748B;
+    --green: #16A34A;
+    --blue: #1E5BAE;
+    --purple: #7C3AED;
+    --teal: #0891B2;
+    --amber: #B45309;
+  }
+  body {
+    margin: 0; padding: 24px;
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg); color: var(--text);
+  }
+  h1 { margin: 0 0 4px; font-size: 24px; color: var(--navy); }
+  h2 { margin: 32px 0 12px; font-size: 18px; color: var(--orange); border-bottom: 2px solid var(--orange); padding-bottom: 4px; }
+  h3 { margin: 16px 0 8px; font-size: 14px; color: var(--steel); text-transform: uppercase; letter-spacing: 0.06em; }
+  .intro { background: #FEF3C7; border-left: 4px solid var(--orange); padding: 12px 16px; margin: 16px 0; }
+  .intro strong { color: var(--orange); }
+  .screens { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-bottom: 32px; }
+  .screen {
+    background: var(--paper); border: 1px solid var(--line-dark); border-radius: 4px;
+    overflow: hidden; position: relative;
+  }
+  .screen-label {
+    background: var(--navy); color: white; padding: 6px 12px;
+    font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase;
+  }
+  .screen-label.proposed { background: var(--orange); }
+  .screen-body { padding: 0; }
+  .annotation {
+    position: absolute; background: var(--orange); color: white;
+    padding: 4px 8px; font-size: 11px; border-radius: 3px; font-weight: 600;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.2); pointer-events: none; z-index: 10;
+  }
+  .callout {
+    background: #ECFDF3; border-left: 3px solid var(--green);
+    padding: 10px 14px; margin: 12px 0; font-size: 13px;
+  }
+  .callout.warn { background: #FDEDEA; border-left-color: #C73E1D; }
+  .callout.q    { background: #DBEAFE; border-left-color: var(--blue); }
+  code {
+    font-family: ui-monospace, monospace; font-size: 12px;
+    background: var(--bg); padding: 1px 6px; border-radius: 3px;
+  }
+
+  /* ===== Fake app chrome to make the mockup look like the real thing ===== */
+  .fake-header {
+    background: var(--navy); color: white; padding: 8px 14px;
+    display: flex; align-items: center; gap: 10px; font-size: 12px;
+  }
+  .fake-header .v-pill {
+    background: var(--orange); padding: 2px 8px; border-radius: 3px; font-weight: 700;
+    font-family: ui-monospace, monospace; font-size: 10px;
+  }
+  .fake-body { padding: 14px; }
+  .pill {
+    display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 11px;
+    background: var(--line); color: var(--text);
+  }
+  .pill.accepted { background: #ECFDF3; color: var(--green); }
+  .pill.draft    { background: #FEF3C7; color: var(--amber); }
+  .pill.cut      { background: #F3E8FF; color: var(--purple); }
+  .pill.material { background: #FEF3C7; color: var(--amber); }
+  .pill.welded   { background: #DBEAFE; color: var(--blue); }
+  .btn {
+    display: inline-block; padding: 5px 12px; border-radius: 3px;
+    border: 1px solid var(--line-dark); background: var(--paper);
+    font-size: 12px; cursor: pointer; color: var(--text);
+  }
+  .btn-primary { background: var(--orange); color: white; border-color: var(--orange); }
+  .btn-ghost   { background: transparent; border: none; color: white; }
+  .card {
+    background: var(--paper); border: 1px solid var(--line); border-radius: 4px;
+    margin-bottom: 10px;
+  }
+  .card-header {
+    padding: 8px 12px; background: var(--bg); border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; justify-content: space-between;
+    font-weight: 600; font-size: 13px;
+  }
+  .card-body { padding: 12px; font-size: 12px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .field { display: flex; flex-direction: column; gap: 2px; }
+  .field label { font-size: 10px; color: var(--text-mute); text-transform: uppercase; letter-spacing: 0.05em; }
+  .field input, .field select {
+    padding: 4px 6px; border: 1px solid var(--line-dark); border-radius: 2px;
+    font-size: 12px;
+  }
+  .ghost { color: var(--text-mute); font-style: italic; }
+  .chip {
+    display: inline-flex; align-items: center; padding: 4px 10px;
+    border-radius: 14px; font-size: 11px; font-weight: 600;
+    background: var(--paper); border: 1px solid var(--line-dark);
+  }
+  .chip.active { background: var(--orange); color: white; border-color: var(--orange); }
+  .chip.cut    { background: #F3E8FF; border-color: var(--purple); color: var(--purple); }
+  .chip.machined { background: #DBEAFE; border-color: var(--blue); color: var(--blue); }
+  .chip.welded { background: #FEF3C7; border-color: var(--amber); color: var(--amber); }
+
+  /* ===== Modal styling ===== */
+  .modal-backdrop {
+    background: rgba(15,25,45,0.55); padding: 20px; border-radius: 4px;
+    display: flex; justify-content: center;
+  }
+  .modal {
+    background: var(--paper); border: 2px solid var(--navy);
+    width: 90%; max-width: 460px;
+  }
+  .modal-header { background: var(--navy); color: white; padding: 8px 14px; font-size: 13px; font-weight: 600; }
+  .modal-body { padding: 14px; }
+
+  /* ===== Part type cards ===== */
+  .ptype {
+    border: 1px solid var(--line-dark); border-radius: 4px; padding: 10px;
+    display: flex; gap: 10px; align-items: center; cursor: pointer;
+  }
+  .ptype:hover { border-color: var(--orange); }
+  .ptype-stripe { width: 6px; align-self: stretch; border-radius: 2px; }
+  .ptype-icon { font-size: 22px; }
+  .ptype-body { flex: 1; }
+  .ptype-title { font-weight: 700; font-size: 13px; }
+  .ptype-desc { font-size: 11px; color: var(--text-mute); }
+
+  /* ===== Wizard step dots ===== */
+  .step-dots { display: flex; gap: 6px; margin-bottom: 10px; }
+  .step-dot {
+    width: 22px; height: 22px; border-radius: 50%; background: var(--paper);
+    border: 1px solid var(--line-dark); display: inline-flex;
+    align-items: center; justify-content: center; font-size: 10px; font-weight: 700;
+  }
+  .step-dot.active { background: var(--orange); color: white; border-color: var(--orange); }
+  .step-dot.done   { background: #ECFDF3; color: var(--green); border-color: var(--green); }
+
+  /* ===== Banner / customer card on top of quote ===== */
+  .cust-banner {
+    background: linear-gradient(135deg, var(--navy) 0%, #2A3B52 100%);
+    color: white; padding: 14px 18px; border-radius: 4px; margin-bottom: 14px;
+  }
+  .cust-banner .cust-name { font-size: 20px; font-weight: 700; }
+  .cust-banner .cust-meta { font-size: 12px; opacity: 0.85; margin-top: 4px; }
+  .cust-banner .cust-fields { display: flex; gap: 16px; margin-top: 10px; flex-wrap: wrap; }
+  .cust-banner .cust-fields .f { font-size: 11px; }
+  .cust-banner .cust-fields .f label { display: block; opacity: 0.7; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 2px; }
+  .cust-banner .cust-fields .f value { font-weight: 600; }
+  .cust-banner .cust-actions { float: right; }
+
+  /* Annotation lines pointing at things */
+  .pointers {
+    position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+    pointer-events: none;
+  }
+
+  .compare-label { font-weight: 700; color: var(--navy); margin-bottom: 6px; font-size: 12px; }
+  .compare-label.proposed { color: var(--orange); }
+  .toc {
+    background: var(--paper); border: 1px solid var(--line-dark); padding: 12px 16px;
+    margin: 16px 0; font-size: 13px;
+  }
+  .toc a { color: var(--orange); text-decoration: none; margin-right: 14px; font-weight: 600; }
+  .toc a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+
+<h1>AI Quote — v8 Quote Page Redesign</h1>
+<div class="intro">
+  <strong>Goal:</strong> The current quote page tries to show <em>everything at once</em>
+  — customer banner, parts row, machine setups, materials, DXF list, finishing services,
+  pricing tiers, summary, BOM. Result: cognitive overload, can't focus on one part at a time.
+  <br><br>
+  <strong>Proposal:</strong> Customer at the top (expanded), parts shown as cards in a row, click a part to expand
+  a <em>per-part wizard</em> that only shows the sections relevant to that part's type (machined / cut blank /
+  welded / hybrid / purchased). Each wizard step is one card — go through them sequentially, never see fields
+  you don't need.
+  <br><br>
+  <strong>Annotate this file in chat:</strong> tell me which screens feel right, what's missing,
+  what should change. I won't touch the real app code until we agree on the layout.
+</div>
+
+<div class="toc">
+  <strong>Jump to:</strong>
+  <a href="#cur-vs-new">Current vs Proposed</a>
+  <a href="#part-add">Add Part flow</a>
+  <a href="#wizard">Per-part wizard</a>
+  <a href="#types">Part type variants</a>
+  <a href="#questions">Open questions</a>
+</div>
+
+<!-- =============================================================== -->
+<h2 id="cur-vs-new">1. Current page vs Proposed page</h2>
+<div class="screens">
+
+  <!-- ===== CURRENT ===== -->
+  <div class="screen">
+    <div class="screen-label">Current — v7.73</div>
+    <div class="screen-body">
+      <div class="fake-header">
+        <span style="font-weight:700;"><span style="color:var(--orange);">AI</span> QUOTE</span>
+        <span class="v-pill">v7.73.0</span>
+        <span style="flex:1;"></span>
+        <span style="font-size:11px; opacity:0.7;">💾 Save · ☁ connected</span>
+      </div>
+      <div class="fake-body" style="background:var(--bg);">
+        <div style="font-size:18px; font-weight:700; margin-bottom:8px;">Q-1042 <span class="pill draft">draft</span></div>
+        <div style="font-size:11px; color:var(--text-mute); margin-bottom:14px;">Acme Manufacturing · 2026-05-18 · 3 parts</div>
+
+        <!-- Parts chips -->
+        <div class="row" style="gap:4px; padding:8px; background:var(--paper); border:1px solid var(--line);">
+          <span class="chip active">📐 Part 1 — Bracket</span>
+          <span class="chip">⚡ Part 2 — Cut Blank</span>
+          <span class="chip">🔧 Part 3 — Bushing</span>
+          <span class="btn btn-primary" style="margin-left:auto;">+ Add Part</span>
+        </div>
+
+        <!-- ALL THE CARDS AT ONCE -->
+        <div class="card"><div class="card-header">Customer Info</div><div class="card-body ghost">[customer fields visible]</div></div>
+        <div class="card"><div class="card-header">Quantity Tiers</div><div class="card-body ghost">[10 / 50 / 100]</div></div>
+        <div class="card"><div class="card-header">Material</div><div class="card-body ghost">[material picker, stock form, dims, weight]</div></div>
+        <div class="card"><div class="card-header">Machine Setups</div><div class="card-body ghost">[setup1, setup2, runtimes per tier]</div></div>
+        <div class="card"><div class="card-header">DXF / Outside Cut</div><div class="card-body ghost">[file list, vendor picker]</div></div>
+        <div class="card"><div class="card-header">Finishing / Outside</div><div class="card-body ghost">[heat treat, paint, plating…]</div></div>
+        <div class="card"><div class="card-header">Tooling</div><div class="card-body ghost">[per-part tooling]</div></div>
+        <div class="card"><div class="card-header">Pricing summary</div><div class="card-body ghost">[per tier]</div></div>
+        <div class="card"><div class="card-header">Health check</div><div class="card-body ghost">[red flags]</div></div>
+
+        <div class="callout warn" style="margin-top:14px;">
+          😵 <strong>Problem:</strong> all sections rendered all the time, even for parts that don't need them.
+          A cut blank doesn't need machine setups. A purchased part doesn't need a DXF. Etc.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== PROPOSED ===== -->
+  <div class="screen">
+    <div class="screen-label proposed">Proposed — v8</div>
+    <div class="screen-body">
+      <div class="fake-header">
+        <span style="font-weight:700;"><span style="color:var(--orange);">AI</span> QUOTE</span>
+        <span class="v-pill" style="background:var(--green);">v8.0.0</span>
+        <span style="flex:1;"></span>
+        <span style="font-size:11px; opacity:0.7;">💾 Save · ☁ connected</span>
+      </div>
+      <div class="fake-body" style="background:var(--bg);">
+
+        <!-- BIG CUSTOMER BANNER -->
+        <div class="cust-banner">
+          <div class="cust-actions">
+            <span class="btn btn-ghost" style="font-size:11px;">✏ Edit customer</span>
+            <span class="btn btn-ghost" style="font-size:11px;">↔ Switch customer</span>
+          </div>
+          <div class="cust-name">Acme Manufacturing</div>
+          <div class="cust-meta">Q-1042 · 📐 multi-part · 2026-05-18 · <span class="pill draft" style="margin-left:4px;">draft</span></div>
+          <div class="cust-fields">
+            <div class="f"><label>Contact</label><value>Sarah Lee</value></div>
+            <div class="f"><label>Email</label><value>sarah@acme.com</value></div>
+            <div class="f"><label>Phone</label><value>(555) 432-9012</value></div>
+            <div class="f"><label>Rep</label><value>JMJ</value></div>
+            <div class="f"><label>Terms</label><value>Net 30</value></div>
+            <div class="f"><label>RFQ #</label><value>RFQ-2245</value></div>
+          </div>
+        </div>
+
+        <!-- Parts as chip row -->
+        <div class="card">
+          <div class="card-header">
+            <span>Parts · 3 on this quote</span>
+            <span class="btn btn-primary">+ Add Part</span>
+          </div>
+          <div class="card-body" style="padding:8px;">
+            <div class="row" style="gap:4px;">
+              <span class="chip machined active">📐 Bracket  ·  qty 10/50/100</span>
+              <span class="chip cut">⚡ Side Plate  ·  cut blank</span>
+              <span class="chip welded">🔥 Frame Weldment</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- ACTIVE PART — wizard view -->
+        <div class="card" style="border-color:var(--orange); border-width:2px;">
+          <div class="card-header" style="background:#FFF7ED;">
+            <span>📐 <strong>Part 1 — Bracket</strong>  ·  step 2 of 5</span>
+            <span style="font-size:11px; color:var(--text-mute);">⇠ Back · Save · Skip step ⇢</span>
+          </div>
+          <div class="card-body">
+            <div class="step-dots">
+              <span class="step-dot done">1</span>
+              <span class="step-dot active">2</span>
+              <span class="step-dot">3</span>
+              <span class="step-dot">4</span>
+              <span class="step-dot">5</span>
+            </div>
+            <h3>Material &amp; stock</h3>
+            <div class="row" style="gap:12px;">
+              <div class="field" style="flex:1;"><label>Material</label><select><option>Aluminum 6061-T6</option></select></div>
+              <div class="field"><label>Form</label><select><option>Bar/Block</option></select></div>
+              <div class="field"><label>Thickness</label><input value="0.500" style="width:60px;"></div>
+            </div>
+            <div class="row" style="gap:12px; margin-top:8px;">
+              <div class="field"><label>Length</label><input value="6.0" style="width:60px;"></div>
+              <div class="field"><label>Width</label><input value="4.0" style="width:60px;"></div>
+              <div class="field" style="flex:1;"><label>Last paid</label><input disabled value="$2.45/lb — Alro 2026-04"></div>
+            </div>
+            <div class="callout" style="margin-top:12px;">
+              ✨ <strong>One step at a time.</strong> Material card stays focused — no machine setups,
+              DXF, finishing, tooling, or pricing cards cluttering up the view until they're relevant.
+            </div>
+          </div>
+        </div>
+
+        <div class="callout">
+          ✅ <strong>Result:</strong> 70% less visible clutter at any moment. Each part gets a dedicated
+          step-by-step flow that's tailored to its type — machined parts see Material → Setups → Tooling;
+          cut blanks see Material → DXF → Finishing; purchased parts see Source → Markup → Done.
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- =============================================================== -->
+<h2 id="part-add">2. The "+ Add Part" flow</h2>
+<div class="screens">
+
+  <div class="screen">
+    <div class="screen-label proposed">Step A — empty quote, just customer banner</div>
+    <div class="screen-body">
+      <div class="fake-body" style="background:var(--bg);">
+        <div class="cust-banner" style="margin-bottom:10px;">
+          <div class="cust-name">Acme Manufacturing</div>
+          <div class="cust-meta">Q-1043 · new quote · 2026-05-18</div>
+        </div>
+        <div class="card" style="border:2px dashed var(--orange); background:#FFF7ED;">
+          <div class="card-body" style="text-align:center; padding:32px;">
+            <div style="font-size:32px;">📋</div>
+            <div style="font-weight:700; margin-top:8px;">No parts on this quote yet</div>
+            <div style="font-size:12px; color:var(--text-mute); margin-top:4px;">Click below or drop a drawing PDF to start</div>
+            <div style="margin-top:14px;">
+              <span class="btn btn-primary">+ Add Part</span>
+            </div>
+          </div>
+        </div>
+        <div class="callout q">
+          <strong>Q:</strong> Should "Drop a drawing PDF" auto-trigger the part type picker and pre-fill?
+          Today there's a global PDF-drop already routed to outside-cut. Could route a drop here too.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="screen">
+    <div class="screen-label proposed">Step B — click + Add Part → part type picker</div>
+    <div class="screen-body">
+      <div class="fake-body" style="background:var(--bg); position:relative;">
+        <div class="cust-banner" style="opacity:0.3; margin-bottom:10px;">
+          <div class="cust-name">Acme Manufacturing</div>
+        </div>
+        <div class="card" style="opacity:0.3;"><div class="card-body">…</div></div>
+        <div class="modal-backdrop" style="margin-top:-50px;">
+          <div class="modal">
+            <div class="modal-header">What kind of part is this?</div>
+            <div class="modal-body">
+              <p style="font-size:12px; color:var(--text-mute); margin:0 0 12px;">Pick the type — that decides which sections you'll see in the next step.</p>
+              <div style="display:grid; grid-template-columns:1fr; gap:6px;">
+                <div class="ptype"><div class="ptype-stripe" style="background:var(--blue);"></div><div class="ptype-icon">📐</div><div class="ptype-body"><div class="ptype-title">Machined</div><div class="ptype-desc">Bar/block stock + machine setups, runtime tiers.</div></div></div>
+                <div class="ptype"><div class="ptype-stripe" style="background:var(--purple);"></div><div class="ptype-icon">⚡</div><div class="ptype-body"><div class="ptype-title">Cut Blank</div><div class="ptype-desc">Sheet + outside cut (laser / waterjet / plasma).</div></div></div>
+                <div class="ptype"><div class="ptype-stripe" style="background:var(--amber);"></div><div class="ptype-icon">🔥</div><div class="ptype-body"><div class="ptype-title">Weldment</div><div class="ptype-desc">Multiple bodies joined — sub-parts + weld ops + finishing.</div></div></div>
+                <div class="ptype"><div class="ptype-stripe" style="background:var(--green);"></div><div class="ptype-icon">🧩</div><div class="ptype-body"><div class="ptype-title">Hybrid</div><div class="ptype-desc">Cut blank + secondary machine ops + finishing.</div></div></div>
+                <div class="ptype"><div class="ptype-stripe" style="background:var(--steel);"></div><div class="ptype-icon">📦</div><div class="ptype-body"><div class="ptype-title">Purchased / Component</div><div class="ptype-desc">McMaster, Misumi, etc. Just source + markup.</div></div></div>
+              </div>
+              <div style="margin-top:12px;">
+                <span class="btn">+ Drop a PDF/DXF to auto-detect type</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- =============================================================== -->
+<h2 id="wizard">3. Per-part wizard — one card at a time</h2>
+
+<div class="screens">
+
+  <div class="screen">
+    <div class="screen-label proposed">Step C — Part Identity (first wizard step)</div>
+    <div class="screen-body">
+      <div class="fake-body" style="background:var(--bg);">
+        <div class="cust-banner" style="padding:8px 12px; margin-bottom:8px;">
+          <div style="font-size:14px; font-weight:700;">Acme Manufacturing · Q-1043 ·  ✨ adding new part</div>
+        </div>
+        <div class="card" style="border:2px solid var(--blue);">
+          <div class="card-header" style="background:#DBEAFE;">
+            <span>📐 New Machined Part  ·  step 1 of 5: <strong>Identity</strong></span>
+            <span class="pill machined">machined</span>
+          </div>
+          <div class="card-body">
+            <div class="step-dots">
+              <span class="step-dot active">1</span>
+              <span class="step-dot">2</span>
+              <span class="step-dot">3</span>
+              <span class="step-dot">4</span>
+              <span class="step-dot">5</span>
+            </div>
+            <div class="row" style="gap:10px;">
+              <div class="field" style="flex:2;"><label>Part number</label><input value="BRK-2245-A"></div>
+              <div class="field" style="flex:3;"><label>Description</label><input value="Mounting bracket — Acme conveyor"></div>
+            </div>
+            <div style="margin-top:10px;">
+              <div class="field"><label>Drawing (optional — drag here to auto-fill)</label></div>
+              <div style="border:2px dashed var(--line-dark); padding:18px; text-align:center; font-size:12px; color:var(--text-mute);">📎 Drop PDF / DWG / DXF here</div>
+            </div>
+            <div class="row" style="margin-top:14px; justify-content:flex-end; gap:6px;">
+              <span class="btn">Cancel</span>
+              <span class="btn">Save as draft</span>
+              <span class="btn btn-primary">Next: Material →</span>
+            </div>
+          </div>
+        </div>
+        <div class="callout q">
+          <strong>Q:</strong> Should "Save as draft" stop here and let me move on to the next part?
+          Useful if I'm pasting in 10 parts and want to fill in details later.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="screen">
+    <div class="screen-label proposed">Step D — Material (only relevant fields for type)</div>
+    <div class="screen-body">
+      <div class="fake-body" style="background:var(--bg);">
+        <div class="card" style="border:2px solid var(--blue);">
+          <div class="card-header" style="background:#DBEAFE;">
+            <span>📐 BRK-2245-A · step 2 of 5: <strong>Material</strong></span>
+          </div>
+          <div class="card-body">
+            <div class="step-dots">
+              <span class="step-dot done">1</span>
+              <span class="step-dot active">2</span>
+              <span class="step-dot">3</span>
+              <span class="step-dot">4</span>
+              <span class="step-dot">5</span>
+            </div>
+            <div class="row" style="gap:10px;">
+              <div class="field" style="flex:2;">
+                <label>Material (color-coded list as in v7.73)</label>
+                <select>
+                  <option>🪶 Aluminum 6061-T6</option>
+                  <option>🪶 Aluminum 7075</option>
+                  <option>🔧 Carbon Steel 1018</option>
+                  <option>✨ 304 Stainless</option>
+                </select>
+              </div>
+              <div class="field"><label>Form</label><select><option>Bar/Block</option><option>Sheet</option><option>Round</option></select></div>
+            </div>
+            <div class="row" style="margin-top:8px; gap:10px;">
+              <div class="field"><label>Length</label><input value="6.0"></div>
+              <div class="field"><label>Width</label><input value="4.0"></div>
+              <div class="field"><label>Thickness</label><input value="0.5"></div>
+              <div class="field" style="flex:1;"><label>Wt / pc</label><input disabled value="0.59 lb"></div>
+            </div>
+            <div class="callout" style="margin-top:10px; font-size:12px;">
+              💰 <strong>Last paid:</strong> $2.45/lb from Alro Steel on 2026-04-22 ·
+              <span style="color:var(--orange); font-weight:600;">Use this price</span>
+            </div>
+            <div class="row" style="margin-top:14px; justify-content:space-between;">
+              <span class="btn">← Back to Identity</span>
+              <span class="btn btn-primary">Next: Machine Setups →</span>
+            </div>
+          </div>
+        </div>
+        <div class="callout">
+          ✨ <strong>Only the fields relevant to a MACHINED part show here.</strong> A cut blank wouldn't
+          show Form/Length/Width but would show "Sheet size" and "Thickness". Different type → different fields.
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- =============================================================== -->
+<h2 id="types">4. Different part types → different wizard steps</h2>
+
+<div style="background:var(--paper); padding:14px; border:1px solid var(--line-dark); border-radius:4px;">
+<table style="width:100%; border-collapse:collapse; font-size:13px;">
+  <thead>
+    <tr style="background:var(--bg);">
+      <th style="text-align:left; padding:8px;">Part Type</th>
+      <th style="text-align:left; padding:8px;">Wizard Steps</th>
+      <th style="text-align:left; padding:8px;">Skipped vs Today</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr style="border-top:1px solid var(--line);">
+      <td style="padding:8px;"><span class="pill machined">📐 Machined</span></td>
+      <td style="padding:8px;">1. Identity · 2. Material · 3. Setups · 4. Finishing · 5. Review</td>
+      <td style="padding:8px; color:var(--green);">Hides DXF list (no outside cut)</td>
+    </tr>
+    <tr style="border-top:1px solid var(--line);">
+      <td style="padding:8px;"><span class="pill cut">⚡ Cut Blank</span></td>
+      <td style="padding:8px;">1. Identity · 2. Sheet stock · 3. DXF / Vendor · 4. Finishing · 5. Review</td>
+      <td style="padding:8px; color:var(--green);">Hides Machine Setups, Tooling</td>
+    </tr>
+    <tr style="border-top:1px solid var(--line);">
+      <td style="padding:8px;"><span class="pill welded">🔥 Weldment</span></td>
+      <td style="padding:8px;">1. Identity · 2. Sub-parts · 3. Weld ops · 4. Finishing · 5. Review</td>
+      <td style="padding:8px; color:var(--green);">Sub-parts can be nested machined/cut-blank entries</td>
+    </tr>
+    <tr style="border-top:1px solid var(--line);">
+      <td style="padding:8px;"><span class="pill" style="background:#ECFDF3; color:var(--green);">🧩 Hybrid</span></td>
+      <td style="padding:8px;">1. Identity · 2. Sheet stock · 3. DXF · 4. Secondary ops · 5. Finishing · 6. Review</td>
+      <td style="padding:8px; color:var(--green);">All sections relevant — just walked through sequentially</td>
+    </tr>
+    <tr style="border-top:1px solid var(--line);">
+      <td style="padding:8px;"><span class="pill" style="background:#F1F5F9; color:var(--steel);">📦 Purchased</span></td>
+      <td style="padding:8px;">1. Source (McMaster/Misumi/manual) · 2. Markup · 3. Review</td>
+      <td style="padding:8px; color:var(--green);">No material, setups, DXF, tooling — only 3 steps total</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<!-- =============================================================== -->
+<h2 id="questions">5. Open questions — please answer before I code</h2>
+
+<div class="callout q">
+  <strong>Q1.</strong> Currently the chip row shows ALL parts. Once you click a part, the wizard takes over the page.
+  When you complete the wizard (or click another chip), what should happen?
+  <ul style="margin:6px 0;">
+    <li><strong>(A)</strong> Collapse back to a summary card per part (compact 1-liner)</li>
+    <li><strong>(B)</strong> Keep current part editor open, switch to clicked chip</li>
+    <li><strong>(C)</strong> Stay in wizard mode for the newly-selected part, fresh step 1</li>
+  </ul>
+</div>
+
+<div class="callout q">
+  <strong>Q2.</strong> Should the wizard <em>require</em> sequential progression (must finish step 1 to see step 2)
+  or let you <strong>jump</strong> between steps via the dots?
+  <br>(My recommendation: let you jump. Required progression annoys experienced users.)
+</div>
+
+<div class="callout q">
+  <strong>Q3.</strong> "Save as draft" mid-wizard — does it close the wizard and return to the parts row,
+  or stay on the current step but mark the part as "draft" so the chip turns yellow?
+</div>
+
+<div class="callout q">
+  <strong>Q4.</strong> Pricing summary — today it shows per-tier totals at the bottom of the part editor.
+  In v8, should pricing be:
+  <ul style="margin:6px 0;">
+    <li><strong>(A)</strong> Final wizard step (Review) — shows all numbers for that part</li>
+    <li><strong>(B)</strong> A persistent footer/sidebar visible on every step (so you see prices live as you edit)</li>
+    <li><strong>(C)</strong> Whole-quote pricing as a separate page/tab (current Summary tab)</li>
+  </ul>
+</div>
+
+<div class="callout q">
+  <strong>Q5.</strong> The drag-and-drop drawing → auto-detect part type. Should dropping a PDF on the empty quote:
+  <ul style="margin:6px 0;">
+    <li>Open the part-type picker pre-filled with Claude's best guess?</li>
+    <li>Or skip the picker entirely if Claude is confident (and just create a part of that type)?</li>
+  </ul>
+</div>
+
+<div class="callout q">
+  <strong>Q6.</strong> Customer banner at top — should it show <em>read-only</em> or be inline-editable?
+  Right now it's an editable info card. v8 could collapse to a banner with a "✏ Edit" link that opens a modal.
+</div>
+
+<div class="callout warn">
+  <strong>Also flagging two carried-over bugs to fix as part of v8:</strong>
+  <ul style="margin:6px 0;">
+    <li><strong>Quote-open click no-op</strong> after Firebase sync — initial sync replaces <code>state.quotes</code>
+      but doesn't call <code>render()</code>. Result: list-cards onscreen point at stale ids. Fix: call <code>render()</code>
+      after initial-sync apply in SyncEngine.connect().</li>
+    <li><strong>Matrix filters &amp; sort</strong> on Customer × Material matrix (and Vendor matrix). Not implemented
+      yet, parking-lot for v8.</li>
+  </ul>
+</div>
+
+<hr style="margin:40px 0; border:none; border-top:1px solid var(--line-dark);">
+
+<div style="font-size:11px; color:var(--text-mute); text-align:center;">
+  AI Quote v8 mockup · static wireframe · no app code changes yet · respond in chat to mark up
+</div>
+
+</body>
+</html>
