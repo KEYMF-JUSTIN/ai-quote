@@ -769,7 +769,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '8.3.1';
+const APP_VERSION = '8.4.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -1001,6 +1001,7 @@ const state = {
     customerWizard: null,       // v7.68: { open, step, draft } for "+ Add Customer" guided flow
     entityChipPicker: null,     // v7.72: { kind:'service'|'material', entityType:'vendor'|'customer', entityId, search } — inline picker shown under a chip strip when user clicks "+ Add"
     iconPicker: null,           // v7.74: { typeIdx } when the Part Type icon picker modal is open. Caller writes the picked emoji to settings.partTypes[idx].icon.
+    colorPicker: null,          // v8.4: { action, args, currentColor } when the 128-swatch color picker is open. Picked color is delivered by calling App[action](...args, color). Replaces native <input type=color>.
     wizardMode: false,          // v8.0: toggle for the new wizard-style quote page. When false, falls back to classic all-cards view. Set per session — not persisted.
     wizardStep: {},             // v8.0: keyed partId → step index. Tracks where in the wizard each part is, so switching chips remembers your spot.
     trainingPicker: null,       // v7.62: { entityType, entityId, sampleId?, file?, parsed?, docType, notes, error, loading } for the training sample editor
@@ -1074,6 +1075,12 @@ function migrateState() {
   // v7.18: tier-based labor discounts
   if (state.settings && !Array.isArray(state.settings.tierLaborDiscounts)) {
     state.settings.tierLaborDiscounts = [0, 5, 10, 15];
+  }
+  // v8.4: color favorites (synced) — up to 10 user-pinned colors for the
+  // 128-swatch picker. Stored in settings so they ride along with Firebase
+  // sync and are shared across the team.
+  if (state.settings && !Array.isArray(state.settings.colorFavorites)) {
+    state.settings.colorFavorites = [];
   }
   // v7.19: accounting documents - ensure arrays + counters + tax/terms defaults
   if (!Array.isArray(state.purchaseOrders)) state.purchaseOrders = [];
@@ -1565,6 +1572,7 @@ function closeAllModals() {
   state.ui.customerWizard = null;   // v7.68
   state.ui.entityChipPicker = null; // v7.72
   state.ui.iconPicker = null;       // v7.74
+  state.ui.colorPicker = null;      // v8.4 (already added but listed here so closeAllModals clears it)
   state.ui.mcMasterPaste = null;
   state.ui.missingCustFolder = null;
   state.ui.inviteDialog = null;
@@ -4595,6 +4603,34 @@ const ICON_LIBRARY = [
   { group:'Logistics',     icons:['🚚','🏭','📅','⏱','💰','💼','🗂','📁','📇','🪧'] },
 ];
 
+// v8.4: Fixed 128-color palette — replaces the native <input type="color">
+// infinite slider so users can RELIABLY pick the same color again across
+// records (e.g., all Integrated Power locations get the exact same hex).
+// 16 hues × 8 shades = 128 swatches, Tailwind-derived. Plus a 10-slot
+// favorites row synced via settings.colorFavorites.
+//
+// Each row: { name, shades: [50, 100, 200, 300, 500, 600, 700, 900] }
+//   (skip 400/800 — keeps the grid 8-wide and the steps visually distinct)
+const COLOR_PALETTE = [
+  { name:'Slate',   shades:['#f8fafc','#f1f5f9','#e2e8f0','#cbd5e1','#64748b','#475569','#334155','#0f172a'] },
+  { name:'Gray',    shades:['#f9fafb','#f3f4f6','#e5e7eb','#d1d5db','#6b7280','#4b5563','#374151','#111827'] },
+  { name:'Red',     shades:['#fef2f2','#fee2e2','#fecaca','#fca5a5','#ef4444','#dc2626','#b91c1c','#7f1d1d'] },
+  { name:'Orange',  shades:['#fff7ed','#ffedd5','#fed7aa','#fdba74','#f97316','#ea580c','#c2410c','#7c2d12'] },
+  { name:'Amber',   shades:['#fffbeb','#fef3c7','#fde68a','#fcd34d','#f59e0b','#d97706','#b45309','#78350f'] },
+  { name:'Yellow',  shades:['#fefce8','#fef9c3','#fef08a','#fde047','#eab308','#ca8a04','#a16207','#713f12'] },
+  { name:'Lime',    shades:['#f7fee7','#ecfccb','#d9f99d','#bef264','#84cc16','#65a30d','#4d7c0f','#365314'] },
+  { name:'Green',   shades:['#f0fdf4','#dcfce7','#bbf7d0','#86efac','#22c55e','#16a34a','#15803d','#14532d'] },
+  { name:'Emerald', shades:['#ecfdf5','#d1fae5','#a7f3d0','#6ee7b7','#10b981','#059669','#047857','#064e3b'] },
+  { name:'Teal',    shades:['#f0fdfa','#ccfbf1','#99f6e4','#5eead4','#14b8a6','#0d9488','#0f766e','#134e4a'] },
+  { name:'Sky',     shades:['#f0f9ff','#e0f2fe','#bae6fd','#7dd3fc','#0ea5e9','#0284c7','#0369a1','#0c4a6e'] },
+  { name:'Blue',    shades:['#eff6ff','#dbeafe','#bfdbfe','#93c5fd','#3b82f6','#2563eb','#1d4ed8','#1e3a8a'] },
+  { name:'Indigo',  shades:['#eef2ff','#e0e7ff','#c7d2fe','#a5b4fc','#6366f1','#4f46e5','#4338ca','#312e81'] },
+  { name:'Violet',  shades:['#f5f3ff','#ede9fe','#ddd6fe','#c4b5fd','#8b5cf6','#7c3aed','#6d28d9','#4c1d95'] },
+  { name:'Pink',    shades:['#fdf2f8','#fce7f3','#fbcfe8','#f9a8d4','#ec4899','#db2777','#be185d','#831843'] },
+  { name:'Rose',    shades:['#fff1f2','#ffe4e6','#fecdd3','#fda4af','#f43f5e','#e11d48','#be123c','#881337'] },
+];
+const COLOR_FAVORITES_MAX = 10;
+
 const MATERIAL_CATEGORIES = [
   { id:'stainless',  label:'Stainless Steel', icon:'✨', color:'#1E5BAE',
     pattern:/\b(stainless|17-?4|17-?7|13-?8|15-?5|303|304[lL]?|316[lL]?|410|416|420|430|440|2205|2507|nitronic|inconel|monel|hastelloy)\b/i },
@@ -5914,6 +5950,7 @@ function render() {
   renderNewQuoteKindPickerModal();
   renderPartTypePickerModal();
   renderIconPickerModal();      // v7.74
+  renderColorPickerModal();     // v8.4
   renderVendorWizardModal();    // v7.68
   renderCustomerWizardModal();  // v7.68
   renderTrainingModal();
@@ -11174,19 +11211,15 @@ function renderCustomersCards(list) {
               <!-- v8.3: per-customer color. Use to group locations of the
                    same parent org (e.g. all Integrated Power locations a
                    single shared color) so they're visually identifiable in
-                   the customer picker grid. Blank = no custom color. -->
+                   the customer picker grid. Blank = no custom color.
+                   v8.4: uses the 128-swatch palette picker (right-click any
+                   swatch to add/remove from favorites). -->
               <div class="field">
                 <label>Color (optional)</label>
                 <div style="display:flex; gap:6px; align-items:center;">
-                  <input type="color" value="${esc(c.color || '#94a3b8')}"
-                         onchange="App.setCustomerColor('${c.id}', this.value)"
-                         style="width:42px; height:32px; padding:0; border:1px solid var(--line-dark); cursor:pointer; background:transparent;">
-                  ${c.color ? `
-                    <span class="mono small" style="color:var(--text-mute);">${esc(c.color)}</span>
-                    <button class="btn btn-sm" onclick="App.setCustomerColor('${c.id}','')" title="Remove custom color">×</button>
-                  ` : '<span class="text-mute small">none</span>'}
+                  ${renderColorSwatchButton(c.color, 'setCustomerColor', c.id)}
                 </div>
-                <div class="hint">Used in the customer picker grid + quote banner. Tip: pick the same color for all locations of one parent company (e.g. all Integrated Power sites).</div>
+                <div class="hint">Used in the customer picker grid + quote banner. Tip: pick the same color for all locations of one parent company (e.g. all Integrated Power sites). Pin colors to ★ favorites for fast reuse.</div>
               </div>
             </div>
             <hr>
@@ -11598,12 +11631,7 @@ function renderSettings() {
                          style="width:100%; padding:5px 7px; font-weight:600;">
                 </td>
                 <td>
-                  <div class="row" style="gap:4px; align-items:center;">
-                    <input type="color" value="${esc(t.color || '#64748B')}"
-                           onchange="App.setPartTypeField(${i}, 'color', this.value)"
-                           style="width:36px; height:28px; padding:0; border:1px solid var(--line-dark); cursor:pointer;">
-                    <span class="mono small" style="color:var(--text-mute);">${esc(t.color || '')}</span>
-                  </div>
+                  ${renderColorSwatchButton(t.color, 'setPartTypeField', i, 'color')}
                 </td>
                 <td>
                   <input type="text" value="${esc(t.desc || '')}" placeholder="What's this type for? Helps users pick."
@@ -13434,6 +13462,114 @@ function renderIconPickerModal() {
   `;
 }
 
+// v8.4: 128-color palette picker modal + a swatch-button helper that any
+// "pick a color" field in the app calls instead of <input type="color">.
+//
+// Usage from anywhere:
+//   ${renderColorSwatchButton(currentHex, 'setCustomerColor', customerId)}
+// When the user picks, the modal calls App.setCustomerColor(customerId, hex).
+// The button shows a 28×28 swatch of the current color + a small ▾ chevron.
+// Click → modal pops with: favorites strip → 128-swatch grid → hex input.
+function renderColorSwatchButton(currentColor, action, ...args) {
+  const safeColor = currentColor || '';
+  const argsJson = JSON.stringify(args).replace(/"/g, '&quot;');
+  return `
+    <button type="button"
+            onclick="App.openColorPicker('${esc(action)}', ${esc(JSON.stringify(args))}, '${esc(safeColor)}')"
+            title="Click to pick a color${safeColor ? ' (current: ' + safeColor + ')' : ''}"
+            style="display:inline-flex; align-items:center; gap:4px; padding:2px 6px 2px 2px; border:1px solid var(--line-dark); background:var(--paper); border-radius:3px; cursor:pointer; font-size:11px;">
+      <span style="width:24px; height:24px; border-radius:2px; background:${safeColor || 'repeating-linear-gradient(45deg, var(--bg), var(--bg) 4px, var(--line) 4px, var(--line) 6px)'}; display:inline-block; border:1px solid var(--line);"></span>
+      <span style="color:var(--text-mute); font-family:var(--font-mono);">${safeColor ? esc(safeColor) : 'pick'}</span>
+      <span style="color:var(--text-mute); font-size:8px;">▼</span>
+    </button>
+  `;
+}
+
+function renderColorPickerModal() {
+  let host = document.getElementById('color-picker-host');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'color-picker-host';
+    document.body.appendChild(host);
+  }
+  const p = state.ui.colorPicker;
+  if (!p) { host.innerHTML = ''; return; }
+  const favs = (state.settings.colorFavorites || []).slice(0, COLOR_FAVORITES_MAX);
+  const current = p.currentColor || '';
+
+  // Favorites strip — always 10 slots (filled or empty)
+  const favSlots = [];
+  for (let i = 0; i < COLOR_FAVORITES_MAX; i++) {
+    const c = favs[i];
+    if (c) {
+      favSlots.push(`
+        <button onclick="App.pickColor('${esc(c)}')"
+                oncontextmenu="event.preventDefault(); App.toggleFavoriteColor('${esc(c)}'); return false;"
+                title="${esc(c)} — click to use · right-click to remove from favorites"
+                style="width:32px; height:32px; border-radius:4px; background:${esc(c)}; border:2px solid ${current.toLowerCase()===c.toLowerCase()?'var(--orange)':'var(--line-dark)'}; cursor:pointer; box-shadow:0 1px 3px rgba(0,0,0,0.1);"></button>
+      `);
+    } else {
+      favSlots.push(`
+        <span title="Empty favorite slot — click ★ next to a color to pin it"
+              style="width:32px; height:32px; border-radius:4px; border:1px dashed var(--line-dark); background:repeating-linear-gradient(45deg, var(--bg), var(--bg) 3px, var(--paper) 3px, var(--paper) 5px); display:inline-block;"></span>
+      `);
+    }
+  }
+
+  // 128-swatch grid — 16 rows × 8 cols
+  const gridRows = COLOR_PALETTE.map(row => {
+    const cells = row.shades.map(hex => {
+      const isCur = current.toLowerCase() === hex.toLowerCase();
+      const isFav = favs.some(f => f.toLowerCase() === hex.toLowerCase());
+      // Border: orange (selected) > navy thick (favorited) > line-dark (default)
+      const borderStyle = isCur ? '3px solid var(--orange)' : isFav ? '2px solid var(--navy)' : '1px solid var(--line-dark)';
+      return `
+        <button onclick="App.pickColor('${hex}')"
+                oncontextmenu="event.preventDefault(); App.toggleFavoriteColor('${hex}'); return false;"
+                title="${hex} — click to use · right-click to ${isFav?'remove from':'add to'} favorites"
+                style="width:32px; height:32px; border-radius:3px; background:${hex}; border:${borderStyle}; cursor:pointer; position:relative;">
+          ${isFav ? '<span style="position:absolute; top:1px; right:2px; font-size:9px; color:white; text-shadow:0 1px 1px rgba(0,0,0,0.5);">★</span>' : ''}
+        </button>
+      `;
+    }).join('');
+    return `
+      <div style="display:flex; gap:3px; align-items:center;">
+        <span style="display:inline-block; width:60px; font-size:10px; color:var(--text-mute); font-weight:600; text-align:right; padding-right:6px;">${esc(row.name)}</span>
+        ${cells}
+      </div>
+    `;
+  }).join('');
+
+  host.innerHTML = `
+    <div class="modal-backdrop" onclick="App.closeColorPicker()">
+      <div class="modal" style="width:560px; max-width:96vw;" onclick="event.stopPropagation()">
+        <div class="modal-header">Pick a color</div>
+        <div class="modal-body" style="max-height:75vh; overflow-y:auto;">
+          <div style="font-family:var(--font-display); font-size:10px; letter-spacing:0.08em; color:var(--text-mute); font-weight:700; margin-bottom:6px;">★ FAVORITES <span style="font-weight:400; opacity:0.7;">(right-click any swatch to add/remove)</span></div>
+          <div style="display:flex; gap:4px; margin-bottom:14px; padding:8px; background:var(--bg); border-radius:4px;">
+            ${favSlots.join('')}
+          </div>
+          <div style="font-family:var(--font-display); font-size:10px; letter-spacing:0.08em; color:var(--text-mute); font-weight:700; margin-bottom:6px;">PALETTE · 16 hues × 8 shades = 128 colors</div>
+          <div style="display:flex; flex-direction:column; gap:3px;">
+            ${gridRows}
+          </div>
+          <div style="margin-top:14px; padding-top:10px; border-top:1px dashed var(--line); display:flex; gap:8px; align-items:center;">
+            <span style="font-size:11px; color:var(--text-mute);">Or paste a hex:</span>
+            <input type="text" id="color-picker-hex-input" placeholder="#1E5BAE" value="${esc(current)}"
+                   onkeydown="if(event.key==='Enter'){App.pickColor(this.value); event.preventDefault();}"
+                   style="width:110px; padding:4px 8px; font-family:var(--font-mono); font-size:12px;">
+            <button class="btn btn-sm" onclick="App.pickColor(document.getElementById('color-picker-hex-input').value)">Apply</button>
+            ${current ? `<button class="btn btn-sm" onclick="App.pickColor('')" title="Clear color (use default)">× Clear</button>` : ''}
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn" onclick="App.closeColorPicker()">Cancel</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 // =================================================================
 // v7.68: VENDOR + CUSTOMER WIZARDS — step-by-step add flow.
 // Replaces the legacy one-shot "+ Add Vendor / + Add Customer" buttons that
@@ -13924,16 +14060,11 @@ function renderCustomerWizardModal() {
       </div>
       <!-- v8.3: optional color tag. Pick a color now or skip — used to
            visually group sister locations of one parent company in the
-           customer picker grid (e.g. all Integrated Power locations). -->
+           customer picker grid (e.g. all Integrated Power locations).
+           v8.4: uses the 128-swatch palette picker with ★ favorites. -->
       <div class="row" style="gap:10px; margin-top:10px; align-items:center;">
         <label class="wizard-label" style="font-size:13px; flex:0 0 auto;">Color tag (optional)</label>
-        <input type="color" value="${esc(d.color || '#94a3b8')}"
-               oninput="App.customerWizardSet('color', this.value)"
-               style="width:40px; height:32px; padding:0; border:1px solid var(--line-dark); cursor:pointer; background:transparent;">
-        ${d.color ? `
-          <span class="mono small" style="color:var(--text-mute);">${esc(d.color)}</span>
-          <button type="button" class="btn btn-sm" onclick="App.customerWizardSet('color','')">Clear</button>
-        ` : '<span class="text-mute small">none — uses neutral grey</span>'}
+        ${renderColorSwatchButton(d.color, 'customerWizardSet', 'color')}
         <span class="text-mute small" style="margin-left:auto;">Tip: same color = sister locations.</span>
       </div>
     `;
@@ -20169,6 +20300,57 @@ const App = {
       const t = (s.settings.partTypes || [])[p.typeIdx];
       if (t) t.icon = icon;
       s.ui.iconPicker = null;
+    });
+  },
+
+  // v8.4: 128-color palette picker. Caller passes an action name + args;
+  // when user picks, App[action](...args, color) is invoked.
+  openColorPicker(action, argsJson, currentColor) {
+    let args = [];
+    try { args = JSON.parse(argsJson || '[]'); } catch (_) { args = []; }
+    update(s => {
+      s.ui.colorPicker = { action, args, currentColor: currentColor || '' };
+    });
+  },
+  closeColorPicker() {
+    update(s => { s.ui.colorPicker = null; });
+  },
+  pickColor(hex) {
+    const p = state.ui.colorPicker;
+    if (!p) return;
+    // Light validation — accept #RGB, #RRGGBB, or empty string (clear)
+    let val = (hex || '').trim();
+    if (val && !/^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(val)) {
+      // If user typed a name like "blue" or "ff0000" without #, try to fix
+      if (/^[0-9a-f]{6}$/i.test(val)) val = '#' + val;
+      else { alert('Invalid color. Use a hex like #1E5BAE.'); return; }
+    }
+    // Dispatch via the registered action
+    const fn = this[p.action];
+    if (typeof fn === 'function') {
+      fn.apply(this, p.args.concat([val]));
+    } else {
+      console.warn('[pickColor] no action found:', p.action);
+    }
+    // Close the picker
+    update(s => { s.ui.colorPicker = null; });
+  },
+  toggleFavoriteColor(hex) {
+    if (!hex) return;
+    update(s => {
+      if (!Array.isArray(s.settings.colorFavorites)) s.settings.colorFavorites = [];
+      const list = s.settings.colorFavorites;
+      const idx = list.findIndex(c => (c || '').toLowerCase() === hex.toLowerCase());
+      if (idx >= 0) {
+        // Already a favorite → remove
+        list.splice(idx, 1);
+        showToast(`Removed ${hex} from favorites.`, 2000);
+      } else {
+        // Add — drop oldest if over the cap
+        if (list.length >= COLOR_FAVORITES_MAX) list.shift();
+        list.push(hex);
+        showToast(`★ Added ${hex} to favorites.`, 2000);
+      }
     });
   },
 
