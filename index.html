@@ -760,7 +760,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '8.1.0';
+const APP_VERSION = '8.2.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -12403,6 +12403,11 @@ function renderPartWizard(q, part) {
   else if (cur.id === 'finishing') body = renderWizardStepFinishing(q, part);
   else if (cur.id === 'review')    body = renderWizardStepReview(q, part);
   else body = `<p class="text-mute">Step "${esc(cur.label)}" — no renderer registered.</p>`;
+  // v8.2: every step body gets a drop zone prepended. Review doesn't need
+  // one (it's read-only), but every other step can accept attachments.
+  if (cur.id !== 'review') {
+    body = renderWizardStepDropZone(part, cur.id) + body;
+  }
 
   return `
     <div style="background:var(--paper); border:2px solid ${type.color}; border-radius:4px;">
@@ -12469,6 +12474,8 @@ function renderWizardStepIdentity(q, part) {
 function renderWizardStepMaterial(q, part) {
   const materials = state.settings.materials || [];
   const grouped = groupedMaterialOptions(materials);
+  const isBar = (part.stock?.form === 'Bar/Block' || part.stock?.form === 'Round');
+  const useBarCalc = !!part.stock?.useBarCalc;
   return `
     <div style="display:grid; grid-template-columns:2fr 1fr 1fr 1fr; gap:14px;">
       <div class="field" style="grid-column:span 2;"><label>Material</label>
@@ -12490,11 +12497,89 @@ function renderWizardStepMaterial(q, part) {
         ${bind({label:'Material notes', value:part.materialNotes, onChange:v=>{ part.materialNotes = v; }, placeholder:'Customer-supplied? Cert required?'})}
       </div>
     </div>
+    ${isBar ? `
+      <!-- v8.2: bar calculator toggle. Visible only when stock form is bar
+           or round. When checked, we'll compute how many bars are needed for
+           each quantity tier based on bar length, part length, and kerf. -->
+      <div style="margin-top:14px; padding:12px 14px; background:${useBarCalc ? '#FEF3C7' : 'var(--bg)'}; border:1px dashed ${useBarCalc ? 'var(--amber)' : 'var(--line-dark)'}; border-radius:4px;">
+        <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:13px; font-weight:600;">
+          <input type="checkbox" ${useBarCalc?'checked':''}
+                 onchange="App.toggleBarCalc('${part.id}', this.checked)"
+                 style="width:18px; height:18px; cursor:pointer;">
+          🔢 Use the bar calculator to figure out how many bars I'll need
+        </label>
+        ${useBarCalc ? `
+          <div style="margin-top:10px; padding-left:26px; display:grid; grid-template-columns:1fr 1fr 1fr 1fr; gap:10px;">
+            <div class="field"><label>Bar length (in)</label>
+              ${bind({label:'Bar length', value:part.stock?.barLength, type:'number', onChange:v=>{ if(!part.stock) part.stock = {}; part.stock.barLength = v; }, attrs:'step="0.25"', placeholder:'e.g. 144 (12 ft)'})}
+            </div>
+            <div class="field"><label>Part length on bar (in)</label>
+              ${bind({label:'Part length on bar', value:part.stock?.partLength, type:'number', onChange:v=>{ if(!part.stock) part.stock = {}; part.stock.partLength = v; }, attrs:'step="0.25"'})}
+            </div>
+            <div class="field"><label>Kerf (in)</label>
+              ${bind({label:'Kerf', value:part.stock?.kerf, type:'number', onChange:v=>{ if(!part.stock) part.stock = {}; part.stock.kerf = v; }, attrs:'step="0.005"', placeholder:'0.030 typical'})}
+            </div>
+            <div class="field"><label>Extra (drop)</label>
+              ${bind({label:'Extra stock', value:part.stock?.extraStock, type:'number', onChange:v=>{ if(!part.stock) part.stock = {}; part.stock.extraStock = v; }, attrs:'step="0.25"', placeholder:'1.0 typical'})}
+            </div>
+          </div>
+          <div class="text-mute small" style="padding-left:26px; margin-top:6px;">
+            Parts per bar = floor((bar length − extra) / (part length + kerf)). Bars needed per qty tier shows on the Review step.
+          </div>
+        ` : `
+          <div class="text-mute small" style="padding-left:26px; margin-top:4px;">
+            Tick to plan stock usage from bar/round bar stock. Use this when you're sawing pieces off a long bar.
+          </div>
+        `}
+      </div>
+    ` : ''}
     <div style="margin-top:14px; padding:10px 12px; background:#F0F9FF; border-left:3px solid var(--blue); border-radius:3px; font-size:12px;">
       💡 The next steps depend on this part's type — machined gets <strong>Setups → Tooling</strong>, cut blanks get <strong>DXF</strong>, weldments get <strong>Setups → Weld Ops</strong>, hybrids get all of it. Purchased parts skip straight to Review. Pick the type on the Identity step to see the right flow.
     </div>
   `;
 }
+// v8.2: Per-step drop zone — appears at the top of every wizard step. Drop
+// a file (PDF, image, web page saved as PDF, anything) and it gets pinned
+// to the part's attachments list with a tag indicating which step it
+// landed on. So the black-oxide quote email lands on Finishing, the tool
+// quote lands on Tooling, the supplier price PDF lands on Material, etc.
+//
+// Keeps the user accountable: they can see at a glance which steps have
+// supporting docs and which don't.
+function renderWizardStepDropZone(part, stepId) {
+  const atts = (part.attachments || []).filter(a => a.stepId === stepId);
+  return `
+    <div data-wizard-step-drop="${esc(part.id)}|${esc(stepId)}"
+         style="border:1px dashed var(--orange); background:#FFF7ED; padding:7px 10px; margin-bottom:12px; font-size:11px; border-radius:3px; cursor:pointer;"
+         onclick="document.getElementById('wstep-input-${esc(part.id)}-${esc(stepId)}').click()">
+      <div style="display:flex; align-items:center; gap:10px;">
+        <span style="font-size:14px;">📎</span>
+        <span style="flex:1; color:var(--orange); font-weight:600;">
+          Drop or click to attach a file to this <strong style="text-transform:capitalize;">${esc(stepId)}</strong> step
+          <span style="font-weight:400; color:var(--text-mute);">— quote emails, PDFs, screenshots, web pages, anything that documents the actual cost.</span>
+        </span>
+        ${atts.length > 0 ? `<span style="background:var(--orange); color:white; padding:2px 8px; border-radius:10px; font-weight:600;">${atts.length} attached</span>` : ''}
+      </div>
+      <input type="file" id="wstep-input-${esc(part.id)}-${esc(stepId)}" style="display:none;"
+             onchange="if(this.files[0]){App.wizardAttachFile('${esc(part.id)}','${esc(stepId)}', this.files[0]); this.value='';}"
+             accept="*/*"
+             onclick="event.stopPropagation()">
+      ${atts.length > 0 ? `
+        <div style="margin-top:6px; padding-top:6px; border-top:1px dashed rgba(220,67,24,0.3); display:flex; flex-wrap:wrap; gap:4px;" onclick="event.stopPropagation()">
+          ${atts.map(a => `
+            <span style="display:inline-flex; align-items:center; gap:4px; padding:2px 8px; background:var(--paper); border:1px solid var(--orange); border-radius:12px; font-size:11px;">
+              <a href="${esc(a.data || '#')}" download="${esc(a.name)}" title="Download ${esc(a.name)} (${Math.round((a.size||0)/1024)} KB)"
+                 onclick="event.stopPropagation()" style="color:var(--navy); text-decoration:none; font-weight:600;">${esc(a.name)}</a>
+              <span style="color:var(--text-mute);">${Math.round((a.size||0)/1024)}KB</span>
+              <span onclick="event.stopPropagation(); App.removeAttachment('${esc(part.id)}','${esc(a.id)}')" title="Remove" style="cursor:pointer; color:var(--orange); font-weight:700; margin-left:2px;">×</span>
+            </span>
+          `).join('')}
+        </div>
+      ` : ''}
+    </div>
+  `;
+}
+
 // v8.1 (Layer 2): Step wrappers — thin pass-through to the existing classic
 // card renderers. The wizard just provides the step-by-step framing; the
 // actual UI for setups / DXF / tooling / weldops / finishing already exists
@@ -12587,8 +12672,69 @@ function renderPricingSidebar(q) {
   `;
 }
 
+// v8.2: Quote-level customer step — the FIRST card the user sees on a new
+// quote, before any parts are added. Per user feedback: "When you do a
+// quote, the first card that comes up should be customer."
+//
+// Once q.customerId is set, this step collapses into the banner at the top
+// and the user moves on to adding parts. They can change customer anytime
+// via the ↔ button on the banner (Layer 3 — for now, switch to classic to
+// edit).
+function renderWizardCustomerStep(q) {
+  const customers = (state.customers || []).filter(c => (c.status || 'Active') !== 'Inactive')
+    .slice().sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+  const search = state.ui.wizardCustomerSearch || '';
+  const filtered = !search ? customers
+    : customers.filter(c => (c.name || '').toLowerCase().includes(search.toLowerCase()) ||
+                            (c.code || '').toLowerCase().includes(search.toLowerCase()));
+  return `
+    <div style="background:linear-gradient(135deg, var(--navy) 0%, #2A3B52 100%); color:white; padding:10px 16px; border-radius:4px; margin-bottom:14px;">
+      <div style="font-size:18px; font-weight:700;">New quote · pick the customer</div>
+      <div style="font-size:11px; opacity:0.8; margin-top:2px;">Or add a new one. You can't quote without a customer — this is the only required step before adding parts.</div>
+    </div>
+    <div style="background:var(--paper); border:2px solid var(--orange); border-radius:4px; padding:18px;">
+      <div style="display:flex; gap:10px; align-items:center; margin-bottom:12px;">
+        <input type="search" id="wizard-cust-search" placeholder="Type to filter customers (name or code)…"
+               value="${esc(search)}"
+               oninput="App.setWizardCustomerSearch(this.value)"
+               style="flex:1; font-size:14px; padding:6px 10px;">
+        <button class="btn btn-primary" onclick="App.openCustomerWizard()">+ New Customer</button>
+      </div>
+      ${customers.length === 0
+        ? `<div style="padding:24px; text-align:center; color:var(--text-mute);">
+             No customers on file yet. <strong style="color:var(--orange);">Click "+ New Customer" above</strong> to add one — or drop an Outlook RFQ email anywhere on this page and we'll auto-create the customer from the sender's info.
+           </div>`
+        : filtered.length === 0
+          ? `<div style="padding:18px; text-align:center; color:var(--text-mute);">No customers match "${esc(search)}". <a href="javascript:App.openCustomerWizard()" style="color:var(--orange); font-weight:600;">Add as new customer?</a></div>`
+          : `<div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(260px, 1fr)); gap:8px; max-height:340px; overflow-y:auto;">
+              ${filtered.map(c => `
+                <button onclick="App.pickCustomerForQuote('${q.id}','${c.id}')"
+                        style="text-align:left; padding:10px 12px; cursor:pointer; border:1px solid var(--line-dark); border-radius:4px; background:var(--paper); transition:all 0.1s;"
+                        onmouseover="this.style.borderColor='var(--orange)'; this.style.background='#FFF7ED';"
+                        onmouseout="this.style.borderColor='var(--line-dark)'; this.style.background='var(--paper)';">
+                  <div style="font-weight:700; color:var(--navy);">${esc(c.name || '(unnamed)')}</div>
+                  <div style="font-size:11px; color:var(--text-mute); margin-top:2px;">
+                    ${c.code ? `<span class="mono">${esc(c.code)}</span> · ` : ''}
+                    ${esc(c.contact || '—')} · ${esc(c.email || '—')}
+                  </div>
+                </button>
+              `).join('')}
+            </div>`
+      }
+    </div>
+    <div style="margin-top:12px; padding:10px 14px; background:#F0F9FF; border-left:3px solid var(--blue); border-radius:3px; font-size:12px;">
+      💡 <strong>Tip:</strong> Drop an Outlook <code>.msg</code> file or PDF RFQ anywhere on this page — Claude will identify the customer (or offer to create them) and pre-fill the quote.
+    </div>
+  `;
+}
+
 // --- Wizard view assembly --------------------------------------------------
 function renderQuoteWizardView(q) {
+  // v8.2: GATE — no customer means no quote. Customer step is the first
+  // card before any parts can be added.
+  if (!q.customerId) {
+    return renderWizardCustomerStep(q);
+  }
   const activeId = (state.ui.activePartIdForInfo || {})[q.id];
   const activePart = activeId ? (q.parts || []).find(p => p.id === activeId) : null;
   // If no part selected but parts exist, default to the first
@@ -14582,8 +14728,8 @@ function renderSetupsCard(q, p, machineOpts) {
                 ${bind({value:st.fixture||'', type:'text', placeholder:'e.g. Kurt 6" vise', onChange:v=>{ App.setSetupField(p.id, st.id, 'fixture', v); }})}
               </div>
               <div>
-                <div class="label">Setup hrs <span class="text-mute small">@ ${fmtMoney(setupRate)}/hr</span></div>
-                ${bind({value:st.setupHrs, type:'number', placeholder:'0', onChange:v=>{ App.setSetupField(p.id, st.id, 'setupHrs', v); }, attrs:'step="any" min="0"'})}
+                <div class="label">Setup hrs <span class="text-mute small">@ ${fmtMoney(setupRate)}/hr · 0.25 hr increments</span></div>
+                ${bind({value:st.setupHrs, type:'number', placeholder:'0', onChange:v=>{ App.setSetupField(p.id, st.id, 'setupHrs', v); }, attrs:'step="0.25" min="0"'})}
               </div>
               <div>
                 <div class="label">Setup $ <span class="text-mute small">(NRE)</span></div>
@@ -14606,7 +14752,7 @@ function renderSetupsCard(q, p, machineOpts) {
                     : (st.ops||[]).map((op, oi) => `
                         <tr>
                           <td>${bind({value:op.description||'', type:'text', placeholder:'e.g. Face mill top, drill 6×ø.250', onChange:v=>{ App.setSetupOpField(p.id, st.id, op.id, 'description', v); }})}</td>
-                          <td class="num">${bind({value:op.runTime, type:'number', onChange:v=>{ App.setSetupOpField(p.id, st.id, op.id, 'runTime', v); }, attrs:'step="any" min="0"'})}</td>
+                          <td class="num">${bind({value:op.runTime, type:'number', onChange:v=>{ App.setSetupOpField(p.id, st.id, op.id, 'runTime', v); }, attrs:'step="0.25" min="0"', placeholder:'0.25 step'})}</td>
                           <td>${bind({value:op.runUnit||'min', type:'select', options:RUN_UNITS, onChange:v=>{ App.setSetupOpField(p.id, st.id, op.id, 'runUnit', v||'min'); }})}</td>
                           <td class="num calc">${fmtMoney(setupOpRunCost(op, st))}</td>
                           <td class="action"><button class="btn btn-sm btn-danger" onclick="App.removeSetupOp('${p.id}','${st.id}','${op.id}')">×</button></td>
@@ -14711,15 +14857,15 @@ function renderWeldOpsCard(q, p, machineOpts) {
                     <div></div>
                     <div>
                       <div class="label">Prep min/pc</div>
-                      ${bind({value:op.prepMin, type:'number', onChange:v=>{ App.setWeldOpField(p.id, op.id, 'prepMin', v); }, attrs:'step="any" min="0"'})}
+                      ${bind({value:op.prepMin, type:'number', onChange:v=>{ App.setWeldOpField(p.id, op.id, 'prepMin', v); }, attrs:'step="0.25" min="0"'})}
                     </div>
                     <div>
                       <div class="label">Weld min/pc <span class="text-mute small">(per pass)</span></div>
-                      ${bind({value:op.weldMin, type:'number', onChange:v=>{ App.setWeldOpField(p.id, op.id, 'weldMin', v); }, attrs:'step="any" min="0"'})}
+                      ${bind({value:op.weldMin, type:'number', onChange:v=>{ App.setWeldOpField(p.id, op.id, 'weldMin', v); }, attrs:'step="0.25" min="0"'})}
                     </div>
                     <div>
                       <div class="label">Cleanup min/pc</div>
-                      ${bind({value:op.cleanupMin, type:'number', onChange:v=>{ App.setWeldOpField(p.id, op.id, 'cleanupMin', v); }, attrs:'step="any" min="0"'})}
+                      ${bind({value:op.cleanupMin, type:'number', onChange:v=>{ App.setWeldOpField(p.id, op.id, 'cleanupMin', v); }, attrs:'step="0.25" min="0"'})}
                     </div>
                     <div>
                       <div class="label">Total min/pc <span class="text-mute small">(prep + weld×passes + cleanup)</span></div>
@@ -18408,6 +18554,85 @@ const App = {
   // v8.0: wizard mode toggle + step navigation handlers
   setWizardMode(on) {
     update(s => { s.ui.wizardMode = !!on; });
+  },
+  // v8.2: wizard customer step
+  setWizardCustomerSearch(text) {
+    state.ui.wizardCustomerSearch = text;
+    clearTimeout(window._wizCustSearchT);
+    window._wizCustSearchT = setTimeout(() => render(), 180);
+  },
+  pickCustomerForQuote(quoteId, customerId) {
+    update(s => {
+      const q = s.quotes.find(qq => qq.id === quoteId);
+      if (q) q.customerId = customerId;
+      // Clear search after pick
+      s.ui.wizardCustomerSearch = '';
+    });
+    showToast('✓ Customer assigned. Add your first part.', 3500);
+  },
+  // v8.2: bar-calc toggle on the wizard material step
+  toggleBarCalc(partId, on) {
+    update(s => {
+      const q = s.quotes.find(qq => qq.id === s.ui.activeQuoteId);
+      if (!q) return;
+      const p = (q.parts || []).find(pp => pp.id === partId);
+      if (!p) return;
+      if (!p.stock) p.stock = {};
+      p.stock.useBarCalc = !!on;
+    });
+  },
+
+  // v8.2: drop a file onto a wizard step → attach to the active part with
+  // a stepId tag so we know which step it documents. Stored inline as a
+  // data URL so it persists with the part (survives sync). Hard size limit
+  // 3 MB per file — bigger stuff should go to the OneDrive job folder.
+  async wizardAttachFile(partId, stepId, file) {
+    if (!file) return;
+    if (file.size > 3 * 1024 * 1024) {
+      alert(`File too big to attach inline (${Math.round(file.size/1024/1024*10)/10} MB).\n\nFiles over 3 MB should go to the OneDrive job folder instead — drop them on the quote and they'll route there automatically.`);
+      return;
+    }
+    let dataUrl;
+    try {
+      dataUrl = await new Promise((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => resolve(r.result);
+        r.onerror = reject;
+        r.readAsDataURL(file);
+      });
+    } catch (e) {
+      alert('Could not read the file: ' + (e.message || e));
+      return;
+    }
+    update(s => {
+      const q = s.quotes.find(qq => qq.id === s.ui.activeQuoteId);
+      if (!q) return;
+      const p = (q.parts || []).find(pp => pp.id === partId);
+      if (!p) return;
+      if (!Array.isArray(p.attachments)) p.attachments = [];
+      p.attachments.push({
+        id: uid(),
+        name: file.name,
+        mimeType: file.type || 'application/octet-stream',
+        size: file.size,
+        data: dataUrl,
+        stepId: stepId || 'general',
+        addedAt: new Date().toISOString(),
+        addedBy: (SyncEngine.config && SyncEngine.config.userName) || 'Local',
+      });
+      logActivity('Attached file to part', p.partNum || '(unnamed)', `${file.name} → ${stepId}`);
+    });
+    showToast(`📎 Attached ${file.name} to ${stepId} step.`, 3000);
+  },
+  removeAttachment(partId, attId) {
+    if (!confirm('Remove this attachment?')) return;
+    update(s => {
+      const q = s.quotes.find(qq => qq.id === s.ui.activeQuoteId);
+      if (!q) return;
+      const p = (q.parts || []).find(pp => pp.id === partId);
+      if (!p || !Array.isArray(p.attachments)) return;
+      p.attachments = p.attachments.filter(a => a.id !== attId);
+    });
   },
   wizardGoToStep(partId, idx) {
     update(s => { s.ui.wizardStep[partId] = idx; });
@@ -23518,6 +23743,26 @@ setTimeout(() => {
       e.preventDefault();
       App.handleTrainingFile(file);
       return;
+    }
+    // v8.2: if wizard mode is active and there's an active part with a
+    // current step, route the drop there — attach to that step. Identity
+    // step still falls through to existing logic (Claude type detection
+    // lands here in Layer 3). Other steps absorb the drop as an
+    // attachment.
+    if (state.ui.wizardMode && state.ui.view === 'quote') {
+      const q = state.quotes.find(qq => qq.id === state.ui.activeQuoteId);
+      const activeId = q && state.ui.activePartIdForInfo && state.ui.activePartIdForInfo[q.id];
+      const part = activeId && (q.parts || []).find(p => p.id === activeId);
+      if (part) {
+        const stepIdx = (state.ui.wizardStep && state.ui.wizardStep[part.id]) || 0;
+        const steps = wizardStepsFor(part);
+        const curStep = steps[stepIdx];
+        if (curStep && curStep.id !== 'identity' && curStep.id !== 'review') {
+          e.preventDefault();
+          App.wizardAttachFile(part.id, curStep.id, file);
+          return;
+        }
+      }
     }
     // v7.70: if an Add Vendor / Add Customer wizard is open, route the drop
     // there. Don't filter by file type — Claude can read PDFs, images,
