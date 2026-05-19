@@ -769,7 +769,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '8.4.0';
+const APP_VERSION = '8.5.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -1506,6 +1506,37 @@ function update(fn) {
 // wizard is saved or cancelled so we never silently re-open stale drafts on
 // the next page load.
 const WIZARD_DRAFTS_KEY = 'aiq-wizard-drafts-v1';
+
+// v8.5: Per-machine column widths for the Excel-style customer matrix.
+// Stored locally (NOT synced) because monitor sizes vary per machine.
+const MATRIX_COLUMNS_KEY = 'aiq-matrix-columns-v1';
+const DEFAULT_CUSTOMER_MATRIX_COLUMNS = {
+  status:  32,
+  color:   72,
+  name:    200,
+  code:    80,
+  contact: 130,
+  email:   180,
+  phone:   110,
+  city:    100,
+  state:   50,
+  zip:     60,
+  salesRep:80,
+  terms:   90,
+  quotes:  50,
+  services:60,
+  materials:60,
+};
+function loadMatrixColumns() {
+  try {
+    const raw = localStorage.getItem(MATRIX_COLUMNS_KEY);
+    return raw ? Object.assign({}, DEFAULT_CUSTOMER_MATRIX_COLUMNS, JSON.parse(raw)) : Object.assign({}, DEFAULT_CUSTOMER_MATRIX_COLUMNS);
+  } catch (_) { return Object.assign({}, DEFAULT_CUSTOMER_MATRIX_COLUMNS); }
+}
+function saveMatrixColumns(cols) {
+  try { localStorage.setItem(MATRIX_COLUMNS_KEY, JSON.stringify(cols)); } catch (_) {}
+}
+let _customerMatrixColumns = loadMatrixColumns();
 function saveWizardDrafts() {
   try {
     const payload = {};
@@ -11306,6 +11337,157 @@ function renderCustomersCards(list) {
 }
 
 // ----- Settings -----
+// v8.5: Excel-style customer settings matrix. Replaces the simpler
+// renderCustomerStatusCard. All customer attributes inline-editable in one
+// table — name / code / contact / email / phone / city / state / zip /
+// sales rep / payment terms / color / status — plus read-only counts for
+// quotes, services, materials.
+//
+// Column widths are resizable via the drag handles on each header (right
+// edge). Widths persist per-machine in localStorage (not synced — each
+// monitor has different real estate).
+//
+// Click a column header to sort by that field. Shift-click to reverse.
+function renderCustomerSettingsMatrix() {
+  const sm = state.ui.customerStatusManager || { search: '' };
+  const q = (sm.search || '').toLowerCase().trim();
+  const sortKey = sm.sortKey || 'name';
+  const sortDir = sm.sortDir || 'asc';
+  const cw = _customerMatrixColumns;
+
+  const all = state.customers.slice();
+  // Sort
+  all.sort((a, b) => {
+    let va, vb;
+    if (sortKey === 'active') { va = isActiveCustomer(a) ? 0 : 1; vb = isActiveCustomer(b) ? 0 : 1; }
+    else if (sortKey === 'quotes') {
+      va = state.quotes.filter(qu => qu.customerId === a.id).length;
+      vb = state.quotes.filter(qu => qu.customerId === b.id).length;
+    } else if (sortKey === 'services')  { va = (a.services||[]).length; vb = (b.services||[]).length; }
+    else if (sortKey === 'materials') { va = (a.materialIds||[]).length; vb = (b.materialIds||[]).length; }
+    else { va = (a[sortKey] || '').toString().toLowerCase(); vb = (b[sortKey] || '').toString().toLowerCase(); }
+    if (va < vb) return sortDir === 'asc' ? -1 : 1;
+    if (va > vb) return sortDir === 'asc' ?  1 : -1;
+    return 0;
+  });
+  const filtered = !q ? all : all.filter(c =>
+    (c.name||'').toLowerCase().includes(q) ||
+    (c.code||'').toLowerCase().includes(q) ||
+    (c.contact||'').toLowerCase().includes(q) ||
+    (c.email||'').toLowerCase().includes(q) ||
+    (c.billCity||'').toLowerCase().includes(q) ||
+    (c.salesRep||'').toLowerCase().includes(q)
+  );
+  const activeCount = state.customers.filter(isActiveCustomer).length;
+  const inactiveCount = state.customers.length - activeCount;
+  const visibleIds = filtered.map(c => c.id);
+
+  // Column header helper — adds resize handle + sort indicator
+  const colHeader = (key, label, align) => {
+    const isSorted = sortKey === key;
+    const arrow = isSorted ? (sortDir === 'asc' ? '▲' : '▼') : '';
+    const width = cw[key] || DEFAULT_CUSTOMER_MATRIX_COLUMNS[key] || 100;
+    return `<th style="width:${width}px; min-width:${width}px; max-width:${width}px; position:relative; ${align ? 'text-align:'+align+';' : ''} user-select:none;">
+      <span onclick="App.matrixSortBy('${esc(key)}')" style="cursor:pointer; display:inline-block; padding-right:14px;" title="Click to sort">${esc(label)} ${arrow}</span>
+      <span class="matrix-col-resize" data-col="${esc(key)}" data-cw="${width}"
+            style="position:absolute; top:0; right:0; width:5px; height:100%; cursor:col-resize; background:transparent;"
+            onmouseover="this.style.background='var(--orange)';" onmouseout="this.style.background='transparent';"
+            onmousedown="App.startMatrixColumnResize(event, '${esc(key)}', ${width})"></span>
+    </th>`;
+  };
+
+  return `
+    <div class="card">
+      <div class="card-header">
+        <span>Customer Settings · Excel-style matrix</span>
+        <div class="header-actions">
+          <span class="text-mute small" style="font-weight:normal; margin-right:10px;">${state.customers.length} on file · ${activeCount} active · ${inactiveCount} inactive</span>
+          <button class="btn btn-sm" onclick="App.resetMatrixColumns()" title="Reset column widths to defaults">⤺ Reset columns</button>
+          <button class="btn btn-sm btn-primary" onclick="App.newCustomer()">+ Add Customer</button>
+        </div>
+      </div>
+      <div class="card-body" style="padding:10px 14px;">
+        <p class="text-mute small" style="margin:0 0 10px;">
+          One row per customer — every field editable inline. Drag the right edge of any column header to resize. Click a header to sort. Color column uses the 128-swatch picker (right-click a swatch to ★ favorite).
+        </p>
+        <div class="row" style="gap:8px; align-items:end; margin-bottom:10px;">
+          <div class="field grow">
+            <input type="search" placeholder="Search by name, code, contact, email, city, or sales rep…"
+              value="${esc(sm.search)}" oninput="App.setCustomerStatusSearch(this.value)" style="max-width:520px;">
+          </div>
+          <button class="btn btn-sm" onclick="App.bulkSetCustomerStatus(${JSON.stringify(visibleIds).replace(/"/g,'&quot;')}, 'Active')" ${filtered.length === 0 ? 'disabled' : ''}>✓ Mark visible Active</button>
+          <button class="btn btn-sm" onclick="App.bulkSetCustomerStatus(${JSON.stringify(visibleIds).replace(/"/g,'&quot;')}, 'Inactive')" ${filtered.length === 0 ? 'disabled' : ''}>− Mark visible Inactive</button>
+        </div>
+        ${state.customers.length === 0 ? `
+          <div class="text-mute small" style="text-align:center; padding:20px;">No customers on file. Import or add customers first.</div>
+        ` : filtered.length === 0 ? `
+          <div class="text-mute small" style="text-align:center; padding:20px;">No matches for "${esc(q)}".</div>
+        ` : `
+          <div style="overflow-x:auto; overflow-y:auto; max-height:70vh; border:1px solid var(--line); border-radius:4px;">
+            <table class="tbl" style="margin:0; font-size:12px; border-collapse:separate; border-spacing:0; table-layout:fixed;">
+              <thead style="position:sticky; top:0; background:var(--bg); z-index:2; box-shadow:0 1px 0 var(--line-dark);">
+                <tr>
+                  ${colHeader('active',   '✓',         'center')}
+                  ${colHeader('color',    'Color')}
+                  ${colHeader('name',     'Name')}
+                  ${colHeader('code',     'Code')}
+                  ${colHeader('contact',  'Contact')}
+                  ${colHeader('email',    'Email')}
+                  ${colHeader('phone',    'Phone')}
+                  ${colHeader('billCity', 'City')}
+                  ${colHeader('billState','ST')}
+                  ${colHeader('billZip',  'ZIP')}
+                  ${colHeader('salesRep', 'Rep')}
+                  ${colHeader('paymentTerms', 'Terms')}
+                  ${colHeader('quotes',   'Q',        'right')}
+                  ${colHeader('services', 'Svc',      'right')}
+                  ${colHeader('materials','Mat',      'right')}
+                </tr>
+              </thead>
+              <tbody>
+                ${filtered.map(c => {
+                  const active = isActiveCustomer(c);
+                  const qCount = state.quotes.filter(qu => qu.customerId === c.id).length;
+                  const sCount = (c.services || []).length;
+                  const mCount = (c.materialIds || []).length;
+                  const stripe = c.color || '';
+                  const inputStyle = 'width:100%; padding:3px 5px; border:1px solid transparent; background:transparent; font-size:12px;';
+                  const inputFocus = 'this.style.background=\'var(--paper)\'; this.style.borderColor=\'var(--orange)\';';
+                  const inputBlur  = 'this.style.background=\'transparent\'; this.style.borderColor=\'transparent\';';
+                  return `
+                    <tr style="${active ? '' : 'opacity:0.55;'} ${stripe ? `border-left:4px solid ${esc(stripe)};` : ''}">
+                      <td style="text-align:center;">
+                        <input type="checkbox" ${active ? 'checked' : ''}
+                          onchange="App.toggleCustomerStatus('${c.id}')"
+                          title="${active ? 'Active — click to mark inactive' : 'Inactive — click to mark active'}">
+                      </td>
+                      <td>${renderColorSwatchButton(c.color, 'setCustomerColor', c.id)}</td>
+                      <td><input type="text" value="${esc(c.name||'')}" onchange="App.setCustomerField('${c.id}','name', this.value)" style="${inputStyle} font-weight:600;" onfocus="${inputFocus}" onblur="${inputBlur}"></td>
+                      <td><input type="text" value="${esc(c.code||'')}" onchange="App.setCustomerField('${c.id}','code', this.value)" style="${inputStyle} font-family:var(--font-mono);" onfocus="${inputFocus}" onblur="${inputBlur}"></td>
+                      <td><input type="text" value="${esc(c.contact||'')}" onchange="App.setCustomerField('${c.id}','contact', this.value)" style="${inputStyle}" onfocus="${inputFocus}" onblur="${inputBlur}"></td>
+                      <td><input type="email" value="${esc(c.email||'')}" onchange="App.setCustomerField('${c.id}','email', this.value)" style="${inputStyle}" onfocus="${inputFocus}" onblur="${inputBlur}"></td>
+                      <td><input type="tel" value="${esc(c.phone||'')}" onchange="App.setCustomerField('${c.id}','phone', this.value)" style="${inputStyle}" onfocus="${inputFocus}" onblur="${inputBlur}"></td>
+                      <td><input type="text" value="${esc(c.billCity||'')}" onchange="App.setCustomerField('${c.id}','billCity', this.value)" style="${inputStyle}" onfocus="${inputFocus}" onblur="${inputBlur}"></td>
+                      <td><input type="text" value="${esc(c.billState||'')}" onchange="App.setCustomerField('${c.id}','billState', this.value)" maxlength="2" style="${inputStyle} text-transform:uppercase;" onfocus="${inputFocus}" onblur="${inputBlur}"></td>
+                      <td><input type="text" value="${esc(c.billZip||'')}" onchange="App.setCustomerField('${c.id}','billZip', this.value)" style="${inputStyle} font-family:var(--font-mono);" onfocus="${inputFocus}" onblur="${inputBlur}"></td>
+                      <td><input type="text" value="${esc(c.salesRep||'')}" onchange="App.setCustomerField('${c.id}','salesRep', this.value)" style="${inputStyle}" onfocus="${inputFocus}" onblur="${inputBlur}"></td>
+                      <td><input type="text" value="${esc(c.paymentTerms||'')}" onchange="App.setCustomerField('${c.id}','paymentTerms', this.value)" style="${inputStyle}" onfocus="${inputFocus}" onblur="${inputBlur}"></td>
+                      <td class="num" style="font-family:var(--font-mono); color:var(--text-mute);">${qCount}</td>
+                      <td class="num" style="font-family:var(--font-mono); color:var(--text-mute);" title="${esc((c.services||[]).map(s => { const def = (typeof ALL_SERVICES !== 'undefined') ? ALL_SERVICES.find(x => x.value === s) : null; return def ? def.label : s; }).join(', '))}">${sCount}</td>
+                      <td class="num" style="font-family:var(--font-mono); color:var(--text-mute);" title="${esc((c.materialIds||[]).map(id => { const m = (state.settings.materials||[]).find(mm => mm.id === id); return m ? m.name : id; }).join(', '))}">${mCount}</td>
+                    </tr>
+                  `;
+                }).join('')}
+              </tbody>
+            </table>
+          </div>
+          <div class="hint" style="margin-top:6px;">Tip: click into any cell to edit. Changes save on blur. The Svc + Mat columns show counts — full editing of services/materials still lives on each customer's detail card (click their name elsewhere on the Customers page).</div>
+        `}
+      </div>
+    </div>
+  `;
+}
+
 function renderCustomerStatusCard() {
   const sm = state.ui.customerStatusManager || { search: '' };
   const q = (sm.search || '').toLowerCase().trim();
@@ -11504,7 +11686,9 @@ function renderSettings() {
       </div>
     </div>
 
-    ${renderCustomerStatusCard()}
+    <!-- v8.5: replaced the simple status-toggle card with a full Excel-style
+         editable matrix. All customer fields inline-editable in one table. -->
+    ${renderCustomerSettingsMatrix()}
 
     <div class="card">
       <div class="card-header">
@@ -12388,16 +12572,20 @@ function renderQuoteCustomerBanner(q) {
   const c = getCustomer(q.customerId);
   const total = quoteTotalAt(q, 0);
   const nParts = (q.parts || []).length;
-  // v8.3: if the customer has a custom color, use it as a left-edge stripe
-  // so the banner is instantly identifiable across quotes for that
-  // customer (or grouped sibling locations of one parent org).
+  // v8.5: if the customer has a custom color, USE IT as the banner
+  // background gradient (color → darker mix) instead of the default navy.
+  // Sibling locations of one parent org share a color → their quotes
+  // share a visual identity. Falls back to navy only when no customer
+  // color is set.
   const stripe = (c && c.color) ? c.color : '';
+  const bannerBg = stripe
+    ? `linear-gradient(135deg, ${esc(stripe)} 0%, ${esc(stripe)}cc 100%)`
+    : 'linear-gradient(135deg, var(--navy) 0%, #3F4250 100%)';
   return `
-    <div style="background:linear-gradient(135deg, var(--navy) 0%, #2A3B52 100%); color:white; padding:10px 16px; border-radius:4px; margin-bottom:10px; ${stripe ? `border-left:6px solid ${esc(stripe)};` : ''}">
+    <div style="background:${bannerBg}; color:white; padding:10px 16px; border-radius:4px; margin-bottom:10px;">
       <div style="display:flex; align-items:center; gap:14px; flex-wrap:wrap;">
         <div style="flex:1; min-width:200px;">
-          <div style="font-size:18px; font-weight:700; line-height:1.1;">
-            ${stripe ? `<span style="display:inline-block; width:10px; height:10px; border-radius:50%; background:${esc(stripe)}; margin-right:8px; vertical-align:middle;"></span>` : ''}
+          <div style="font-size:18px; font-weight:700; line-height:1.1; text-shadow:0 1px 2px rgba(0,0,0,0.25);">
             ${esc(c?.name || 'No customer')}
             <span style="font-size:11px; opacity:0.7; margin-left:8px; font-weight:400;">${esc(q.quoteNum || '(new)')}</span>
           </div>
@@ -12765,7 +12953,7 @@ function renderWizardCustomerStep(q) {
     : customers.filter(c => (c.name || '').toLowerCase().includes(search.toLowerCase()) ||
                             (c.code || '').toLowerCase().includes(search.toLowerCase()));
   return `
-    <div style="background:linear-gradient(135deg, var(--navy) 0%, #2A3B52 100%); color:white; padding:10px 16px; border-radius:4px; margin-bottom:14px;">
+    <div style="background:linear-gradient(135deg, var(--navy) 0%, #3F4250 100%); color:white; padding:10px 16px; border-radius:4px; margin-bottom:14px;">
       <div style="font-size:18px; font-weight:700;">New quote · pick the customer</div>
       <div style="font-size:11px; opacity:0.8; margin-top:2px;">Or add a new one. You can't quote without a customer — this is the only required step before adding parts.</div>
     </div>
@@ -18768,6 +18956,60 @@ const App = {
       const c = (s.customers || []).find(cc => cc.id === customerId);
       if (c) c.color = color || '';
     });
+  },
+  // v8.5: generic customer-field setter — used by inline cells in the
+  // Excel-style matrix. Trims string input, handles state-of-arrays cases
+  // by skipping (services/materials still edited via chip strips elsewhere).
+  setCustomerField(customerId, field, value) {
+    update(s => {
+      const c = (s.customers || []).find(cc => cc.id === customerId);
+      if (!c) return;
+      if (typeof value === 'string') value = value.trim();
+      c[field] = value;
+    });
+  },
+  // v8.5: matrix column resize. Captures the mouse, listens for move/up,
+  // updates the column width state + DOM live. Persists on mouseup.
+  startMatrixColumnResize(ev, colKey, startWidth) {
+    ev.preventDefault();
+    const startX = ev.clientX;
+    const onMove = (e) => {
+      const dx = e.clientX - startX;
+      const newW = Math.max(28, Math.min(500, startWidth + dx));
+      _customerMatrixColumns[colKey] = newW;
+      // Live-update the column header + all cells in that column via re-render.
+      // Re-render is cheap because the matrix is the only thing changing.
+      // We don't go through update() — column widths are display-only, not
+      // synced state. Just re-paint.
+      const main = document.getElementById('app-main');
+      if (state.ui.view === 'settings' && main) {
+        // Quick partial re-render: only the matrix card section
+        try { main.innerHTML = renderSettings(); attachBindings(); } catch (_) {}
+      }
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      saveMatrixColumns(_customerMatrixColumns);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  },
+  resetMatrixColumns() {
+    _customerMatrixColumns = Object.assign({}, DEFAULT_CUSTOMER_MATRIX_COLUMNS);
+    saveMatrixColumns(_customerMatrixColumns);
+    render();
+  },
+  matrixSortBy(key) {
+    if (!state.ui.customerStatusManager) state.ui.customerStatusManager = { search: '' };
+    const sm = state.ui.customerStatusManager;
+    if (sm.sortKey === key) {
+      sm.sortDir = sm.sortDir === 'asc' ? 'desc' : 'asc';
+    } else {
+      sm.sortKey = key;
+      sm.sortDir = 'asc';
+    }
+    render();
   },
 
   // v8.0: wizard mode toggle + step navigation handlers
