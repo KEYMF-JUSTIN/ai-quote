@@ -760,7 +760,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '7.74.0';
+const APP_VERSION = '8.0.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -992,6 +992,8 @@ const state = {
     customerWizard: null,       // v7.68: { open, step, draft } for "+ Add Customer" guided flow
     entityChipPicker: null,     // v7.72: { kind:'service'|'material', entityType:'vendor'|'customer', entityId, search } — inline picker shown under a chip strip when user clicks "+ Add"
     iconPicker: null,           // v7.74: { typeIdx } when the Part Type icon picker modal is open. Caller writes the picked emoji to settings.partTypes[idx].icon.
+    wizardMode: false,          // v8.0: toggle for the new wizard-style quote page. When false, falls back to classic all-cards view. Set per session — not persisted.
+    wizardStep: {},             // v8.0: keyed partId → step index. Tracks where in the wizard each part is, so switching chips remembers your spot.
     trainingPicker: null,       // v7.62: { entityType, entityId, sampleId?, file?, parsed?, docType, notes, error, loading } for the training sample editor
     activePurchaseId: null,     // v7.50: currently-open purchase in the Purchasing workspace
     purchaseFilters: { search:'', hiddenStatuses:[], vendor:'all' },
@@ -1768,6 +1770,14 @@ const SyncEngine = {
       });
       saveStateLocal();   // persist to localStorage but don't push
       this.applyingRemote = false;
+      // v8: CRITICAL — call render() after applying remote state. Without this
+      // the DOM still shows the OLD local quotes from before sync arrived, so
+      // clicking a list-card calls openQuote(id) with an id that may not
+      // exist in the new state.quotes. The view switches but renderQuote()
+      // returns "No quote selected." Bug symptom: "click quote, nothing
+      // happens, hard refresh fixes it." Hard refresh worked because boot
+      // loads fresh local state which IS in sync with localStorage.
+      try { render(); } catch (e) { console.warn('post-sync render failed:', e); }
     } else {
       // Remote is empty — push our local state to seed it
       this.connected = true;
@@ -12252,9 +12262,347 @@ function renderPdfDock(quote) {
   `;
 }
 
+// =================================================================
+// v8.0: WIZARD MODE — per-part step-by-step editor
+// =================================================================
+// The "card by card" UX. Each part type gets a step set; click a chip in the
+// parts row → that part's wizard takes over the page; click another chip →
+// switch to its wizard (preserving its step position via state.ui.wizardStep).
+//
+// Layer 1 (this commit): Identity → Material → Review (3 steps, universal).
+// Layer 2 (next): per-type step sets — Setups for machined, DXF for cut
+//   blanks, Sub-parts for weldments, etc.
+// Step renderers are simple thunks (q, part) => htmlString. Adding a new
+// step = add to WIZARD_STEPS and write a render function.
+// =================================================================
+const WIZARD_STEPS_DEFAULT = [
+  { id: 'identity', label: 'Identity', icon: '📝', desc: 'Part number, description, drawing.' },
+  { id: 'material', label: 'Material', icon: '🪶', desc: 'Stock material + dimensions.' },
+  { id: 'review',   label: 'Review',   icon: '✓',  desc: 'Pricing summary + sanity check.' },
+];
+function wizardStepsFor(part) {
+  // Future-proofing: in Layer 2 we'll vary by part.typeId.
+  // For now, every type uses the universal 3-step set so the
+  // pattern is provably correct before we expand it.
+  return WIZARD_STEPS_DEFAULT;
+}
+function currentWizardStepIdx(part) {
+  if (!part) return 0;
+  const steps = wizardStepsFor(part);
+  const stored = state.ui.wizardStep[part.id];
+  if (typeof stored !== 'number') return 0;
+  return Math.max(0, Math.min(steps.length - 1, stored));
+}
+
+// --- Compact customer banner (replaces giant customer card from v7.x) -----
+function renderQuoteCustomerBanner(q) {
+  const c = getCustomer(q.customerId);
+  const total = quoteTotalAt(q, 0);
+  const nParts = (q.parts || []).length;
+  return `
+    <div style="background:linear-gradient(135deg, var(--navy) 0%, #2A3B52 100%); color:white; padding:10px 16px; border-radius:4px; margin-bottom:10px;">
+      <div style="display:flex; align-items:center; gap:14px; flex-wrap:wrap;">
+        <div style="flex:1; min-width:200px;">
+          <div style="font-size:18px; font-weight:700; line-height:1.1;">
+            ${esc(c?.name || 'No customer')}
+            <span style="font-size:11px; opacity:0.7; margin-left:8px; font-weight:400;">${esc(q.quoteNum || '(new)')}</span>
+          </div>
+          <div style="font-size:11px; opacity:0.8; margin-top:2px;">
+            ${esc(c?.contact || '—')} · ${esc(c?.email || '—')} · ${esc(c?.phone || '—')}
+            ${c?.salesRep ? ` · Rep: <strong style="opacity:1;">${esc(c.salesRep)}</strong>` : ''}
+            ${c?.paymentTerms ? ` · ${esc(c.paymentTerms)}` : ''}
+          </div>
+        </div>
+        <div style="font-size:11px; opacity:0.8; line-height:1.4;">
+          <div>${esc(q.date)} · <span class="pill ${esc(q.status)}" style="background:rgba(255,255,255,0.15); color:white; border:none;">${esc(q.status)}</span></div>
+          <div>${nParts} part${nParts===1?'':'s'} · ${fmtMoney(total)}</div>
+        </div>
+        <button class="btn" style="background:rgba(255,255,255,0.1); color:white; border:1px solid rgba(255,255,255,0.3);" onclick="App.setWizardMode(false)" title="Switch to classic all-cards view">⊞ Classic view</button>
+      </div>
+    </div>
+  `;
+}
+
+// --- Parts chip row (one chip per part, click to activate) ----------------
+function renderQuoteWizardChipRow(q) {
+  const partTypes = state.settings.partTypes || [];
+  const typeOf = id => partTypes.find(t => t.id === id) || { icon: '⚙', color: '#64748B', label: 'Part' };
+  const activeId = (state.ui.activePartIdForInfo || {})[q.id];
+  const chips = (q.parts || []).map((p, i) => {
+    const t = typeOf(p.typeId || 'machined');
+    const isActive = activeId === p.id;
+    return `
+      <button onclick="App.selectPartChip('${q.id}','${p.id}')"
+              style="display:inline-flex; align-items:center; gap:6px; padding:6px 12px; border-radius:4px; cursor:pointer; border:2px solid ${isActive ? t.color : 'var(--line-dark)'}; background:${isActive ? t.color : 'var(--paper)'}; color:${isActive ? 'white' : 'var(--text)'}; font-size:12px; font-weight:600; transition:all 0.1s;">
+        <span style="font-size:16px;">${t.icon}</span>
+        <span>${esc(p.partNum || ('Part ' + (i+1)))}</span>
+        ${p.isDraft ? '<span style="font-size:10px; padding:1px 5px; background:#FEF3C7; color:#B45309; border-radius:2px;">draft</span>' : ''}
+      </button>
+    `;
+  }).join('');
+  return `
+    <div style="background:var(--paper); border:1px solid var(--line); border-radius:4px; padding:10px; margin-bottom:10px;">
+      <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+        <span style="font-size:11px; color:var(--text-mute); text-transform:uppercase; letter-spacing:0.06em; font-weight:600; margin-right:6px;">Parts</span>
+        ${chips || '<span class="text-mute small">No parts yet</span>'}
+        <button class="btn btn-primary btn-sm" style="margin-left:auto;" onclick="App.promptAddPart()">+ Add Part</button>
+      </div>
+    </div>
+  `;
+}
+
+// --- Wizard panel for the active part -------------------------------------
+function renderPartWizard(q, part) {
+  const steps = wizardStepsFor(part);
+  const curIdx = currentWizardStepIdx(part);
+  const cur = steps[curIdx];
+  const partTypes = state.settings.partTypes || [];
+  const type = partTypes.find(t => t.id === part.typeId) || { icon: '⚙', color: '#64748B', label: 'Part' };
+
+  // Step dots
+  const dots = steps.map((s, i) => {
+    const isActive = i === curIdx;
+    const isDone = i < curIdx;
+    return `
+      <button onclick="App.wizardGoToStep('${part.id}', ${i})"
+              title="${esc(s.label)} — ${esc(s.desc)}"
+              style="display:flex; align-items:center; gap:4px; padding:4px 10px; border-radius:14px; cursor:pointer; border:1px solid ${isActive ? type.color : isDone ? 'var(--green)' : 'var(--line-dark)'}; background:${isActive ? type.color : isDone ? '#ECFDF3' : 'var(--paper)'}; color:${isActive ? 'white' : isDone ? 'var(--green)' : 'var(--text-mute)'}; font-size:11px; font-weight:600; transition:all 0.1s;">
+        <span>${i+1}</span>
+        <span>${esc(s.icon)} ${esc(s.label)}</span>
+      </button>
+    `;
+  }).join('');
+
+  // Body — dispatch to the right step renderer
+  let body = '';
+  if (cur.id === 'identity')       body = renderWizardStepIdentity(q, part);
+  else if (cur.id === 'material')  body = renderWizardStepMaterial(q, part);
+  else if (cur.id === 'review')    body = renderWizardStepReview(q, part);
+  else body = `<p class="text-mute">Step "${esc(cur.label)}" — coming in Layer 2.</p>`;
+
+  return `
+    <div style="background:var(--paper); border:2px solid ${type.color}; border-radius:4px;">
+      <div style="background:${type.color}; color:white; padding:8px 14px; display:flex; align-items:center; justify-content:space-between;">
+        <div style="font-weight:600; font-size:13px;">
+          <span style="font-size:18px; margin-right:6px;">${type.icon}</span>
+          <strong>${esc(part.partNum || 'New part')}</strong>
+          <span style="opacity:0.8; margin-left:6px; font-weight:400;">· ${esc(type.label)} · step ${curIdx+1} of ${steps.length}: ${esc(cur.label)}</span>
+        </div>
+        <div style="display:flex; gap:6px;">
+          ${part.isDraft ? '<span style="padding:2px 8px; background:rgba(255,255,255,0.2); border-radius:3px; font-size:11px;">draft</span>' : ''}
+          <button class="btn btn-sm" style="background:rgba(255,255,255,0.15); color:white; border:1px solid rgba(255,255,255,0.3);" onclick="App.savePartAsDraft('${part.id}')" title="Mark this part as a draft (still working on it). Stays on current step.">💾 Save draft</button>
+          <button class="btn btn-sm btn-danger" onclick="App.deletePart('${q.id}','${part.id}')" title="Delete this part">×</button>
+        </div>
+      </div>
+      <div style="padding:6px 14px; background:#FAFAFA; border-bottom:1px solid var(--line);">
+        <div style="display:flex; gap:4px; flex-wrap:wrap;">${dots}</div>
+      </div>
+      <div style="padding:14px;">
+        ${body}
+      </div>
+      <div style="padding:10px 14px; background:#FAFAFA; border-top:1px solid var(--line); display:flex; justify-content:space-between; gap:6px;">
+        <button class="btn btn-sm" ${curIdx===0?'disabled style="opacity:0.4;"':''} onclick="App.wizardPrev('${part.id}')">← Back</button>
+        <span class="text-mute small" style="align-self:center;">${esc(cur.desc)}</span>
+        ${curIdx === steps.length - 1
+          ? `<button class="btn btn-sm btn-primary" onclick="App.savePartAsDraft('${part.id}'); App.selectPartChip('${q.id}', null);">Done ✓</button>`
+          : `<button class="btn btn-sm btn-primary" onclick="App.wizardNext('${part.id}')">Next: ${esc(steps[curIdx+1].label)} →</button>`}
+      </div>
+    </div>
+  `;
+}
+
+// --- Step renderers (Layer 1: identity, material, review) -----------------
+function renderWizardStepIdentity(q, part) {
+  const partTypes = state.settings.partTypes || [];
+  return `
+    <div style="display:grid; grid-template-columns:1fr 2fr; gap:14px;">
+      <div class="field"><label>Part number</label>
+        ${bind({label:'Part number', value:part.partNum, onChange:v=>{ part.partNum = v; }})}
+      </div>
+      <div class="field"><label>Description</label>
+        ${bind({label:'Description', value:part.description, onChange:v=>{ part.description = v; }, placeholder:'What is this part for?'})}
+      </div>
+      <div class="field" style="grid-column:span 2;"><label>Part type</label>
+        <div style="display:flex; gap:6px; flex-wrap:wrap;">
+          ${partTypes.map(t => {
+            const on = part.typeId === t.id;
+            return `<button onclick="App.setPartType('${part.id}','${t.id}')"
+                            style="padding:6px 12px; border-radius:4px; cursor:pointer; border:2px solid ${on?t.color:'var(--line-dark)'}; background:${on?t.color+'22':'var(--paper)'}; color:${on?t.color:'var(--text)'}; font-weight:600; font-size:12px; display:flex; align-items:center; gap:4px;">
+              <span style="font-size:14px;">${t.icon}</span>${esc(t.label)}
+            </button>`;
+          }).join('')}
+        </div>
+      </div>
+      <div class="field" style="grid-column:span 2;"><label>Drawing / DXF (drop here or click)</label>
+        <div style="border:2px dashed var(--line-dark); padding:18px; text-align:center; font-size:12px; color:var(--text-mute); border-radius:3px;">
+          📎 Drop PDF / DWG / DXF here · or click to browse
+          <div style="margin-top:4px; font-size:10px;">(Auto-detect coming in Layer 3 — Claude reads the drawing + confidence score)</div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+function renderWizardStepMaterial(q, part) {
+  const materials = state.settings.materials || [];
+  const grouped = groupedMaterialOptions(materials);
+  return `
+    <div style="display:grid; grid-template-columns:2fr 1fr 1fr 1fr; gap:14px;">
+      <div class="field" style="grid-column:span 2;"><label>Material</label>
+        ${bind({label:'Material', value:part.material, type:'select', options: grouped, onChange:v=>{ part.material = v; }})}
+      </div>
+      <div class="field"><label>Form</label>
+        ${bind({label:'Stock form', value:part.stock?.form, type:'select', options:['Bar/Block','Sheet','Round'], onChange:v=>{ if(!part.stock) part.stock = {}; part.stock.form = v; }})}
+      </div>
+      <div class="field"><label>Thickness (in)</label>
+        ${bind({label:'Thickness', value:part.stock?.thickness, type:'number', onChange:v=>{ if(!part.stock) part.stock = {}; part.stock.thickness = v; }, attrs:'step="0.125"'})}
+      </div>
+      <div class="field"><label>Length</label>
+        ${bind({label:'Length', value:part.stock?.length, type:'number', onChange:v=>{ if(!part.stock) part.stock = {}; part.stock.length = v; }, attrs:'step="0.25"'})}
+      </div>
+      <div class="field"><label>Width</label>
+        ${bind({label:'Width', value:part.stock?.width, type:'number', onChange:v=>{ if(!part.stock) part.stock = {}; part.stock.width = v; }, attrs:'step="0.25"'})}
+      </div>
+      <div class="field" style="grid-column:span 2;"><label>Notes</label>
+        ${bind({label:'Material notes', value:part.materialNotes, onChange:v=>{ part.materialNotes = v; }, placeholder:'Customer-supplied? Cert required?'})}
+      </div>
+    </div>
+    <div style="margin-top:14px; padding:10px 12px; background:#FFF7ED; border-left:3px solid var(--orange); border-radius:3px; font-size:12px;">
+      💡 <strong>Layer 2</strong> will add per-type fields here — sheet size for cut blanks, sub-part list for weldments, source picker for purchased items. Today this is the universal subset.
+    </div>
+  `;
+}
+function renderWizardStepReview(q, part) {
+  const tiers = part.qtyTiers || [1];
+  const lines = tiers.map((qty, i) => {
+    const unit = unitPriceAt(part, i);
+    return `<tr><td class="num">${qty}</td><td class="num">${fmtMoney(unit)}</td><td class="num">${fmtMoney(unit * qty)}</td></tr>`;
+  }).join('');
+  return `
+    <div>
+      <h3 style="font-size:13px; color:var(--steel); margin:0 0 8px;">Pricing summary</h3>
+      <table class="tbl tight" style="max-width:480px;">
+        <thead><tr><th class="num">Qty</th><th class="num">Unit price</th><th class="num">Extended</th></tr></thead>
+        <tbody>${lines}</tbody>
+      </table>
+      <div style="margin-top:16px; padding:12px; background:#ECFDF3; border-left:3px solid var(--green); font-size:13px;">
+        ✓ Part identity captured · material assigned · ready to quote.
+      </div>
+      <div style="margin-top:10px; font-size:11px; color:var(--text-mute);">
+        Full machine setups / DXF / finishing / tooling cards still live in <a href="javascript:App.setWizardMode(false)">classic view</a> until Layer 2 lands.
+      </div>
+    </div>
+  `;
+}
+
+// --- Persistent pricing sidebar -------------------------------------------
+function renderPricingSidebar(q) {
+  const parts = q.parts || [];
+  const tiers = parts[0]?.qtyTiers || [1];
+  const tierTotals = tiers.map((qty, i) => quoteTotalAt(q, i));
+  const partLines = parts.map((p, i) => {
+    const total = unitPriceAt(p, 0) * (tiers[0] || 1);
+    return `<tr style="font-size:11px;"><td style="padding:2px 6px;">${esc(p.partNum || `Part ${i+1}`)}</td><td class="num" style="padding:2px 6px;">${fmtMoney(total)}</td></tr>`;
+  }).join('');
+  return `
+    <div style="position:sticky; top:10px; background:var(--paper); border:1px solid var(--line-dark); border-radius:4px;">
+      <div style="padding:8px 12px; background:var(--bg); border-bottom:1px solid var(--line); font-weight:700; font-size:12px; color:var(--navy);">
+        💰 Pricing · live
+      </div>
+      <div style="padding:10px 12px;">
+        <div style="font-size:10px; color:var(--text-mute); text-transform:uppercase; letter-spacing:0.06em; font-weight:700; margin-bottom:4px;">Per-tier total</div>
+        ${tiers.map((qty, i) => `
+          <div style="display:flex; justify-content:space-between; font-size:13px; padding:2px 0;">
+            <span class="mono small">Qty ${qty}</span>
+            <strong>${fmtMoney(tierTotals[i] || 0)}</strong>
+          </div>
+        `).join('')}
+        ${parts.length > 0 ? `
+          <hr style="margin:8px 0;">
+          <div style="font-size:10px; color:var(--text-mute); text-transform:uppercase; letter-spacing:0.06em; font-weight:700; margin-bottom:4px;">By part (qty ${tiers[0]})</div>
+          <table style="width:100%; border-collapse:collapse;">${partLines}</table>
+        ` : ''}
+      </div>
+    </div>
+  `;
+}
+
+// --- Wizard view assembly --------------------------------------------------
+function renderQuoteWizardView(q) {
+  const activeId = (state.ui.activePartIdForInfo || {})[q.id];
+  const activePart = activeId ? (q.parts || []).find(p => p.id === activeId) : null;
+  // If no part selected but parts exist, default to the first
+  if (!activePart && (q.parts || []).length > 0) {
+    return `
+      <div>
+        ${renderQuoteCustomerBanner(q)}
+        ${renderQuoteWizardChipRow(q)}
+        <div style="display:grid; grid-template-columns:1fr 280px; gap:14px; align-items:start;">
+          <div style="padding:32px; text-align:center; background:var(--paper); border:2px dashed var(--line-dark); border-radius:4px;">
+            <div style="font-size:36px;">👈</div>
+            <div style="font-weight:600; margin-top:8px;">Pick a part to edit</div>
+            <div class="text-mute small" style="margin-top:4px;">Click any chip above to open its wizard.</div>
+          </div>
+          ${renderPricingSidebar(q)}
+        </div>
+      </div>
+    `;
+  }
+  if (!activePart) {
+    // Empty quote — no parts
+    return `
+      <div>
+        ${renderQuoteCustomerBanner(q)}
+        <div style="display:grid; grid-template-columns:1fr 280px; gap:14px; align-items:start;">
+          <div style="padding:40px; text-align:center; background:var(--paper); border:2px dashed var(--orange); border-radius:4px; background:#FFF7ED;">
+            <div style="font-size:42px;">📋</div>
+            <div style="font-weight:700; margin-top:8px; font-size:16px;">No parts on this quote yet</div>
+            <div class="text-mute small" style="margin-top:4px;">Click below to add the first part.</div>
+            <button class="btn btn-primary" style="margin-top:14px;" onclick="App.promptAddPart()">+ Add Part</button>
+          </div>
+          ${renderPricingSidebar(q)}
+        </div>
+      </div>
+    `;
+  }
+  // Normal case — active part visible
+  return `
+    <div>
+      ${renderQuoteCustomerBanner(q)}
+      ${renderQuoteWizardChipRow(q)}
+      <div style="display:grid; grid-template-columns:1fr 280px; gap:14px; align-items:start;">
+        ${renderPartWizard(q, activePart)}
+        ${renderPricingSidebar(q)}
+      </div>
+    </div>
+  `;
+}
+
 function renderQuote() {
   const q = getActiveQuote();
   if (!q) return `<p>No quote selected.</p>`;
+  // v8.0: wizard-mode dispatch. Wizard mode replaces the entire body —
+  // no tabs, no classic cards. Classic mode keeps the existing layout
+  // exactly so nothing breaks while we iterate.
+  if (state.ui.wizardMode) {
+    const c = getCustomer(q.customerId);
+    return `
+      <div class="page-header" style="margin-bottom:8px;">
+        <div>
+          <div class="page-title" style="font-size:16px;">
+            ${esc(q.quoteNum || 'New Quote')}
+            <span class="pill" style="background:var(--orange); color:white; border:none; vertical-align:middle; margin-left:6px; font-size:10px;">✨ WIZARD v8 BETA</span>
+          </div>
+        </div>
+        <div class="header-actions">
+          <button class="btn" onclick="App.downloadQuotePDF('${q.id}')">⬇ Download PDF</button>
+          <button class="btn btn-primary" onclick="App.convertToOrder('${q.id}')">→ Convert to Order</button>
+          <button class="btn" onclick="App.go('quotes')">← Back to Quotes</button>
+        </div>
+      </div>
+      ${renderQuoteWizardView(q)}
+    `;
+  }
+  // Classic mode — existing behavior preserved verbatim
   const t = state.ui.activeQuoteTab;
   let body;
   if (t === 'info') body = renderQuoteInfo(q);
@@ -12279,6 +12627,7 @@ function renderQuote() {
         </select></div>
       </div>
       <div class="header-actions">
+        <button class="btn" style="background:var(--orange); color:white;" onclick="App.setWizardMode(true)" title="Try the new wizard-style quote page (v8)">✨ Switch to Wizard view</button>
         <button class="btn" onclick="App.downloadQuotePDF('${q.id}')">⬇ Download PDF</button>
         <button class="btn" onclick="App.emailQuote('${q.id}')" ${!c?.email?'disabled title="No email on file for the customer"':''}>✉ Email PDF to Customer</button>
         <button class="btn btn-primary" onclick="App.convertToOrder('${q.id}')">→ Convert to Order</button>
@@ -17993,6 +18342,62 @@ const App = {
     console.log('[openQuote]', id, 'view→quote');
     closeAllModals();
     update(s => { s.ui.view = 'quote'; s.ui.activeQuoteId = id; s.ui.activeQuoteTab = 'info'; });
+  },
+
+  // v8.0: wizard mode toggle + step navigation handlers
+  setWizardMode(on) {
+    update(s => { s.ui.wizardMode = !!on; });
+  },
+  wizardGoToStep(partId, idx) {
+    update(s => { s.ui.wizardStep[partId] = idx; });
+  },
+  wizardNext(partId) {
+    const q = getActiveQuote(); if (!q) return;
+    const part = (q.parts || []).find(p => p.id === partId); if (!part) return;
+    const steps = wizardStepsFor(part);
+    const cur = currentWizardStepIdx(part);
+    if (cur < steps.length - 1) {
+      update(s => { s.ui.wizardStep[partId] = cur + 1; });
+    }
+  },
+  wizardPrev(partId) {
+    const cur = state.ui.wizardStep[partId] || 0;
+    if (cur > 0) {
+      update(s => { s.ui.wizardStep[partId] = cur - 1; });
+    }
+  },
+  savePartAsDraft(partId) {
+    update(s => {
+      const q = s.quotes.find(qq => qq.id === s.ui.activeQuoteId);
+      if (!q) return;
+      const p = (q.parts || []).find(pp => pp.id === partId);
+      if (p) {
+        p.isDraft = true;
+        p.draftedAt = new Date().toISOString();
+      }
+    });
+    showToast('💾 Saved as draft. Switch parts or come back any time.');
+  },
+  setPartType(partId, typeId) {
+    update(s => {
+      const q = s.quotes.find(qq => qq.id === s.ui.activeQuoteId);
+      if (!q) return;
+      const p = (q.parts || []).find(pp => pp.id === partId);
+      if (p) p.typeId = typeId;
+    });
+  },
+  deletePart(quoteId, partId) {
+    if (!confirm('Delete this part? This cannot be undone.')) return;
+    update(s => {
+      const q = s.quotes.find(qq => qq.id === quoteId);
+      if (!q) return;
+      q.parts = (q.parts || []).filter(p => p.id !== partId);
+      // If this part was the active one, clear that slot
+      if (s.ui.activePartIdForInfo && s.ui.activePartIdForInfo[quoteId] === partId) {
+        s.ui.activePartIdForInfo[quoteId] = null;
+      }
+      delete s.ui.wizardStep[partId];
+    });
   },
   deleteQuote(id) {
     if (!confirm('Delete this quote? This cannot be undone.')) return;
