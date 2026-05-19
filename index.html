@@ -769,7 +769,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '8.12.2';
+const APP_VERSION = '8.13.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -20090,6 +20090,114 @@ const App = {
     }
     if (mcMasterUrl) {
       this._wizardMcMasterLookupAndApply(partId, mcMasterUrl);
+      return;
+    }
+    // v8.13.0: image or PDF attached on the Identity step → run Claude
+    // Vision on it. The file might be a McMaster page screenshot, an
+    // engineering drawing, a datasheet — we just hand it to the Worker
+    // and let Claude tell us what it is + extract fields.
+    const isImage = /^image\//i.test(file.type || '');
+    const isPdf = /\.pdf$/i.test(file.name || '') || /pdf$/i.test(file.type || '');
+    if (stepId === 'identity' && (isImage || isPdf)) {
+      this._wizardExtractPartFromAttachment(partId, file, dataUrl);
+    }
+  },
+
+  // v8.13.0: dropped/pasted image or PDF on Identity → Claude Vision
+  // extracts structured part data → applied to the part. Handles every
+  // doc type the Worker schema lists (McMaster page, engineering drawing,
+  // datasheet, RFQ snippet, vendor quote, etc.).
+  async _wizardExtractPartFromAttachment(partId, file, dataUrl) {
+    showToast(`✨ Reading ${file.name} with Claude…`, 3500);
+    // Strip the data:URL prefix to get plain base64
+    const b64 = (dataUrl || '').replace(/^data:[^;]+;base64,/, '');
+    let parsed;
+    try {
+      const res = await workerCall('/api/claude/extract-part', {
+        attachments: [{ name: file.name, mimeType: file.type || 'application/octet-stream', data: b64 }],
+      }, { timeoutMs: 60000 });
+      parsed = res.parsed || {};
+    } catch (e) {
+      console.warn('[extract-part]', e);
+      showToast(`⚠ Claude couldn't read ${file.name}: ${(e && e.message) || e}`, 5000);
+      return;
+    }
+    // If Claude says it's a McMaster page AND extracted a URL, run the
+    // existing McMaster lookup for higher-fidelity data
+    if (parsed.docType === 'mcmaster_page' && parsed.sourceUrl) {
+      this._wizardMcMasterLookupAndApply(partId, parsed.sourceUrl);
+      return;
+    }
+    // Apply generic part data
+    let applied = [];
+    update(s => {
+      const q = s.quotes.find(qq => qq.id === s.ui.activeQuoteId);
+      if (!q) return;
+      const p = (q.parts || []).find(pp => pp.id === partId);
+      if (!p) return;
+      // Suggested type — only override if part still has its default
+      if (parsed.suggestedType && (!p.typeId || p.typeId === 'machined')) {
+        if (parsed.suggestedType !== p.typeId) {
+          p.typeId = parsed.suggestedType;
+          applied.push(`type=${parsed.suggestedType}`);
+        }
+      }
+      // Part number (only if blank)
+      if (parsed.partNum && !p.partNum) { p.partNum = parsed.partNum; applied.push('part #'); }
+      // Description
+      if (parsed.description && !p.description) { p.description = parsed.description; applied.push('description'); }
+      // Material (use the existing materials picker — if Claude's value is
+      // a recognized material name, set it; otherwise put in notes)
+      if (parsed.material && !p.material) {
+        const matNames = (s.settings.materials || []).map(m => (m.name || '').toLowerCase());
+        if (matNames.includes(parsed.material.toLowerCase())) {
+          // Find the canonical case
+          const canon = (s.settings.materials || []).find(m => (m.name || '').toLowerCase() === parsed.material.toLowerCase());
+          if (canon) { p.material = canon.name; applied.push('material'); }
+        } else {
+          p.material = parsed.material;
+          applied.push('material');
+        }
+      }
+      // Pricing → material cost (mostly for McMaster / catalog pages)
+      if (parsed.price != null && isFinite(parsed.price) && parsed.price > 0) {
+        if (!p.materialCost) p.materialCost = { perPiece: [null], perBar: null, perSheet: null, vendorId: null, vendorPartNum: '', vendorUrl: '' };
+        if (parsed.partNum && !p.materialCost.vendorPartNum) p.materialCost.vendorPartNum = parsed.partNum;
+        if (parsed.sourceUrl && !p.materialCost.vendorUrl) p.materialCost.vendorUrl = parsed.sourceUrl;
+        if (parsed.priceUnit === 'pack' && parsed.packSize > 0) {
+          p.materialCost.isComponent = true;
+          p.materialCost.packSize = parsed.packSize;
+          p.materialCost.perPack = parsed.price;
+          applied.push(`$${parsed.price}/pack of ${parsed.packSize}`);
+        } else {
+          if (!Array.isArray(p.materialCost.perPiece)) p.materialCost.perPiece = [];
+          if (typeof ensureMatPerPiece === 'function') ensureMatPerPiece(p);
+          p.materialCost.perPiece[0] = parsed.price;
+          applied.push(`$${parsed.price} each`);
+        }
+      }
+      // Everything else → tagged notes line so it's not lost
+      const extras = [];
+      if (parsed.finish)     extras.push(`Finish: ${parsed.finish}`);
+      if (parsed.dimensions) extras.push(`Dims: ${parsed.dimensions}`);
+      if (parsed.tolerance)  extras.push(`Tol: ${parsed.tolerance}`);
+      if (parsed.revision)   extras.push(`Rev: ${parsed.revision}`);
+      if (parsed.threadSize) extras.push(`Thread: ${parsed.threadSize}`);
+      if (parsed.length)     extras.push(`Length: ${parsed.length}`);
+      if (parsed.weight)     extras.push(`Weight: ${parsed.weight}`);
+      if (parsed.availability) extras.push(`Avail: ${parsed.availability}`);
+      if (parsed.notes)      extras.push(parsed.notes);
+      if (extras.length) {
+        const tag = `[Claude read ${file.name} · ${parsed.docType || 'unknown'} · conf=${parsed.confidence || '?'}] ${extras.join(' · ')}`;
+        p.notes = p.notes ? `${p.notes}\n${tag}` : tag;
+        applied.push('notes');
+      }
+      logActivity('Claude extracted from attachment', p.partNum || file.name, applied.join(', '));
+    });
+    if (applied.length === 0) {
+      showToast(`⚠ Claude looked but didn't find anything useful in ${file.name}. (docType: ${parsed.docType}, confidence: ${parsed.confidence})`, 5000);
+    } else {
+      showToast(`✨ Applied from ${file.name}: ${applied.join(', ')}`, 6000);
     }
   },
 

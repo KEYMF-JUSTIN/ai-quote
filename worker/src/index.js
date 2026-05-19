@@ -84,6 +84,18 @@ export default {
         return jsonResponse(result, 200, env, origin);
       }
 
+      // POST /api/claude/extract-part
+      // Smart-attach for the wizard Identity step. Client uploads an image
+      // or PDF — McMaster product page screenshot, engineering drawing,
+      // datasheet, RFQ snippet, anything — and Claude Vision returns
+      // structured part data with a docType label so the frontend knows
+      // how to apply it (purchased vs machined etc).
+      if (request.method === 'POST' && path === '/api/claude/extract-part') {
+        const body = await request.json();
+        const result = await handleExtractPart(env, body);
+        return jsonResponse(result, 200, env, origin);
+      }
+
       return errorResponse(`Not found: ${request.method} ${path}`, 404, env, origin);
     } catch (err) {
       console.error('worker error', err && err.stack || err);
@@ -790,6 +802,121 @@ async function handleMcMasterLookup(env, body) {
     sourceUrl: url,
     fetchStatus,
     htmlBytes: html.length,
+    model: result.model,
+    usage: result.usage,
+  };
+}
+
+// =================================================================
+// /api/claude/extract-part
+// Wizard Identity smart-attach. The user drops an image or PDF on a new
+// part's Identity step — could be a McMaster product page screenshot, an
+// engineering drawing, a datasheet, an RFQ snippet, a vendor quote, etc.
+// We ask Claude Vision to identify what it's looking at AND extract the
+// fields we'd plausibly want to pre-fill on the part (part #, description,
+// price if visible, material, dimensions, suggested part type, etc.).
+//
+// Frontend then applies the fields selectively: docType=mcmaster_page →
+// flip part type to Purchased + write material cost. docType=
+// engineering_drawing → fill part #/material/description, leave type as-is.
+// etc.
+// =================================================================
+async function handleExtractPart(env, body) {
+  if (!body || typeof body !== 'object') throw badRequest('Body must be JSON');
+  const attachments = Array.isArray(body.attachments) ? body.attachments : [];
+  if (attachments.length === 0) throw badRequest('No attachments to read.');
+  const hint = (body.hint || '').toString().slice(0, 500);
+
+  const tool = {
+    name: 'submit_part_data',
+    description: 'Submit structured part data extracted from the dropped image/PDF. All fields optional — leave anything ambiguous as null. confidence + docType drive how the frontend applies the data; populate them honestly.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        docType: {
+          type: 'string',
+          enum: ['mcmaster_page','engineering_drawing','datasheet','rfq_snippet','vendor_quote','catalog_page','part_label','unknown'],
+          description: 'What kind of document is this? Best guess from the image content.',
+        },
+        confidence: {
+          type: 'string',
+          enum: ['high','medium','low'],
+          description: 'How confident in the extracted fields overall.',
+        },
+        partNum: { type: 'string', description: 'Part number — McMaster SKU, customer P/N, engineering drawing number. Whichever is most prominent.' },
+        description: { type: 'string', description: 'One-line product/part description.' },
+        // McMaster / catalog pricing
+        price: { type: 'number', description: 'Catalog price as a decimal. Pick the most prominently shown.' },
+        priceUnit: {
+          type: 'string',
+          enum: ['each','pack','per100','per_foot','per_lb','unknown'],
+          description: 'How price is denominated.',
+        },
+        packSize: { type: 'number', description: 'Pack quantity if priced per pack.' },
+        // Engineering drawing fields
+        material: { type: 'string', description: 'Material called out in title block or notes (e.g. "6061-T6 Aluminum", "1018 CRS").' },
+        finish: { type: 'string', description: 'Surface finish (e.g. "Black Oxide", "Anodize Type II Class 2").' },
+        dimensions: { type: 'string', description: 'Overall dims if shown in title block (e.g. "6.00 x 4.00 x 0.500").' },
+        tolerance: { type: 'string', description: 'General tolerance callout (e.g. "±.005", "ISO 2768-mK").' },
+        revision: { type: 'string', description: 'Drawing revision (e.g. "Rev B").' },
+        threadSize: { type: 'string', description: 'For fasteners: thread spec.' },
+        length: { type: 'string', description: 'Item length with units.' },
+        weight: { type: 'string', description: 'Item weight as listed.' },
+        availability: { type: 'string', description: 'Stock language if visible.' },
+        // Recognized source URL
+        sourceUrl: { type: 'string', description: 'URL visible on the page (browser address bar in a screenshot, link in a PDF, etc.).' },
+        // Suggested wizard type
+        suggestedType: {
+          type: 'string',
+          enum: ['machined','cutblank','welded','hybrid','purchased','collar'],
+          description: 'Wizard part type that best matches: catalog/SKU = purchased; engineering drawing of a milled part = machined; sheet-cut profile = cutblank; weldment drawing = welded; picture-frame on G-10/phenolic = collar.',
+        },
+        notes: { type: 'string', description: 'One short sentence on anything else noteworthy.' },
+      },
+    },
+  };
+
+  const contentBlocks = [{
+    type: 'text',
+    text: [
+      'You are looking at a file the user dropped on the Identity step of a quote part in a precision-machining-shop quoting app.',
+      'Identify what KIND of document it is, then extract any structured part data visible.',
+      '',
+      hint ? `User hint: ${hint}` : '',
+      '',
+      'docType heuristics:',
+      '  mcmaster_page     — McMaster-Carr product page screenshot (you\'ll see the McMaster logo / orange UI / catalog pricing)',
+      '  engineering_drawing — title block + dimensions + tolerances + material callout',
+      '  datasheet         — technical specs in a printed PDF format',
+      '  rfq_snippet       — email/PDF showing customer requirements',
+      '  vendor_quote      — formal quotation from a supplier',
+      '  catalog_page      — generic supplier catalog page',
+      '  part_label        — bin label / part-marking photo',
+      '  unknown           — none of the above',
+      '',
+      'Pick a suggestedType to help the wizard route the part:',
+      '  mcmaster_page → purchased',
+      '  engineering_drawing of a milled component → machined',
+      '  engineering_drawing of a sheet-cut profile (laser/waterjet outline only) → cutblank',
+      '  weldment / multi-piece drawing → welded',
+      '  picture-frame rectangle from G-10/GPO-3/G-11 → collar',
+      '',
+      'Be conservative — leave fields null if not visible. confidence=low if more than half the fields had to be guessed.',
+    ].filter(Boolean).join('\n'),
+  }];
+  for (const att of attachments) {
+    const block = attachmentToContentBlock(att);
+    if (block) contentBlocks.push(block);
+  }
+
+  const result = await extractWithTool(env, {
+    tool,
+    content: contentBlocks,
+    model: body.model || env.CLAUDE_MODEL,
+    max_tokens: 1024,
+  });
+  return {
+    parsed: result.data,
     model: result.model,
     usage: result.usage,
   };
