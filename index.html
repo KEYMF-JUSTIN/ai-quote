@@ -769,7 +769,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '8.18.0';
+const APP_VERSION = '8.18.1';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -13072,7 +13072,7 @@ function renderPartWizard(q, part) {
         <div style="display:flex; gap:6px;">
           ${part.isDraft ? '<span style="padding:2px 8px; background:rgba(255,255,255,0.2); border-radius:3px; font-size:11px;">draft</span>' : ''}
           <button class="btn btn-sm" style="background:rgba(255,255,255,0.15); color:white; border:1px solid rgba(255,255,255,0.3);" onclick="App.savePartAsDraft('${part.id}')" title="Mark this part as a draft (still working on it). Stays on current step.">💾 Save draft</button>
-          <button class="btn btn-sm btn-danger" onclick="App.deletePart('${q.id}','${part.id}')" title="Delete this part">×</button>
+          <button class="btn btn-sm btn-danger" onclick="App.deletePart('${part.id}')" title="Delete this part">×</button>
         </div>
       </div>
       <div style="padding:6px 14px; background:#FAFAFA; border-bottom:1px solid var(--line);">
@@ -21317,19 +21317,11 @@ const App = {
       if (p) p.typeId = typeId;
     });
   },
-  deletePart(quoteId, partId) {
-    if (!confirm('Delete this part? This cannot be undone.')) return;
-    update(s => {
-      const q = s.quotes.find(qq => qq.id === quoteId);
-      if (!q) return;
-      q.parts = (q.parts || []).filter(p => p.id !== partId);
-      // If this part was the active one, clear that slot
-      if (s.ui.activePartIdForInfo && s.ui.activePartIdForInfo[quoteId] === partId) {
-        s.ui.activePartIdForInfo[quoteId] = null;
-      }
-      delete s.ui.wizardStep[partId];
-    });
-  },
+  // v8.18.1: duplicate v8.0 two-arg deletePart removed — was being shadowed
+  // by the older single-arg version below (last definition wins in JS object
+  // literals), so the wizard's × button silently did nothing. Wizard cleanup
+  // (activePartIdForInfo, wizardStep) is now merged into the single-arg
+  // function so both call sites work correctly.
   deleteQuote(id) {
     if (!confirm('Delete this quote? This cannot be undone.')) return;
     update(s => {
@@ -21844,13 +21836,29 @@ const App = {
       s.ui.activeQuoteTab = 'part-' + copy.id;
     });
   },
+  // v8.18.1: merged version — handles classic + wizard cleanup. Single-arg
+  // signature matches all existing call sites. Wizard state (activePartIdForInfo
+  // and wizardStep) gets cleared/promoted to the next surviving part so the
+  // user doesn't end up looking at a deleted part's wizard.
   deletePart(partId) {
-    if (!confirm('Remove this part?')) return;
+    if (!confirm('Delete this part? This cannot be undone.')) return;
     update(s => {
       const q = getActiveQuote(); if (!q) return;
       q.parts = q.parts.filter(p => p.id !== partId);
-      if (q.parts.length === 0) q.parts.push(newPart());
+      // Wizard cleanup
+      if (!s.ui.activePartIdForInfo) s.ui.activePartIdForInfo = {};
+      if (s.ui.activePartIdForInfo[q.id] === partId) {
+        s.ui.activePartIdForInfo[q.id] = q.parts.length > 0 ? q.parts[0].id : null;
+      }
+      if (s.ui.wizardStep) delete s.ui.wizardStep[partId];
+      // Classic-view subtab fallback: if no parts left at all, auto-add an
+      // empty one so the page doesn't render a void
+      if (q.parts.length === 0) {
+        q.parts.push(newPart());
+        s.ui.activePartIdForInfo[q.id] = q.parts[0].id;
+      }
       s.ui.activeQuoteTab = 'part-' + q.parts[0].id;
+      logActivity('Deleted part', partId, `from quote ${q.quoteNum || '(no #)'}`);
     });
   },
 
