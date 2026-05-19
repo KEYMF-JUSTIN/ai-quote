@@ -769,7 +769,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '8.16.1';
+const APP_VERSION = '8.17.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -1101,6 +1101,7 @@ function migrateState() {
   if (cd.kerf           == null) cd.kerf = 0.05;         // saw/cutter kerf for nesting math (in)
   if (cd.sheetLen       == null) cd.sheetLen = 96;       // default sheet length (4×8 in)
   if (cd.sheetWid       == null) cd.sheetWid = 48;
+  if (cd.hourlyRate     == null) cd.hourlyRate = 85;     // v8.17: machine $/hr for the cut-time → cost calc on the analytics card
   if (!Array.isArray(cd.sheetPresets)) cd.sheetPresets = [
     { label:'4ft × 8ft (standard)', len:96, wid:48 },
     { label:'5ft × 10ft (rare)',    len:120, wid:60 },
@@ -11990,6 +11991,10 @@ function renderSettings() {
             ${bind({label:'Kerf', value:s.collarDefaults.kerf, type:'number', onChange:v=>{ s.collarDefaults.kerf = num(v) || 0.05; }, attrs:'step="0.005" min="0"'})}
             <div class="hint">Affects nesting math</div>
           </div>
+          <div class="field"><label>Machine rate ($/hr)</label>
+            ${bind({label:'Machine rate', value:s.collarDefaults.hourlyRate, type:'number', onChange:v=>{ s.collarDefaults.hourlyRate = num(v) || 0; }, attrs:'step="5" min="0"'})}
+            <div class="hint">Default machine $/hr for the Cut Time analytics card. Industry ranges: small CNC $65-95/hr, large/5-axis $120-160/hr, manual $55-75/hr.</div>
+          </div>
           <div class="field"><label>Load / unload (min)</label>
             ${bind({label:'Load/unload', value:s.collarDefaults.loadUnloadMin, type:'number', onChange:v=>{ s.collarDefaults.loadUnloadMin = num(v) || 0; }, attrs:'step="0.5" min="0"'})}
             <div class="hint">Sheet on, sheet off · 0.5 min steps</div>
@@ -13016,21 +13021,16 @@ function renderWizardStepIdentity(q, part) {
       <div class="field"><label>Description</label>
         ${bind({label:'Description', value:part.description, onChange:v=>{ part.description = v; }, placeholder:'What is this part for?'})}
       </div>
-      <!-- v8.10: quantity tiers — first tier feeds the Collar nesting math
-           + drives qty-break pricing on every type. Keep it visible and
-           editable on Identity so the user can set it BEFORE moving on. -->
-      <div class="field" style="grid-column:span 2;"><label>Quantity (qty-break tiers)</label>
-        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
-          ${part.qtyTiers.map((qt, i) => `
-            <span style="display:inline-flex; align-items:center; gap:4px; padding:4px 8px; background:var(--bg); border:1px solid var(--line-dark); border-radius:3px;">
-              <span style="font-size:10px; color:var(--text-mute); text-transform:uppercase; letter-spacing:0.06em; font-weight:700;">Tier ${i+1}</span>
-              ${bind({label:`Quantity tier ${i+1}`, value:qt, type:'number', onChange:v=>{ part.qtyTiers[i] = num(v) || 1; ensureMatPerPiece(part); }, attrs:'min="1" step="1"'})}
-              ${part.qtyTiers.length > 1 ? `<span style="cursor:pointer; color:var(--orange); font-weight:700;" onclick="App.removeQtyTier('${part.id}',${i})" title="Remove tier">×</span>` : ''}
-            </span>
-          `).join('')}
-          <button class="btn btn-sm" onclick="App.addQtyTier('${part.id}')">+ Tier</button>
+      <!-- v8.17: simplified quantity. Was "Quantity (qty-break tiers)" with
+           a pill-strip of tier inputs and a "+ Tier" button — confusing.
+           Now just one quantity number. Data model keeps qtyTiers[] as an
+           array internally so all pricing math (which keys off qtyTiers[0])
+           keeps working; users only see the single value. -->
+      <div class="field" style="grid-column:span 2;"><label>Quantity</label>
+        <div style="display:flex; gap:8px; align-items:center; max-width:200px;">
+          ${bind({label:'Quantity', value:part.qtyTiers[0], type:'number', onChange:v=>{ part.qtyTiers[0] = num(v) || 1; ensureMatPerPiece(part); }, attrs:'min="1" step="1"'})}
         </div>
-        <div class="hint">First tier = the quantity used by Collar nesting math. Add more tiers for qty-break pricing on a single quote.</div>
+        <div class="hint">How many of this part the customer is ordering.</div>
       </div>
       <div class="field" style="grid-column:span 2;"><label>Part type</label>
         <div style="display:flex; gap:6px; flex-wrap:wrap;">
@@ -13714,8 +13714,126 @@ function renderWizardStepCollarCut(q, part) {
         </div>
       </div>
     </div>
+
+    ${renderCollarCutAnalytics(q, part, {
+      totalPerSheet, cutPerSheetCombined, cutPerSheetInside, cutPerSheetOutside,
+      loadUnload, screwDown, nest, qty, sheetsNeeded, totalJob, useHours,
+    })}
+
     <div style="margin-top:14px; padding:10px 12px; background:#F0F9FF; border-left:3px solid var(--blue); border-radius:3px; font-size:12px;">
       💡 <strong>Sequence:</strong> screw down → cut <em>all</em> the insides → cut <em>all</em> the outsides → unload. Inside cutouts release scrap centers; outside cuts release the finished collars.
+    </div>
+  `;
+}
+
+// v8.17: cost analytics + hourly-rate input for the Collar Cut Time step.
+// Lives at the bottom of the step, below the time tables. Renders even
+// before the user enters a rate — shows "Enter a rate above" placeholder.
+function renderCollarCutAnalytics(q, part, ctx) {
+  const co = part.collar || {};
+  const cd = state.settings.collarDefaults || {};
+  const hourlyRate = co.hourlyRate != null ? num(co.hourlyRate) : num(cd.hourlyRate);
+  const totalSheetMin = ctx.totalPerSheet;
+  const cutSheetMin   = ctx.cutPerSheetCombined;
+  const cutPartMin    = ctx.nest.count > 0 ? ctx.cutPerSheetCombined / ctx.nest.count : 0;
+  // Allocate handling time across parts on that sheet so per-part cost is honest
+  const allocHandlingPerPartMin = ctx.nest.count > 0 ? (ctx.loadUnload + ctx.screwDown) / ctx.nest.count : 0;
+  const partLoadedMin = cutPartMin + allocHandlingPerPartMin;
+  // Cost math
+  const $per_min = hourlyRate / 60;
+  const costPerPart  = partLoadedMin * $per_min;
+  const costPerSheet = totalSheetMin * $per_min;
+  const costJob      = ctx.sheetsNeeded * costPerSheet;
+  // Productivity
+  const partsPerHour = partLoadedMin > 0 ? 60 / partLoadedMin : 0;
+  const sheetsPerHour = totalSheetMin > 0 ? 60 / totalSheetMin : 0;
+  // Material waste (approx — outside area lost to spacing)
+  const sheetArea = num(co.sheetLen != null ? co.sheetLen : cd.sheetLen) * num(co.sheetWid != null ? co.sheetWid : cd.sheetWid);
+  const usedArea = ctx.nest.count * (num(co.outsideLen) * num(co.outsideWid));
+  const wastePct = sheetArea > 0 ? Math.max(0, 100 * (1 - usedArea / sheetArea)) : 0;
+
+  // Material cost (from co.sheetPrice if set)
+  const sheetPrice = num(co.sheetPrice);
+  const matCostPerPart = ctx.nest.count > 0 && sheetPrice > 0 ? sheetPrice / ctx.nest.count : 0;
+  const matCostJob = ctx.sheetsNeeded * sheetPrice;
+
+  // Combined (labor + material, no markup yet — that's downstream)
+  const totalCostPart = costPerPart + matCostPerPart;
+  const totalCostJob = costJob + matCostJob;
+
+  return `
+    <div style="margin-top:18px; padding:14px 16px; background:linear-gradient(135deg, #0F172A 0%, #1E293B 100%); color:white; border-radius:6px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:12px;">
+        <div style="display:flex; align-items:center; gap:8px;">
+          <span style="font-size:22px;">📊</span>
+          <strong style="font-size:14px; letter-spacing:0.04em;">Cost analytics</strong>
+        </div>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <label style="font-size:11px; opacity:0.85;">Machine $/hr</label>
+          ${bind({label:'Hourly rate', value:hourlyRate, type:'number', onChange:v=>{ co.hourlyRate = num(v) || 0; }, attrs:'step="5" min="0" style="width:90px; padding:4px 8px; background:rgba(255,255,255,0.12); border:1px solid rgba(255,255,255,0.25); color:white; font-family:var(--font-mono);"'})}
+          <span title="Industry references: small CNC mill ~$65–95/hr · large or 5-axis ~$120–160/hr · manual machining ~$55–75/hr · laser/waterjet shops ~$90–150/hr. Defaults editable in Settings → Collar Defaults."
+                style="cursor:help; opacity:0.7; font-size:14px;">ℹ</span>
+        </div>
+      </div>
+
+      ${hourlyRate <= 0 ? `
+        <div style="padding:10px 14px; background:rgba(220,67,24,0.18); border-radius:4px; font-size:12px;">
+          ⚠ Set a machine $/hr above to see cost analytics.
+        </div>
+      ` : `
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(170px, 1fr)); gap:10px;">
+          <!-- LABOR COST PER PART -->
+          <div style="padding:10px 12px; background:rgba(255,255,255,0.07); border-left:3px solid #34D399; border-radius:3px;">
+            <div style="font-size:10px; opacity:0.7; text-transform:uppercase; letter-spacing:0.06em; font-weight:700;">Labor / part</div>
+            <div style="font-size:22px; font-weight:700; color:#34D399; line-height:1.1; margin-top:2px;">${fmtMoney(costPerPart)}</div>
+            <div style="font-size:10px; opacity:0.7; margin-top:2px;">${ctx.useHours ? fmtNum(partLoadedMin/60, 3) + ' hr' : fmtNum(partLoadedMin, 2) + ' min'} loaded</div>
+          </div>
+          <!-- MATERIAL COST PER PART -->
+          ${matCostPerPart > 0 ? `
+            <div style="padding:10px 12px; background:rgba(255,255,255,0.07); border-left:3px solid #FBBF24; border-radius:3px;">
+              <div style="font-size:10px; opacity:0.7; text-transform:uppercase; letter-spacing:0.06em; font-weight:700;">Material / part</div>
+              <div style="font-size:22px; font-weight:700; color:#FBBF24; line-height:1.1; margin-top:2px;">${fmtMoney(matCostPerPart)}</div>
+              <div style="font-size:10px; opacity:0.7; margin-top:2px;">${fmtMoney(sheetPrice)} / sheet ÷ ${ctx.nest.count} parts</div>
+            </div>
+          ` : ''}
+          <!-- TOTAL COST PER PART (labor + material) -->
+          <div style="padding:10px 12px; background:rgba(255,255,255,0.07); border-left:3px solid #F97316; border-radius:3px;">
+            <div style="font-size:10px; opacity:0.7; text-transform:uppercase; letter-spacing:0.06em; font-weight:700;">Total / part</div>
+            <div style="font-size:22px; font-weight:700; color:#F97316; line-height:1.1; margin-top:2px;">${fmtMoney(totalCostPart)}</div>
+            <div style="font-size:10px; opacity:0.7; margin-top:2px;">labor ${fmtMoney(costPerPart)} + mat ${fmtMoney(matCostPerPart)}</div>
+          </div>
+          <!-- TOTAL JOB COST -->
+          <div style="padding:10px 12px; background:rgba(255,255,255,0.07); border-left:3px solid #DC4318; border-radius:3px;">
+            <div style="font-size:10px; opacity:0.7; text-transform:uppercase; letter-spacing:0.06em; font-weight:700;">Job total (${ctx.qty}×)</div>
+            <div style="font-size:22px; font-weight:700; color:#FB923C; line-height:1.1; margin-top:2px;">${fmtMoney(totalCostJob)}</div>
+            <div style="font-size:10px; opacity:0.7; margin-top:2px;">labor ${fmtMoney(costJob)} + mat ${fmtMoney(matCostJob)}</div>
+          </div>
+        </div>
+
+        <div style="margin-top:12px; padding-top:10px; border-top:1px dashed rgba(255,255,255,0.18); display:grid; grid-template-columns:repeat(auto-fit, minmax(140px, 1fr)); gap:8px; font-size:12px;">
+          <div>
+            <span style="opacity:0.7;">Parts / hour:</span>
+            <strong style="margin-left:4px;">${fmtNum(partsPerHour, 1)}</strong>
+          </div>
+          <div>
+            <span style="opacity:0.7;">Sheets / hour:</span>
+            <strong style="margin-left:4px;">${fmtNum(sheetsPerHour, 2)}</strong>
+          </div>
+          <div>
+            <span style="opacity:0.7;">Sheet area used:</span>
+            <strong style="margin-left:4px;">${(100 - wastePct).toFixed(0)}%</strong>
+            <span style="opacity:0.5; margin-left:3px;">(${wastePct.toFixed(0)}% scrap)</span>
+          </div>
+          <div>
+            <span style="opacity:0.7;">Job duration:</span>
+            <strong style="margin-left:4px;">${ctx.useHours ? fmtNum(ctx.totalJob/60, 1) + ' hr' : fmtNum(ctx.totalJob, 0) + ' min'}</strong>
+          </div>
+        </div>
+
+        <div style="margin-top:10px; padding:8px 12px; background:rgba(255,255,255,0.05); border-radius:3px; font-size:11px; opacity:0.75;">
+          💡 These are <em>cost</em> figures — labor + material at your shop rate. Customer-facing pricing adds markup (set in Settings → Markups) and overhead on top. The quote total uses those settings to compute what the customer actually sees.
+        </div>
+      `}
     </div>
   `;
 }
