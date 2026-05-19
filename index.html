@@ -769,7 +769,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '8.10.0';
+const APP_VERSION = '8.11.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -12995,26 +12995,37 @@ function renderWizardStepMaterial(q, part) {
 // supporting docs and which don't.
 function renderWizardStepDropZone(part, stepId) {
   const atts = (part.attachments || []).filter(a => a.stepId === stepId);
+  // v8.11: Clippy upgrade. The 📎 was a tiny 14px afterthought. Now it's a
+  // proper 36px focal point with a soft circle background — homage to the
+  // Office Assistant. Drop zone is taller, padding bumped, and there's a
+  // 📋 Paste button next to "or click to browse" so users can drop a
+  // file, click the dotted area, OR paste from clipboard (image, URL, or
+  // plain text).
   return `
     <div data-wizard-step-drop="${esc(part.id)}|${esc(stepId)}"
-         style="border:1px dashed var(--orange); background:#FFF7ED; padding:7px 10px; margin-bottom:12px; font-size:11px; border-radius:3px; cursor:pointer;"
+         style="border:2px dashed var(--orange); background:#FFF7ED; padding:14px 16px; margin-bottom:14px; font-size:12px; border-radius:5px; cursor:pointer;"
          onclick="document.getElementById('wstep-input-${esc(part.id)}-${esc(stepId)}').click()">
-      <div style="display:flex; align-items:center; gap:10px;">
-        <span style="font-size:14px;">📎</span>
-        <span style="flex:1; color:var(--orange); font-weight:600;">
-          Drop or click to attach a file to this <strong style="text-transform:capitalize;">${esc(stepId)}</strong> step
-          <span style="font-weight:400; color:var(--text-mute);">— quote emails, PDFs, screenshots, web pages, anything that documents the actual cost.</span>
+      <div style="display:flex; align-items:center; gap:14px;">
+        <span style="display:inline-flex; align-items:center; justify-content:center; width:52px; height:52px; flex:0 0 52px; border-radius:50%; background:white; border:2px solid var(--orange); font-size:32px; line-height:1; box-shadow:0 2px 6px rgba(220,67,24,0.18);">📎</span>
+        <span style="flex:1; color:var(--orange); font-weight:600; font-size:13px;">
+          Drop a file, paste from clipboard, or click to attach to <strong style="text-transform:capitalize;">${esc(stepId)}</strong>
+          <span style="display:block; font-weight:400; color:var(--text-mute); font-size:11px; margin-top:2px;">
+            PDFs, images, screenshots, .msg emails, web pages saved as PDF, URLs, anything that documents the actual cost.
+          </span>
         </span>
-        ${atts.length > 0 ? `<span style="background:var(--orange); color:white; padding:2px 8px; border-radius:10px; font-weight:600;">${atts.length} attached</span>` : ''}
+        <div style="display:flex; flex-direction:column; gap:4px; align-items:flex-end;">
+          <button class="btn btn-sm" onclick="event.stopPropagation(); App.wizardPasteFromClipboard('${esc(part.id)}','${esc(stepId)}')" title="Paste an image, URL, or text from the clipboard" style="background:var(--paper); border:1px solid var(--orange); color:var(--orange); font-weight:600;">📋 Paste</button>
+          ${atts.length > 0 ? `<span style="background:var(--orange); color:white; padding:2px 8px; border-radius:10px; font-weight:600; font-size:11px;">${atts.length} attached</span>` : ''}
+        </div>
       </div>
       <input type="file" id="wstep-input-${esc(part.id)}-${esc(stepId)}" style="display:none;"
              onchange="if(this.files[0]){App.wizardAttachFile('${esc(part.id)}','${esc(stepId)}', this.files[0]); this.value='';}"
              accept="*/*"
              onclick="event.stopPropagation()">
       ${atts.length > 0 ? `
-        <div style="margin-top:6px; padding-top:6px; border-top:1px dashed rgba(220,67,24,0.3); display:flex; flex-wrap:wrap; gap:4px;" onclick="event.stopPropagation()">
+        <div style="margin-top:10px; padding-top:8px; border-top:1px dashed rgba(220,67,24,0.3); display:flex; flex-wrap:wrap; gap:6px;" onclick="event.stopPropagation()">
           ${atts.map(a => `
-            <span style="display:inline-flex; align-items:center; gap:4px; padding:2px 8px; background:var(--paper); border:1px solid var(--orange); border-radius:12px; font-size:11px;">
+            <span style="display:inline-flex; align-items:center; gap:4px; padding:3px 10px; background:var(--paper); border:1px solid var(--orange); border-radius:14px; font-size:11px;">
               <a href="${esc(a.data || '#')}" download="${esc(a.name)}" title="Download ${esc(a.name)} (${Math.round((a.size||0)/1024)} KB)"
                  onclick="event.stopPropagation()" style="color:var(--navy); text-decoration:none; font-weight:600;">${esc(a.name)}</a>
               <span style="color:var(--text-mute);">${Math.round((a.size||0)/1024)}KB</span>
@@ -20010,6 +20021,55 @@ const App = {
       p.attachments = p.attachments.filter(a => a.id !== attId);
     });
   },
+
+  // v8.11: paste from clipboard → attach to wizard step. Tries image first
+  // (best for screenshots — Win+Shift+S → paste here), falls back to text
+  // (URLs from a browser bar / quote-line snippets / part numbers). Text
+  // that looks like a single URL is saved as a .url shortcut so it's
+  // recognizable later; arbitrary text is saved as .txt.
+  async wizardPasteFromClipboard(partId, stepId) {
+    let file = null;
+    try {
+      // Try image read (requires user gesture; we're inside a click handler so this works)
+      if (navigator.clipboard && navigator.clipboard.read) {
+        try {
+          const items = await navigator.clipboard.read();
+          for (const item of items) {
+            for (const type of item.types) {
+              if (type.startsWith('image/')) {
+                const blob = await item.getType(type);
+                const ext = type.split('/')[1] || 'png';
+                file = new File([blob], `pasted-image-${Date.now()}.${ext}`, { type });
+                break;
+              }
+            }
+            if (file) break;
+          }
+        } catch (_) { /* image read can fail if no image — fall through to text */ }
+      }
+      // No image — try text
+      if (!file) {
+        const text = (await navigator.clipboard.readText()).trim();
+        if (!text) {
+          alert('Clipboard is empty. Copy something (Ctrl+C) and try again.');
+          return;
+        }
+        // URL-like? Save as a .url shortcut
+        const isUrl = /^https?:\/\/\S+$/i.test(text);
+        const filename = isUrl
+          ? 'pasted-link-' + Date.now() + '.url'
+          : 'pasted-text-' + Date.now() + '.txt';
+        const mime = isUrl ? 'text/uri-list' : 'text/plain';
+        // .url file format Windows recognizes: [InternetShortcut]\nURL=...
+        const body = isUrl ? `[InternetShortcut]\nURL=${text}\n` : text;
+        file = new File([body], filename, { type: mime });
+      }
+    } catch (e) {
+      alert('Could not read clipboard: ' + (e.message || e) + '\n\nMake sure the page has clipboard permission (browser may prompt).');
+      return;
+    }
+    if (file) await this.wizardAttachFile(partId, stepId, file);
+  },
   wizardGoToStep(partId, idx) {
     update(s => { s.ui.wizardStep[partId] = idx; });
   },
@@ -25178,15 +25238,43 @@ setTimeout(() => {
     }
   });
   document.addEventListener('dragover', (e) => {
-    if (e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files')) {
+    if (!e.dataTransfer) return;
+    const types = Array.from(e.dataTransfer.types || []);
+    // v8.11: also accept URL drops (text/uri-list) so dragging a link from
+    // another browser tab doesn't navigate the page. Previously only 'Files'
+    // dragovers were prevented, so URL drops fell through to the browser's
+    // default "open the URL here" behavior.
+    if (types.includes('Files') || types.includes('text/uri-list') || types.includes('text/plain')) {
       e.preventDefault();  // allow drop
     }
   });
   document.addEventListener('drop', (e) => {
     dragDepth = 0;
     document.body.classList.remove('qp-drop-active');
-    if (!e.dataTransfer || !e.dataTransfer.files || e.dataTransfer.files.length === 0) return;
-    const file = e.dataTransfer.files[0];
+    if (!e.dataTransfer) return;
+    // v8.11: handle URL drops (drag a link from another website / browser bar).
+    // If there are no Files in the drop but there IS text/uri-list, we
+    // construct a synthetic .url File and route it through the same
+    // wizard-attach pipeline as a real file drop.
+    const hasFiles = e.dataTransfer.files && e.dataTransfer.files.length > 0;
+    let file;
+    if (hasFiles) {
+      file = e.dataTransfer.files[0];
+    } else {
+      const types = Array.from(e.dataTransfer.types || []);
+      let url = '';
+      if (types.includes('text/uri-list')) url = e.dataTransfer.getData('text/uri-list');
+      if (!url && types.includes('text/plain')) {
+        const t = e.dataTransfer.getData('text/plain');
+        if (/^https?:\/\/\S+$/i.test((t || '').trim())) url = t.trim();
+      }
+      if (!url) return;
+      e.preventDefault();
+      // Build a synthetic .url file (Windows InternetShortcut format)
+      const body = `[InternetShortcut]\nURL=${url}\n`;
+      file = new File([body], 'dropped-link-' + Date.now() + '.url', { type: 'text/uri-list' });
+    }
+    if (!file) return;
     const isPdf = /pdf$/i.test(file.type) || /\.pdf$/i.test(file.name);
     const isMsg = /\.msg$/i.test(file.name) || /vnd\.ms-outlook/i.test(file.type || '');
     const isSpreadsheet = /\.(xlsx|xlsm|xls|csv|tsv)$/i.test(file.name) ||
