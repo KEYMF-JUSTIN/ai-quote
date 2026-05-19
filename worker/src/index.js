@@ -96,6 +96,19 @@ export default {
         return jsonResponse(result, 200, env, origin);
       }
 
+      // POST /api/claude/parse-cart
+      // Shopping-cart import. User pastes the contents of a supplier's
+      // cart (text copy/paste, page screenshot, or saved PDF) — Worker
+      // hands it to Claude which extracts an array of line items
+      // (part #, description, qty, price, pack info). Frontend then
+      // creates one Purchased part per line. Works for McMaster, MSC,
+      // Misumi, Grainger, KBC, etc. — any supplier.
+      if (request.method === 'POST' && path === '/api/claude/parse-cart') {
+        const body = await request.json();
+        const result = await handleParseCart(env, body);
+        return jsonResponse(result, 200, env, origin);
+      }
+
       return errorResponse(`Not found: ${request.method} ${path}`, 404, env, origin);
     } catch (err) {
       console.error('worker error', err && err.stack || err);
@@ -917,6 +930,95 @@ async function handleExtractPart(env, body) {
     model: body.model || env.CLAUDE_MODEL,
     max_tokens: 1024,
   });
+  return {
+    parsed: result.data,
+    model: result.model,
+    usage: result.usage,
+  };
+}
+
+// =================================================================
+// /api/claude/parse-cart
+// User pastes / drops their supplier cart contents (text, screenshot,
+// or PDF) — we ask Claude to identify the supplier and extract every
+// line item. Frontend creates one Purchased part per line.
+// Works for any supplier; the schema is designed around catalog parts
+// with part #, qty, and price.
+//
+// Input  : { text?: string, attachments?: [{name, mimeType, data}], hint?: string }
+// Output : { parsed: { supplier, items: [{ partNum, description, qty, price, priceUnit, packSize, ... }] }, model, usage }
+// =================================================================
+async function handleParseCart(env, body) {
+  if (!body || typeof body !== 'object') throw badRequest('Body must be JSON');
+  const attachments = Array.isArray(body.attachments) ? body.attachments : [];
+  const text = (body.text || '').toString().slice(0, 50000);
+  const hint = (body.hint || '').toString().slice(0, 500);
+  if (attachments.length === 0 && !text.trim()) {
+    throw badRequest('Paste cart text OR attach a screenshot/PDF.');
+  }
+
+  const tool = {
+    name: 'submit_cart_items',
+    description: 'Submit the array of cart line items extracted from the supplier cart screenshot/text/PDF. One object per row in the cart. Skip any rows you cannot read cleanly.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        supplier: {
+          type: 'string',
+          description: 'Identified supplier name (McMaster-Carr, MSC Industrial, Misumi, Grainger, Travers Tool, KBC Tools, Fastenal, etc.). "Unknown" if not identifiable from layout/logo.',
+        },
+        currency: { type: 'string', description: 'Currency code: USD, CAD, EUR. Default USD.' },
+        items: {
+          type: 'array',
+          description: 'One entry per line item in the cart. ORDER matters — preserve cart row order.',
+          items: {
+            type: 'object',
+            properties: {
+              partNum:     { type: 'string', description: 'Supplier part number / SKU.' },
+              description: { type: 'string', description: 'Full product description as shown on the cart row.' },
+              qty:         { type: 'number', description: 'Quantity ordered. Default 1 if blank.' },
+              price:       { type: 'number', description: 'Catalog price for the cart line — could be $/each or $/pack depending on how the cart shows it.' },
+              priceUnit:   { type: 'string', enum: ['each','pack','per100','per_foot','per_lb','unknown'], description: 'How the price is denominated. Many catalog carts show "per pack" pricing.' },
+              packSize:    { type: 'number', description: 'Pack quantity if price is per pack (e.g. 50 if "$8.45 per pack of 50").' },
+              extendedPrice: { type: 'number', description: 'Line total as shown ($/unit × qty). Useful for cross-checking math.' },
+              vendorUrl:   { type: 'string', description: 'URL of this line if visible (link from cart row to product page).' },
+            },
+          },
+        },
+      },
+      required: ['items'],
+    },
+  };
+
+  const contentBlocks = [{
+    type: 'text',
+    text: [
+      'You are reading the contents of a supplier shopping cart from a precision-machining shop. They pasted/dropped their cart page and want each line item turned into a structured object.',
+      '',
+      hint ? `User hint: ${hint}` : '',
+      '',
+      text ? `PASTED TEXT (may be copy-paste from the cart page):\n----\n${text}\n----` : 'No pasted text — read from the attached image/PDF.',
+      '',
+      'CRITICAL:',
+      '  - For any field you cannot see clearly, OMIT it (do NOT write "null" or "N/A" as a string).',
+      '  - Preserve the row ORDER of the cart.',
+      '  - If a row is duplicated (same part appearing twice), include both — qty is per-row.',
+      '  - Skip header rows / totals rows / footer marketing. Only include actual cart line items.',
+      '  - Identify the supplier from the logo / page layout / column structure if possible.',
+    ].filter(Boolean).join('\n'),
+  }];
+  for (const att of attachments) {
+    const block = attachmentToContentBlock(att);
+    if (block) contentBlocks.push(block);
+  }
+
+  const result = await extractWithTool(env, {
+    tool,
+    content: contentBlocks,
+    model: body.model || env.CLAUDE_MODEL,
+    max_tokens: 4096,
+  });
+
   return {
     parsed: result.data,
     model: result.model,

@@ -769,7 +769,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '8.14.0';
+const APP_VERSION = '8.15.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -1005,6 +1005,7 @@ const state = {
     expandedNotes: {},          // v8.6: per-entity collapsible state for notes — keyed `${entityType}:${entityId}` → true when expanded. Empty notes show as a "+ Add note" link; non-empty notes show as a collapsed preview that expands on click.
     expandedOneDrive: {},       // v8.6: per-customer collapsible state for the OneDrive config block — keyed customerId → true when expanded.
     mcMasterAddPrompt: null,    // v8.14: { input, loading, error } when the "+ Add McMaster Part" modal is open. Submitting auto-creates a Purchased part + fires the McMaster lookup.
+    cartImport: null,           // v8.15: { text, attachments, parsed, loading, error } when the "🛒 From Cart" modal is open. Parsed.items[] is reviewed then bulk-imported as Purchased parts.
     wizardMode: true,           // v8.10: wizard is now the ONLY quote view (classic killed). Flag kept in state for any legacy code paths that reference it; renderQuote() no longer branches on it.
     wizardStep: {},             // v8.0: keyed partId → step index. Tracks where in the wizard each part is, so switching chips remembers your spot.
     trainingPicker: null,       // v7.62: { entityType, entityId, sampleId?, file?, parsed?, docType, notes, error, loading } for the training sample editor
@@ -1664,6 +1665,7 @@ function closeAllModals() {
   state.ui.iconPicker = null;       // v7.74
   state.ui.colorPicker = null;      // v8.4 (already added but listed here so closeAllModals clears it)
   state.ui.mcMasterAddPrompt = null; // v8.14
+  state.ui.cartImport = null;       // v8.15
   state.ui.mcMasterPaste = null;
   state.ui.missingCustFolder = null;
   state.ui.inviteDialog = null;
@@ -6108,6 +6110,7 @@ function render() {
   renderIconPickerModal();      // v7.74
   renderColorPickerModal();     // v8.4
   renderMcMasterAddPromptModal(); // v8.14
+  renderCartImportModal();        // v8.15
   renderVendorWizardModal();    // v7.68
   renderCustomerWizardModal();  // v7.68
   renderTrainingModal();
@@ -12803,6 +12806,15 @@ function renderQuoteWizardChipRow(q) {
       <div style="display:flex; gap:8px; align-items:stretch; flex-wrap:wrap;">
         ${chips || '<span class="text-mute small" style="align-self:center;">No parts yet</span>'}
         <div style="margin-left:auto; display:flex; gap:8px; align-self:stretch;">
+          <!-- v8.15: import from supplier cart. Paste/screenshot cart →
+               Claude reads line items → bulk-creates Purchased parts. -->
+          <button class="btn" style="padding:10px 16px; min-height:80px; background:#FFFFFF; border:2px solid var(--line-dark); display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; cursor:pointer;"
+                  onclick="App.openCartImport()"
+                  onmouseover="this.style.borderColor='#16A34A';" onmouseout="this.style.borderColor='var(--line-dark)';"
+                  title="Paste or screenshot your supplier shopping cart — Claude reads every line and adds them as Purchased parts at once">
+            <span style="font-size:26px; line-height:1;">🛒</span>
+            <span style="font-size:11px; color:var(--text-mute); font-weight:600;">From Cart</span>
+          </button>
           <!-- v8.14: McMaster quick-add — bypass the part-type picker.
                Click → paste URL/part# modal → fetch → create Purchased part
                with everything pre-filled in one shot. Mustard "M" badge
@@ -14612,6 +14624,150 @@ function renderMcMasterAddPromptModal() {
       </div>
     </div>
   `;
+}
+
+// v8.15: Cart import modal. User pastes supplier cart contents (text,
+// screenshot, or PDF). Worker hands to Claude → returns supplier name +
+// array of line items. User reviews the parsed table, optionally
+// unchecks rows they don't want, clicks "Import N items" → one Purchased
+// part per line gets added to the quote.
+function renderCartImportModal() {
+  let host = document.getElementById('cart-import-host');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'cart-import-host';
+    document.body.appendChild(host);
+  }
+  const ci = state.ui.cartImport;
+  if (!ci) { host.innerHTML = ''; return; }
+  const loading = !!ci.loading;
+  const error = ci.error || '';
+  const text = ci.text || '';
+  const attCount = (ci.attachments || []).length;
+  const parsed = ci.parsed || null;
+  const items = (parsed && Array.isArray(parsed.items)) ? parsed.items : [];
+  const skipIdx = new Set(ci.skipIdx || []);
+
+  // Two phases: BEFORE parse (input view) vs AFTER parse (review view)
+  const inputView = !parsed;
+
+  host.innerHTML = `
+    <div class="modal-backdrop" onclick="App.closeCartImport()">
+      <div class="modal" style="width:760px; max-width:96vw; max-height:90vh; display:flex; flex-direction:column;" onclick="event.stopPropagation()">
+        <div class="modal-header" style="display:flex; align-items:center; gap:10px;">
+          <span style="font-size:22px;">🛒</span>
+          <span>${inputView ? 'Import from supplier cart' : `Review · ${items.length} items from ${esc((parsed && parsed.supplier) || 'cart')}`}</span>
+        </div>
+        <div class="modal-body" style="overflow-y:auto;">
+          ${inputView ? `
+            <p class="text-mute small" style="margin:0 0 12px;">
+              Open your supplier's cart page → <strong>Ctrl+A → Ctrl+C</strong> → paste below.
+              Or take a screenshot (<strong>Win+Shift+S</strong>) and paste/drop it. Or drop a saved PDF.
+              Claude will read it and turn every line into a Purchased part on this quote.
+            </p>
+            <label class="small" style="font-weight:600; color:var(--steel);">Paste cart text</label>
+            <textarea id="cart-import-text" placeholder="Paste the cart contents here…"
+                      oninput="App.setCartImportText(this.value)"
+                      style="width:100%; min-height:120px; font-family:var(--font-mono); font-size:12px; padding:8px; margin-top:4px;"
+                      ${loading?'disabled':''}>${esc(text)}</textarea>
+            <div style="margin-top:10px;">
+              <label class="small" style="font-weight:600; color:var(--steel);">Or attach a screenshot / PDF</label>
+              <div style="border:2px dashed var(--orange); background:#FFF7ED; padding:14px; margin-top:4px; border-radius:5px; text-align:center; cursor:pointer;"
+                   onclick="document.getElementById('cart-import-file').click()">
+                <span style="font-size:32px;">📎</span>
+                <div style="font-size:12px; color:var(--orange); font-weight:600; margin-top:6px;">
+                  ${attCount > 0 ? `${attCount} attached · click to add more` : 'Click to choose a file · or paste an image directly (Ctrl+V)'}
+                </div>
+                ${attCount > 0 ? `<div class="text-mute small" style="margin-top:4px;">${(ci.attachments || []).map(a => esc(a.name)).join(' · ')}</div>` : ''}
+                <input type="file" id="cart-import-file" style="display:none;" accept="image/*,application/pdf"
+                       onchange="if(this.files[0]){App.addCartImportFile(this.files[0]); this.value='';}">
+              </div>
+              <div class="hint" style="margin-top:4px;">Tip: a screenshot of the full cart page works great. You don't need to copy text separately if the image is clear.</div>
+            </div>
+            ${loading ? `
+              <div style="margin-top:14px; padding:10px 14px; background:#FFF7ED; border:1px solid #FED7AA; border-radius:4px; font-size:12px; color:var(--orange);">
+                ⏳ Reading cart with Claude… (~10–25s depending on cart size)
+              </div>
+            ` : error ? `
+              <div style="margin-top:14px; padding:10px 14px; background:#FDEDEA; border:1px solid #FCA5A5; border-radius:4px; font-size:12px; color:#991B1B;">
+                ⚠ ${esc(error)}
+              </div>
+            ` : ''}
+          ` : `
+            <p class="text-mute small" style="margin:0 0 12px;">
+              Claude found <strong>${items.length}</strong> line item${items.length===1?'':'s'} from <strong>${esc(parsed.supplier || 'the cart')}</strong>.
+              Uncheck any rows you don't want, then click <strong>Import ${items.length - skipIdx.size} items</strong>.
+            </p>
+            <div style="max-height:50vh; overflow-y:auto; border:1px solid var(--line); border-radius:4px;">
+              <table class="tbl" style="margin:0; font-size:12px;">
+                <thead style="position:sticky; top:0; background:var(--bg); z-index:1;">
+                  <tr>
+                    <th style="width:30px;"><input type="checkbox" ${skipIdx.size === 0 ? 'checked' : ''} onchange="App.cartImportToggleAll(this.checked)" title="Toggle all"></th>
+                    <th style="width:100px;">Part #</th>
+                    <th>Description</th>
+                    <th class="num" style="width:50px;">Qty</th>
+                    <th class="num" style="width:80px;">Price</th>
+                    <th style="width:50px;">Unit</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${items.map((it, i) => {
+                    const skip = skipIdx.has(i);
+                    return `
+                      <tr style="${skip ? 'opacity:0.4;' : ''}">
+                        <td><input type="checkbox" ${skip?'':'checked'} onchange="App.cartImportToggleItem(${i}, this.checked)"></td>
+                        <td><span class="mono">${esc(it.partNum || '(no #)')}</span></td>
+                        <td>${esc(it.description || '')}</td>
+                        <td class="num">${esc(String(it.qty != null ? it.qty : 1))}</td>
+                        <td class="num">${it.price != null ? fmtMoney(it.price) : '—'}</td>
+                        <td>${esc(it.priceUnit || 'each')}${it.packSize ? ` /${it.packSize}` : ''}</td>
+                      </tr>
+                    `;
+                  }).join('')}
+                </tbody>
+              </table>
+            </div>
+            <div class="hint" style="margin-top:8px;">
+              💡 After import: each line becomes a Purchased part on your quote with part #, description, price, vendor link, and pack info pre-filled. You can edit/delete any of them via the parts chip row.
+            </div>
+          `}
+        </div>
+        <div class="modal-footer">
+          <button class="btn" onclick="App.closeCartImport()" ${loading?'disabled':''}>Cancel</button>
+          ${inputView ? `
+            <button class="btn btn-primary" onclick="App.submitCartImport()" ${loading || (!text.trim() && attCount === 0) ? 'disabled' : ''}>
+              ${loading ? 'Reading…' : '🔍 Parse cart →'}
+            </button>
+          ` : `
+            <button class="btn" onclick="App.cartImportBackToInput()">← Back to input</button>
+            <button class="btn btn-primary" onclick="App.applyCartImport()" ${(items.length - skipIdx.size) === 0 ? 'disabled' : ''}>
+              ✓ Import ${items.length - skipIdx.size} items
+            </button>
+          `}
+        </div>
+      </div>
+    </div>
+  `;
+  // Wire paste handler on the textarea so Ctrl+V of an image is captured
+  if (inputView) {
+    setTimeout(() => {
+      const ta = document.getElementById('cart-import-text');
+      if (ta && !ta._pasteWired) {
+        ta._pasteWired = true;
+        ta.addEventListener('paste', (e) => {
+          const items = (e.clipboardData && e.clipboardData.items) || [];
+          for (const item of items) {
+            if (item.type && item.type.startsWith('image/')) {
+              e.preventDefault();
+              const file = item.getAsFile();
+              if (file) App.addCartImportFile(file);
+              return;
+            }
+          }
+        });
+      }
+    }, 50);
+  }
 }
 
 // v7.68: VENDOR + CUSTOMER WIZARDS — step-by-step add flow.
@@ -20276,6 +20432,161 @@ const App = {
       logActivity('Added McMaster part', np.partNum || '?', `via quick-add · ${parsed.priceUnit || 'each'} · ${url}`);
     });
     showToast(`✨ Added McMaster ${parsed.partNum || '(?)'} as a Purchased part.`, 4500);
+  },
+
+  // v8.15: Cart import — paste/screenshot cart → Claude reads → bulk
+  // import as Purchased parts.
+  openCartImport() {
+    update(s => { s.ui.cartImport = { text:'', attachments:[], parsed:null, loading:false, error:'', skipIdx:[] }; });
+  },
+  closeCartImport() {
+    update(s => { s.ui.cartImport = null; });
+  },
+  setCartImportText(text) {
+    if (!state.ui.cartImport) return;
+    state.ui.cartImport.text = text;
+    // No render — let textarea value flow normally
+  },
+  async addCartImportFile(file) {
+    if (!state.ui.cartImport || !file) return;
+    if (file.size > 5 * 1024 * 1024) {
+      alert(`File too big (${Math.round(file.size/1024/1024*10)/10} MB). Max 5 MB per attachment for cart import.`);
+      return;
+    }
+    let data;
+    try {
+      data = await blobToBase64(file);
+    } catch (e) {
+      alert('Could not read file: ' + (e.message || e));
+      return;
+    }
+    update(s => {
+      if (!s.ui.cartImport) return;
+      if (!Array.isArray(s.ui.cartImport.attachments)) s.ui.cartImport.attachments = [];
+      s.ui.cartImport.attachments.push({
+        name: file.name || `pasted-${Date.now()}.png`,
+        mimeType: file.type || 'application/octet-stream',
+        data,
+      });
+    });
+  },
+  async submitCartImport() {
+    const ci = state.ui.cartImport;
+    if (!ci) return;
+    const text = (ci.text || '').trim();
+    const atts = ci.attachments || [];
+    if (!text && atts.length === 0) return;
+    ci.loading = true;
+    ci.error = '';
+    render();
+    try {
+      const res = await workerCall('/api/claude/parse-cart', { text, attachments: atts }, { timeoutMs: 60000 });
+      const ci2 = state.ui.cartImport;
+      if (!ci2) return; // modal closed mid-flight
+      const parsed = res.parsed || {};
+      const items = Array.isArray(parsed.items) ? parsed.items : [];
+      if (items.length === 0) {
+        ci2.loading = false;
+        ci2.error = 'Claude couldn\'t find any line items. Check that the paste/screenshot actually shows cart rows (part #, qty, price columns).';
+        render();
+        return;
+      }
+      ci2.parsed = parsed;
+      ci2.skipIdx = [];
+      ci2.loading = false;
+      render();
+    } catch (e) {
+      const ci2 = state.ui.cartImport;
+      if (ci2) {
+        ci2.loading = false;
+        ci2.error = (e && e.message) ? e.message : String(e);
+        render();
+      }
+    }
+  },
+  cartImportBackToInput() {
+    update(s => {
+      if (!s.ui.cartImport) return;
+      s.ui.cartImport.parsed = null;
+      s.ui.cartImport.skipIdx = [];
+      s.ui.cartImport.error = '';
+    });
+  },
+  cartImportToggleItem(i, include) {
+    const ci = state.ui.cartImport;
+    if (!ci) return;
+    if (!Array.isArray(ci.skipIdx)) ci.skipIdx = [];
+    const idx = ci.skipIdx.indexOf(i);
+    if (include) {
+      if (idx >= 0) ci.skipIdx.splice(idx, 1);
+    } else {
+      if (idx < 0) ci.skipIdx.push(i);
+    }
+    render();
+  },
+  cartImportToggleAll(includeAll) {
+    const ci = state.ui.cartImport;
+    if (!ci || !ci.parsed || !Array.isArray(ci.parsed.items)) return;
+    if (includeAll) {
+      ci.skipIdx = [];
+    } else {
+      ci.skipIdx = ci.parsed.items.map((_, i) => i);
+    }
+    render();
+  },
+  applyCartImport() {
+    const ci = state.ui.cartImport;
+    if (!ci || !ci.parsed) return;
+    const items = (ci.parsed.items || []).filter((_, i) => !(ci.skipIdx || []).includes(i));
+    if (items.length === 0) return;
+    const supplier = ci.parsed.supplier || '';
+    const isMeaningful = (v) => this._isMeaningfulValue(v);
+    // Try to auto-link vendor if we recognize the supplier name
+    let vendorIdGuess = null;
+    if (supplier && typeof findVendorByName === 'function') {
+      const existing = findVendorByName(supplier);
+      if (existing) vendorIdGuess = existing.id;
+    }
+    let added = 0;
+    update(s => {
+      const q = s.quotes.find(qq => qq.id === s.ui.activeQuoteId);
+      if (!q) return;
+      let lastNewId = null;
+      items.forEach((it) => {
+        const np = newPart({ typeId: 'purchased' });
+        if (isMeaningful(it.partNum))     np.partNum = it.partNum;
+        if (isMeaningful(it.description)) np.description = it.description;
+        // Qty tier
+        if (isMeaningful(it.qty) && it.qty > 0) np.qtyTiers = [num(it.qty)];
+        // Material cost
+        np.materialCost = { perPiece: [null], perBar: null, perSheet: null, vendorId: vendorIdGuess || null, vendorPartNum: '', vendorUrl: '', isComponent: false };
+        if (isMeaningful(it.partNum)) np.materialCost.vendorPartNum = it.partNum;
+        if (isMeaningful(it.vendorUrl)) np.materialCost.vendorUrl = it.vendorUrl;
+        if (it.price != null && isFinite(it.price) && it.price > 0) {
+          if (it.priceUnit === 'pack' && it.packSize > 0) {
+            np.materialCost.isComponent = true;
+            np.materialCost.packSize = num(it.packSize);
+            np.materialCost.perPack = num(it.price);
+          } else {
+            np.materialCost.isComponent = false;
+            np.materialCost.perPiece = [num(it.price)];
+          }
+        }
+        // Source-tag in notes so the audit trail is clear
+        np.notes = `[Imported from ${supplier || 'cart'} ${new Date().toISOString().slice(0,10)}]`;
+        q.parts.push(np);
+        added++;
+        lastNewId = np.id;
+      });
+      // Make the LAST imported part active so user can review
+      if (lastNewId) {
+        if (!s.ui.activePartIdForInfo) s.ui.activePartIdForInfo = {};
+        s.ui.activePartIdForInfo[q.id] = lastNewId;
+      }
+      logActivity('Imported cart items', supplier || 'unknown supplier', `${added} part${added===1?'':'s'} added`);
+      s.ui.cartImport = null;
+    });
+    showToast(`✨ Imported ${added} item${added===1?'':'s'} from ${supplier || 'cart'} as Purchased parts.`, 5000);
   },
 
   // v8.14: Purchased-step pricing mode toggle (per-pack vs per-each)
