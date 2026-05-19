@@ -769,7 +769,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '8.8.1';
+const APP_VERSION = '8.9.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -1406,10 +1406,12 @@ function migrateState() {
         // Older imports didn't include one — backfill here.
         if (!m.id) m.id = uid();
       });
-      // v8.8: seed G-10 / GPO-3 / G-11 if missing — these are the materials
-      // the shop uses for collars (picture-frame parts cut from sheet stock).
-      // Don't overwrite existing densities / vendor assignments.
+      // v8.8/v8.9: seed FR-4 / G-10 / GPO-3 / G-11 if missing — these are
+      // the phenolic materials the shop uses for collars (picture-frame
+      // parts cut from sheet stock). Don't overwrite existing densities or
+      // vendor assignments.
       const seedCollarMats = [
+        { name:'FR-4',   density:0.070, category:'plastic' },
         { name:'G-10',   density:0.069, category:'plastic' },
         { name:'GPO-3',  density:0.063, category:'plastic' },
         { name:'G-11',   density:0.070, category:'plastic' },
@@ -11944,12 +11946,12 @@ function renderSettings() {
             <div class="hint">Affects nesting math</div>
           </div>
           <div class="field"><label>Load / unload (min)</label>
-            ${bind({label:'Load/unload', value:s.collarDefaults.loadUnloadMin, type:'number', onChange:v=>{ s.collarDefaults.loadUnloadMin = num(v) || 0; }, attrs:'step="0.25" min="0"'})}
-            <div class="hint">Sheet on, sheet off</div>
+            ${bind({label:'Load/unload', value:s.collarDefaults.loadUnloadMin, type:'number', onChange:v=>{ s.collarDefaults.loadUnloadMin = num(v) || 0; }, attrs:'step="0.5" min="0"'})}
+            <div class="hint">Sheet on, sheet off · 0.5 min steps</div>
           </div>
           <div class="field"><label>Screw-down (min)</label>
-            ${bind({label:'Screw-down', value:s.collarDefaults.screwDownMin, type:'number', onChange:v=>{ s.collarDefaults.screwDownMin = num(v) || 0; }, attrs:'step="0.25" min="0"'})}
-            <div class="hint">Fixture sheet to table</div>
+            ${bind({label:'Screw-down', value:s.collarDefaults.screwDownMin, type:'number', onChange:v=>{ s.collarDefaults.screwDownMin = num(v) || 0; }, attrs:'step="0.5" min="0"'})}
+            <div class="hint">Fixture sheet to table · 0.5 min steps</div>
           </div>
           <div class="field"><label>Default sheet</label>
             <div style="display:flex; gap:6px;">
@@ -12877,7 +12879,19 @@ function renderWizardStepIdentity(q, part) {
     </div>
   `;
 }
+// v8.9: phenolic materials the shop cuts collars from. Material step on a
+// Collar part only shows these. Auto-seeded into state.settings.materials
+// by migrateState so they're always available.
+const COLLAR_PHENOLIC_NAMES = ['FR-4', 'G-10', 'GPO-3', 'G-11'];
+
 function renderWizardStepMaterial(q, part) {
+  // v8.9: Collar parts get a fully specialized Material step — phenolics
+  // only, sheet form auto-locked, 4×8 default dims, sheet-price field
+  // that drives the per-part material cost. The universal Material step
+  // below stays for every other part type.
+  if (part.typeId === 'collar') {
+    return renderWizardStepMaterialCollar(q, part);
+  }
   const materials = state.settings.materials || [];
   const grouped = groupedMaterialOptions(materials);
   const isBar = (part.stock?.form === 'Bar/Block' || part.stock?.form === 'Round');
@@ -12990,6 +13004,113 @@ function renderWizardStepDropZone(part, stepId) {
 // card renderers. The wizard just provides the step-by-step framing; the
 // actual UI for setups / DXF / tooling / weldops / finishing already exists
 // and works. No need to duplicate.
+// v8.9: shared slider-with-number-input. Wide range slider + matching
+// number input that stay in sync. The slider lets you scrub the value
+// fast; the number input lets you type a precise value. Both wire to the
+// same App.collarSetField handler.
+function renderCollarSlider(opts) {
+  const { partId, field, label, value, min, max, step, hint, unit } = opts;
+  const safeValue = (value == null || isNaN(value)) ? min : value;
+  // Generate stable ids so the slider+input can mirror each other live
+  // without a full re-render (focus stays in the number input as you type).
+  const sliderId = `collar-slider-${partId}-${field}`;
+  const inputId  = `collar-input-${partId}-${field}`;
+  return `
+    <div class="field" style="margin-bottom:14px;">
+      <label style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:4px;">
+        <span style="font-size:12px; font-weight:600; color:var(--steel); text-transform:uppercase; letter-spacing:0.06em;">${esc(label)}</span>
+        ${hint ? `<span style="font-size:10px; color:var(--text-mute); font-style:italic;">${esc(hint)}</span>` : ''}
+      </label>
+      <div style="display:flex; align-items:center; gap:12px;">
+        <input type="range" id="${sliderId}"
+               min="${min}" max="${max}" step="${step}" value="${safeValue}"
+               oninput="document.getElementById('${inputId}').value=this.value; App.collarSetField('${partId}', '${field}', this.value);"
+               style="flex:1; height:8px; min-width:200px;">
+        <input type="number" id="${inputId}"
+               value="${safeValue}" min="${min}" max="${max}" step="${step}"
+               oninput="document.getElementById('${sliderId}').value=this.value; App.collarSetField('${partId}', '${field}', this.value);"
+               style="width:90px; font-family:var(--font-mono); text-align:right; padding:5px 7px;">
+        ${unit ? `<span style="font-size:11px; color:var(--text-mute); width:30px;">${esc(unit)}</span>` : ''}
+      </div>
+    </div>
+  `;
+}
+
+// v8.9: Collar-specific Material step. Replaces the universal one when the
+// part type is 'collar'. Locks form=Sheet, defaults 4×8 dims, phenolic-only
+// material dropdown, plus a sheet-price field that drives the material-cost
+// math used downstream by Nesting/Review.
+function renderWizardStepMaterialCollar(q, part) {
+  if (!part.stock) part.stock = {};
+  if (!part.collar) part.collar = {};
+  const co = part.collar;
+  const cd = state.settings.collarDefaults || {};
+  // Lock form to Sheet and sheet dims to defaults
+  part.stock.form = 'Sheet';
+  if (co.sheetLen == null) co.sheetLen = cd.sheetLen || 96;
+  if (co.sheetWid == null) co.sheetWid = cd.sheetWid || 48;
+  // Build phenolics-only material list. If migrateState ran they're all
+  // present; defensive fallback to plain string options if not.
+  const matDb = state.settings.materials || [];
+  const phenolicMats = COLLAR_PHENOLIC_NAMES
+    .map(name => matDb.find(m => (m.name || '').toLowerCase() === name.toLowerCase()))
+    .filter(Boolean);
+  const phenolicOptions = phenolicMats.length ? phenolicMats.map(m => m.name) : COLLAR_PHENOLIC_NAMES.slice();
+  // Default material to FR-4 if blank
+  if (!part.material) part.material = 'FR-4';
+
+  // Material cost preview — sheet price ÷ parts per sheet
+  const kerf = (co.spacing != null ? co.spacing : (co.kerf != null ? co.kerf : cd.kerf)) || 0.05;
+  const nest = _calcCollarNesting(co.outsideLen || 30, co.outsideWid || 10, co.sheetLen, co.sheetWid, kerf);
+  const sheetPrice = num(co.sheetPrice);
+  const matPerPart = nest.count > 0 && sheetPrice > 0 ? sheetPrice / nest.count : 0;
+
+  return `
+    <div style="padding:10px 12px; background:#F0F9FF; border-left:3px solid var(--blue); border-radius:3px; font-size:12px; margin-bottom:14px;">
+      🖼 <strong>Collar material step</strong> — phenolic sheet stock only. Sheet form locked, length/width auto-set to ${co.sheetLen}×${co.sheetWid}" (override on the Nesting step if you need a 5×10).
+    </div>
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:18px;">
+      <div>
+        <h3 style="font-size:13px; color:var(--steel); margin:0 0 10px;">Phenolic material</h3>
+        <div class="field" style="margin-bottom:14px;"><label>Material</label>
+          ${bind({label:'Material', value:part.material, type:'select', options: phenolicOptions, onChange:v=>{ part.material = v || 'FR-4'; }})}
+          <div class="hint">FR-4 default. GPO-3 / G-10 / G-11 are the other phenolic stocks we cut collars from.</div>
+        </div>
+        <div class="field" style="margin-bottom:14px;"><label>Sheet thickness (in)</label>
+          ${bind({label:'Thickness', value:part.stock.thickness, type:'number', onChange:v=>{ part.stock.thickness = v; }, attrs:'step="0.0625" min="0.001"', placeholder:'e.g. 0.500'})}
+          <div class="hint">Drives the # of passes math on the Cut Time step.</div>
+        </div>
+        <div class="field"><label>Notes</label>
+          ${bind({label:'Material notes', value:part.materialNotes, onChange:v=>{ part.materialNotes = v; }, placeholder:'Cert required? Customer-supplied?'})}
+        </div>
+      </div>
+      <div>
+        <h3 style="font-size:13px; color:var(--steel); margin:0 0 10px;">Sheet cost</h3>
+        <div class="field" style="margin-bottom:14px;"><label>Sheet price ($/sheet)</label>
+          ${bind({label:'Sheet price', value:co.sheetPrice, type:'number', onChange:v=>{ co.sheetPrice = v; }, attrs:'step="1" min="0"', placeholder:'e.g. 285'})}
+          <div class="hint">Cost of one 4×8 sheet of the material above. Used to compute per-part material cost.</div>
+        </div>
+        <div style="padding:14px; background:var(--paper); border:1px solid var(--line); border-radius:4px;">
+          <div style="font-size:11px; color:var(--text-mute); text-transform:uppercase; letter-spacing:0.06em; font-weight:700;">Material cost / part</div>
+          <div style="font-size:28px; font-weight:700; color:#0891B2; margin-top:4px; line-height:1;">
+            ${matPerPart > 0 ? fmtMoney(matPerPart) : '—'}
+          </div>
+          <div class="text-mute small" style="margin-top:6px;">
+            ${sheetPrice > 0 && nest.count > 0
+              ? `<span class="mono">${fmtMoney(sheetPrice)} / sheet ÷ ${nest.count} parts/sheet</span>`
+              : sheetPrice === 0
+                ? 'Set a sheet price above to compute per-part cost'
+                : 'Set outside dims on Nesting step to compute parts/sheet'}
+          </div>
+        </div>
+        <div style="margin-top:10px; padding:10px 12px; background:#FFF7ED; border:1px solid #FED7AA; border-radius:3px; font-size:11px; color:var(--text-mute);">
+          💡 The Nesting step uses these dims + the sheet price to show "X sheets needed × $/sheet" for the full quote quantity.
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 function renderWizardStepSetups(q, part) {
   const machineOpts = state.settings.rates.map(r => r.name);
   return `
@@ -13072,6 +13193,79 @@ function _renderNestingSVG(nest, sheetLen, sheetWid, frameWidth, color) {
 // outside dims + frame border width + pick the sheet size, see how many
 // parts fit per sheet (live SVG + count), and see how many sheets are
 // needed for the desired quantity.
+// v8.9: render a stable live-readout container for the right column.
+// App.collarSetField rewrites only this element on slider drag, so the
+// slider's own DOM state isn't disturbed (cursor / drag focus preserved).
+function renderCollarLiveReadout(part) {
+  const el = document.getElementById('collar-live-readout-' + part.id);
+  if (!el) return;
+  el.innerHTML = _collarLiveReadoutHtml(part);
+}
+function _collarLiveReadoutHtml(part) {
+  const co = part.collar || {};
+  const cd = state.settings.collarDefaults || {};
+  const sheetLen = co.sheetLen != null ? num(co.sheetLen) : (cd.sheetLen || 96);
+  const sheetWid = co.sheetWid != null ? num(co.sheetWid) : (cd.sheetWid || 48);
+  // v8.9: 'spacing' is the user-facing name; legacy `kerf` still read as fallback for old data
+  const spacing = co.spacing != null ? num(co.spacing)
+                 : co.kerf != null ? num(co.kerf)
+                 : (cd.kerf || 0.05);
+  const oL = co.outsideLen != null ? num(co.outsideLen) : 30;
+  const oW = co.outsideWid != null ? num(co.outsideWid) : 10;
+  const fw = co.frameWidth != null ? num(co.frameWidth) : 2;
+  const nest = _calcCollarNesting(oL, oW, sheetLen, sheetWid, spacing);
+  const partType = (state.settings.partTypes || []).find(t => t.id === 'collar') || { color: '#0891B2' };
+  const qty = (part.qtyTiers && part.qtyTiers[0]) || 1;
+  const sheetsNeeded = nest.count > 0 ? Math.ceil(qty / nest.count) : 0;
+  const sheetPrice = num(co.sheetPrice);
+  const matPerPart = nest.count > 0 && sheetPrice > 0 ? sheetPrice / nest.count : 0;
+  const totalMatCost = sheetsNeeded * sheetPrice;
+  return `
+    <h3 style="font-size:13px; color:var(--steel); margin:0 0 10px;">Nesting result · live</h3>
+    <div style="padding:14px; background:var(--paper); border:1px solid var(--line); border-radius:4px;">
+      <div style="font-size:36px; font-weight:700; color:${partType.color}; line-height:1;">
+        ${nest.count}
+        <span style="font-size:14px; color:var(--text-mute); font-weight:400; margin-left:6px;">parts / sheet</span>
+      </div>
+      <div class="text-mute small" style="margin-top:6px;">
+        ${nest.cols} cols × ${nest.rows} rows${nest.rotated ? ' · <span style="color:var(--orange); font-weight:600;">rotated 90°</span>' : ''}
+      </div>
+      <div style="margin-top:14px; padding-top:10px; border-top:1px dashed var(--line);">
+        <div style="display:flex; justify-content:space-between; font-size:13px; padding:2px 0;">
+          <span>Qty wanted</span><strong class="mono">${qty}</strong>
+        </div>
+        <div style="display:flex; justify-content:space-between; font-size:13px; padding:2px 0;">
+          <span>Sheets needed</span><strong class="mono" style="color:${partType.color};">${sheetsNeeded}</strong>
+        </div>
+        <div style="display:flex; justify-content:space-between; font-size:11px; padding:2px 0; color:var(--text-mute);">
+          <span>Spare slots (last sheet)</span><span class="mono">${nest.count > 0 ? (sheetsNeeded * nest.count - qty) : '—'}</span>
+        </div>
+        ${sheetPrice > 0 ? `
+        <div style="margin-top:8px; padding-top:8px; border-top:1px dashed var(--line);">
+          <div style="display:flex; justify-content:space-between; font-size:12px; padding:2px 0;">
+            <span>Sheet price</span><span class="mono">${fmtMoney(sheetPrice)}</span>
+          </div>
+          <div style="display:flex; justify-content:space-between; font-size:12px; padding:2px 0;">
+            <span>Material / part</span><span class="mono">${fmtMoney(matPerPart)}</span>
+          </div>
+          <div style="display:flex; justify-content:space-between; font-size:13px; padding:2px 0; color:var(--orange); font-weight:700;">
+            <span>Total material cost</span><span class="mono">${fmtMoney(totalMatCost)}</span>
+          </div>
+        </div>` : `
+        <div style="margin-top:8px; padding:6px 10px; background:var(--bg); border-radius:3px; font-size:11px; color:var(--text-mute);">
+          Set sheet price on the Material step to see total material cost.
+        </div>`}
+      </div>
+    </div>
+    <div style="margin-top:14px;">
+      <div class="text-mute small" style="margin-bottom:4px;">Visual layout — 1 sheet, scaled to fit:</div>
+      ${nest.count > 0
+        ? _renderNestingSVG(nest, sheetLen, sheetWid, fw, partType.color)
+        : `<div style="padding:14px; background:#FDEDEA; border:1px dashed #C73E1D; border-radius:3px; color:#C73E1D; font-size:12px;">⚠ This collar doesn't fit on the selected sheet. Try a larger sheet (5×10) or smaller dims.</div>`}
+    </div>
+  `;
+}
+
 function renderWizardStepCollarNesting(q, part) {
   if (!part.collar) part.collar = {};
   const co = part.collar;
@@ -13081,37 +13275,24 @@ function renderWizardStepCollarNesting(q, part) {
   const cd = state.settings.collarDefaults || {};
   const sheetLen = co.sheetLen != null ? co.sheetLen : cd.sheetLen;
   const sheetWid = co.sheetWid != null ? co.sheetWid : cd.sheetWid;
-  const kerf = (co.kerf != null ? co.kerf : cd.kerf) || 0.05;
-  const nest = _calcCollarNesting(co.outsideLen, co.outsideWid, sheetLen, sheetWid, kerf);
-  const partType = (state.settings.partTypes || []).find(t => t.id === 'collar') || { color: '#0891B2' };
-  // Desired qty — pull primary qty tier for "sheets needed" math
-  const qty = (part.qtyTiers && part.qtyTiers[0]) || 1;
-  const sheetsNeeded = nest.count > 0 ? Math.ceil(qty / nest.count) : 0;
+  // v8.9: renamed kerf → spacing (user-facing). Legacy co.kerf still read
+  // as a fallback for old data.
+  const spacing = co.spacing != null ? co.spacing
+                 : co.kerf != null ? co.kerf
+                 : (cd.kerf || 0.05);
+  // Migrate legacy kerf field once
+  if (co.spacing == null && co.kerf != null) co.spacing = co.kerf;
   const presets = cd.sheetPresets || [];
   return `
     <div style="display:grid; grid-template-columns:1fr 1fr; gap:18px;">
       <div>
-        <h3 style="font-size:13px; color:var(--steel); margin:0 0 10px;">Collar geometry</h3>
-        <div class="row" style="gap:10px;">
-          <div class="field" style="flex:1;"><label>Outside length (in)</label>
-            ${bind({label:'Outside length', value:co.outsideLen, type:'number', onChange:v=>{ co.outsideLen = v; }, attrs:'step="0.25" min="0"'})}
-          </div>
-          <div class="field" style="flex:1;"><label>Outside width (in)</label>
-            ${bind({label:'Outside width', value:co.outsideWid, type:'number', onChange:v=>{ co.outsideWid = v; }, attrs:'step="0.25" min="0"'})}
-          </div>
-        </div>
-        <div class="row" style="gap:10px; margin-top:8px;">
-          <div class="field" style="flex:1;"><label>Frame border width (in)</label>
-            ${bind({label:'Frame width', value:co.frameWidth, type:'number', onChange:v=>{ co.frameWidth = v; }, attrs:'step="0.125" min="0"'})}
-            <div class="hint">Width of the picture-frame border (≈ 2" default)</div>
-          </div>
-          <div class="field" style="flex:1;"><label>Kerf (in)</label>
-            ${bind({label:'Kerf', value:kerf, type:'number', onChange:v=>{ co.kerf = v; }, attrs:'step="0.005" min="0"'})}
-            <div class="hint">Cutter thickness, eats into nesting</div>
-          </div>
-        </div>
+        <h3 style="font-size:13px; color:var(--steel); margin:0 0 14px;">Collar geometry</h3>
+        ${renderCollarSlider({partId:part.id, field:'outsideLen', label:'Outside length', value:co.outsideLen, min:1, max:96, step:0.25, unit:'in'})}
+        ${renderCollarSlider({partId:part.id, field:'outsideWid', label:'Outside width', value:co.outsideWid, min:1, max:48, step:0.25, unit:'in'})}
+        ${renderCollarSlider({partId:part.id, field:'frameWidth', label:'Frame border width', value:co.frameWidth, min:0.125, max:6, step:0.125, hint:'picture-frame border (~2" typical)', unit:'in'})}
+        ${renderCollarSlider({partId:part.id, field:'spacing', label:'Part-to-part spacing', value:spacing, min:0, max:1, step:0.005, hint:'gap between adjacent parts (formerly kerf)', unit:'in'})}
 
-        <h3 style="font-size:13px; color:var(--steel); margin:14px 0 10px;">Sheet size</h3>
+        <h3 style="font-size:13px; color:var(--steel); margin:18px 0 10px;">Sheet size</h3>
         <div class="row" style="gap:6px; flex-wrap:wrap; margin-bottom:8px;">
           ${presets.map(p => {
             const on = (sheetLen === p.len && sheetWid === p.wid);
@@ -13131,38 +13312,8 @@ function renderWizardStepCollarNesting(q, part) {
         </div>
       </div>
 
-      <div>
-        <h3 style="font-size:13px; color:var(--steel); margin:0 0 10px;">Nesting result</h3>
-        <div style="padding:14px; background:var(--paper); border:1px solid var(--line); border-radius:4px;">
-          <div style="font-size:32px; font-weight:700; color:${partType.color}; line-height:1;">
-            ${nest.count}
-            <span style="font-size:14px; color:var(--text-mute); font-weight:400; margin-left:6px;">parts / sheet</span>
-          </div>
-          <div class="text-mute small" style="margin-top:6px;">
-            ${nest.cols} cols × ${nest.rows} rows${nest.rotated ? ' · <span style="color:var(--orange); font-weight:600;">rotated 90°</span>' : ''}
-          </div>
-          <div style="margin-top:14px; padding-top:10px; border-top:1px dashed var(--line);">
-            <div style="display:flex; justify-content:space-between; font-size:13px; padding:2px 0;">
-              <span>Qty wanted</span><strong class="mono">${qty}</strong>
-            </div>
-            <div style="display:flex; justify-content:space-between; font-size:13px; padding:2px 0;">
-              <span>Sheets needed</span><strong class="mono" style="color:${partType.color};">${sheetsNeeded}</strong>
-            </div>
-            <div style="display:flex; justify-content:space-between; font-size:11px; padding:2px 0; color:var(--text-mute);">
-              <span>Spare slots (last sheet)</span><span class="mono">${nest.count > 0 ? (sheetsNeeded * nest.count - qty) : '—'}</span>
-            </div>
-          </div>
-          <div style="margin-top:10px; font-size:11px; color:var(--text-mute);">
-            Math uses orientation that fits the most parts. Edit qty tiers on Identity step → propagate here.
-          </div>
-        </div>
-
-        <div style="margin-top:14px;">
-          <div class="text-mute small" style="margin-bottom:4px;">Visual layout — 1 sheet, scaled to fit:</div>
-          ${nest.count > 0
-            ? _renderNestingSVG(nest, sheetLen, sheetWid, co.frameWidth, partType.color)
-            : `<div style="padding:14px; background:#FDEDEA; border:1px dashed #C73E1D; border-radius:3px; color:#C73E1D; font-size:12px;">⚠ This collar doesn't fit on the selected sheet. Try a larger sheet (5×10) or smaller dims.</div>`}
-        </div>
+      <div id="collar-live-readout-${part.id}">
+        ${_collarLiveReadoutHtml(part)}
       </div>
     </div>
   `;
@@ -13200,8 +13351,11 @@ function renderWizardStepCollarCut(q, part) {
   const matThk = (part.stock && num(part.stock.thickness)) || 0.5;
   const sheetLen = co.sheetLen != null ? co.sheetLen : cd.sheetLen;
   const sheetWid = co.sheetWid != null ? co.sheetWid : cd.sheetWid;
-  const kerf = (co.kerf != null ? co.kerf : cd.kerf) || 0.05;
-  const nest = _calcCollarNesting(co.outsideLen || 30, co.outsideWid || 10, sheetLen, sheetWid, kerf);
+  // v8.9: 'spacing' is the user-facing name; legacy 'kerf' fallback
+  const spacing = co.spacing != null ? co.spacing
+                 : co.kerf != null ? co.kerf
+                 : (cd.kerf || 0.05);
+  const nest = _calcCollarNesting(co.outsideLen || 30, co.outsideWid || 10, sheetLen, sheetWid, spacing);
   const t = _calcCollarCutTime(co, cd, matThk);
   const loadUnload = co.loadUnloadMin != null ? num(co.loadUnloadMin) : num(cd.loadUnloadMin);
   const screwDown  = co.screwDownMin  != null ? num(co.screwDownMin)  : num(cd.screwDownMin);
@@ -13236,16 +13390,17 @@ function renderWizardStepCollarCut(q, part) {
         <h3 style="font-size:13px; color:var(--steel); margin:14px 0 10px;">Handling time</h3>
         <div class="row" style="gap:10px; align-items:center;">
           <div class="field" style="flex:1;"><label>Load / unload (${useHours?'hr':'min'})</label>
-            ${bind({label:'Load/unload', value:useHours ? num(co.loadUnloadMin != null ? co.loadUnloadMin : cd.loadUnloadMin)/60 : (co.loadUnloadMin != null ? co.loadUnloadMin : cd.loadUnloadMin), type:'number', onChange:v=>{ co.loadUnloadMin = useHours ? num(v)*60 : v; }, attrs:'step="0.25" min="0"'})}
+            ${bind({label:'Load/unload', value:useHours ? num(co.loadUnloadMin != null ? co.loadUnloadMin : cd.loadUnloadMin)/60 : (co.loadUnloadMin != null ? co.loadUnloadMin : cd.loadUnloadMin), type:'number', onChange:v=>{ co.loadUnloadMin = useHours ? num(v)*60 : v; }, attrs:`step=\"${useHours ? '0.25' : '0.5'}\" min=\"0\"`})}
           </div>
           <div class="field" style="flex:1;"><label>Screw-down to table (${useHours?'hr':'min'})</label>
-            ${bind({label:'Screw-down', value:useHours ? num(co.screwDownMin != null ? co.screwDownMin : cd.screwDownMin)/60 : (co.screwDownMin != null ? co.screwDownMin : cd.screwDownMin), type:'number', onChange:v=>{ co.screwDownMin = useHours ? num(v)*60 : v; }, attrs:'step="0.25" min="0"'})}
+            ${bind({label:'Screw-down', value:useHours ? num(co.screwDownMin != null ? co.screwDownMin : cd.screwDownMin)/60 : (co.screwDownMin != null ? co.screwDownMin : cd.screwDownMin), type:'number', onChange:v=>{ co.screwDownMin = useHours ? num(v)*60 : v; }, attrs:`step=\"${useHours ? '0.25' : '0.5'}\" min=\"0\"`})}
           </div>
           <label style="display:flex; align-items:center; gap:6px; cursor:pointer; user-select:none; padding-top:18px; font-size:11px;">
             <input type="checkbox" ${useHours?'checked':''} onchange="App.collarSetTimeUnitHours('${part.id}', this.checked)" style="width:14px; height:14px;">
             hours
           </label>
         </div>
+        <div class="hint" style="margin-top:4px;">v8.9: load/unload + screw-down spin by 0.5 min (or 0.25 hr).</div>
       </div>
 
       <div>
@@ -19726,6 +19881,27 @@ const App = {
       showToast('✓ Customer assigned.', 2500);
     }
   },
+  // v8.9: generic Collar field setter for the slider/number-input pairs
+  // on the Nesting step. Coerces numerics, keeps part.collar in sync as
+  // the user drags the slider OR types into the paired number input.
+  // Skips render() since the slider mirroring handles its own DOM updates;
+  // a full re-render here would lose the slider's drag focus.
+  collarSetField(partId, field, value) {
+    const q = state.quotes.find(qq => qq.id === state.ui.activeQuoteId);
+    if (!q) return;
+    const p = (q.parts || []).find(pp => pp.id === partId);
+    if (!p) return;
+    if (!p.collar) p.collar = {};
+    const v = parseFloat(value);
+    p.collar[field] = isFinite(v) ? v : value;
+    // Persist + push to cloud, but DON'T re-render (keeps slider drag fluid)
+    try { saveState(); markLastSaved(); } catch (_) {}
+    // Refresh the live readouts (nest count, sheets needed) without
+    // touching the slider DOM. We re-render only the right column of
+    // the nesting step.
+    if (typeof renderCollarLiveReadout === 'function') renderCollarLiveReadout(p);
+  },
+
   // v8.8: Collar wizard helpers
   collarSetSheet(partId, len, wid) {
     update(s => {
