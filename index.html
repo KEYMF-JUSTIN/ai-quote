@@ -769,7 +769,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '8.3.0';
+const APP_VERSION = '8.3.1';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -5825,10 +5825,14 @@ function renderHeaderConnPill() {
   // v8.3: when sync is configured but disconnected, show a small 🔄 retry
   // button right next to the pill. Click bypasses the throttle and forces
   // a connect attempt. Surfaces the last error message via tooltip.
+  // v8.3.1: read _lastSyncError via window.* — the let declaration lives at
+  // the BOTTOM of the script and would be in the temporal dead zone during
+  // the first render() call. window.* is always safe to read.
   const showRetryBtn = (state === 'disconnected' || state === 'error')
                        && SyncEngine.config && SyncEngine.config.enabled
                        && SyncEngine.config.email && SyncEngine.config.password;
-  const retryTitle = _lastSyncError ? ('Last error: ' + _lastSyncError + ' — click to retry') : 'Click to retry connecting to cloud sync';
+  const lastErr = (typeof window !== 'undefined' && typeof window._lastSyncError === 'string') ? window._lastSyncError : '';
+  const retryTitle = lastErr ? ('Last error: ' + lastErr + ' — click to retry') : 'Click to retry connecting to cloud sync';
   el.innerHTML = `
     <button class="btn btn-ghost" onclick="App.gotoSyncCard()" title="${title}"
       style="display:inline-flex; align-items:center; gap:6px; padding:4px 10px; background:${bg}; color:${fg}; border:none; border-radius:14px; font-size:11px; font-weight:700; letter-spacing:0.04em;">
@@ -23969,7 +23973,10 @@ let _lastSyncConnectAttempt = 0;
 // 5s is short enough that any click/focus event quickly recovers, but long
 // enough that we don't hammer Firebase if it's genuinely down.
 const SYNC_CONNECT_THROTTLE_MS = 5000;
-let _lastSyncError = null;  // most recent error message for diagnostic display
+// v8.3.1: lives on window so renderHeaderConnPill (which runs during the
+// first render() call BEFORE this script block evaluates) can safely read
+// it without hitting the temporal dead zone.
+window._lastSyncError = window._lastSyncError || null;
 
 async function ensureSyncConnected(opts) {
   opts = opts || {};
@@ -23989,12 +23996,12 @@ async function ensureSyncConnected(opts) {
   _ensureConnectingPromise = (async () => {
     try {
       await SyncEngine.connect();
-      _lastSyncError = null;
+      window._lastSyncError = null;
       if (typeof showToast === 'function') showToast('☁ Cloud sync connected.', 2500);
       try { renderHeaderConnPill(); } catch (_) {}
     } catch (e) {
-      _lastSyncError = (e && e.message) ? e.message : String(e);
-      console.warn('[ensureSyncConnected] connect failed (will retry on next signal):', _lastSyncError);
+      window._lastSyncError = (e && e.message) ? e.message : String(e);
+      console.warn('[ensureSyncConnected] connect failed (will retry on next signal):', window._lastSyncError);
       try { renderHeaderConnPill(); } catch (_) {}
     } finally {
       _ensureConnectingPromise = null;
