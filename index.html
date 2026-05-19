@@ -760,7 +760,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '8.0.0';
+const APP_VERSION = '8.1.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -12275,16 +12275,33 @@ function renderPdfDock(quote) {
 // Step renderers are simple thunks (q, part) => htmlString. Adding a new
 // step = add to WIZARD_STEPS and write a render function.
 // =================================================================
-const WIZARD_STEPS_DEFAULT = [
-  { id: 'identity', label: 'Identity', icon: '📝', desc: 'Part number, description, drawing.' },
-  { id: 'material', label: 'Material', icon: '🪶', desc: 'Stock material + dimensions.' },
-  { id: 'review',   label: 'Review',   icon: '✓',  desc: 'Pricing summary + sanity check.' },
-];
+// v8.1 (Layer 2): Per-type step definitions. Each part type sees only the
+// steps relevant to how that part actually gets manufactured. Custom user
+// part types (added via Settings → Part Types in v7.74) fall through to
+// _default until they're explicitly mapped here — at which point you just
+// add another entry below.
+const WIZARD_STEP_DEFS = {
+  identity:  { id: 'identity',  label: 'Identity',  icon: '📝', desc: 'Part number, description, drawing.' },
+  material:  { id: 'material',  label: 'Material',  icon: '🪶', desc: 'Stock material + dimensions.' },
+  setups:    { id: 'setups',    label: 'Setups',    icon: '⚙',  desc: 'Machine operations + setup/run times per tier.' },
+  dxf:       { id: 'dxf',       label: 'DXF / Cut', icon: '⚡', desc: 'Outside cut files + vendor selection.' },
+  tooling:   { id: 'tooling',   label: 'Tooling',   icon: '🔧', desc: 'Specialty tooling + insert costs.' },
+  weldops:   { id: 'weldops',   label: 'Weld Ops',  icon: '🔥', desc: 'Welding operations + filler material.' },
+  finishing: { id: 'finishing', label: 'Finishing', icon: '🛠', desc: 'Outside services — paint, plating, heat treat, etc.' },
+  review:    { id: 'review',    label: 'Review',    icon: '✓',  desc: 'Pricing summary + sanity check.' },
+};
+const WIZARD_STEPS_BY_TYPE = {
+  machined:  ['identity', 'material', 'setups', 'tooling', 'finishing', 'review'],
+  cutblank:  ['identity', 'material', 'dxf', 'finishing', 'review'],
+  welded:    ['identity', 'material', 'setups', 'weldops', 'finishing', 'review'],
+  hybrid:    ['identity', 'material', 'dxf', 'setups', 'tooling', 'finishing', 'review'],
+  purchased: ['identity', 'material', 'review'],
+  _default:  ['identity', 'material', 'review'],
+};
 function wizardStepsFor(part) {
-  // Future-proofing: in Layer 2 we'll vary by part.typeId.
-  // For now, every type uses the universal 3-step set so the
-  // pattern is provably correct before we expand it.
-  return WIZARD_STEPS_DEFAULT;
+  const typeId = (part && part.typeId) || 'machined';
+  const stepIds = WIZARD_STEPS_BY_TYPE[typeId] || WIZARD_STEPS_BY_TYPE._default;
+  return stepIds.map(id => WIZARD_STEP_DEFS[id]).filter(Boolean);
 }
 function currentWizardStepIdx(part) {
   if (!part) return 0;
@@ -12373,12 +12390,19 @@ function renderPartWizard(q, part) {
     `;
   }).join('');
 
-  // Body — dispatch to the right step renderer
+  // Body — dispatch to the right step renderer. Most step bodies are thin
+  // wrappers over the existing classic card renderers so we don't duplicate
+  // UI logic; the wizard reuses the same setup/DXF/finishing/etc. cards.
   let body = '';
-  if (cur.id === 'identity')       body = renderWizardStepIdentity(q, part);
+  if      (cur.id === 'identity')  body = renderWizardStepIdentity(q, part);
   else if (cur.id === 'material')  body = renderWizardStepMaterial(q, part);
+  else if (cur.id === 'setups')    body = renderWizardStepSetups(q, part);
+  else if (cur.id === 'dxf')       body = renderWizardStepDxf(q, part);
+  else if (cur.id === 'tooling')   body = renderWizardStepTooling(q, part);
+  else if (cur.id === 'weldops')   body = renderWizardStepWeldOps(q, part);
+  else if (cur.id === 'finishing') body = renderWizardStepFinishing(q, part);
   else if (cur.id === 'review')    body = renderWizardStepReview(q, part);
-  else body = `<p class="text-mute">Step "${esc(cur.label)}" — coming in Layer 2.</p>`;
+  else body = `<p class="text-mute">Step "${esc(cur.label)}" — no renderer registered.</p>`;
 
   return `
     <div style="background:var(--paper); border:2px solid ${type.color}; border-radius:4px;">
@@ -12466,11 +12490,48 @@ function renderWizardStepMaterial(q, part) {
         ${bind({label:'Material notes', value:part.materialNotes, onChange:v=>{ part.materialNotes = v; }, placeholder:'Customer-supplied? Cert required?'})}
       </div>
     </div>
-    <div style="margin-top:14px; padding:10px 12px; background:#FFF7ED; border-left:3px solid var(--orange); border-radius:3px; font-size:12px;">
-      💡 <strong>Layer 2</strong> will add per-type fields here — sheet size for cut blanks, sub-part list for weldments, source picker for purchased items. Today this is the universal subset.
+    <div style="margin-top:14px; padding:10px 12px; background:#F0F9FF; border-left:3px solid var(--blue); border-radius:3px; font-size:12px;">
+      💡 The next steps depend on this part's type — machined gets <strong>Setups → Tooling</strong>, cut blanks get <strong>DXF</strong>, weldments get <strong>Setups → Weld Ops</strong>, hybrids get all of it. Purchased parts skip straight to Review. Pick the type on the Identity step to see the right flow.
     </div>
   `;
 }
+// v8.1 (Layer 2): Step wrappers — thin pass-through to the existing classic
+// card renderers. The wizard just provides the step-by-step framing; the
+// actual UI for setups / DXF / tooling / weldops / finishing already exists
+// and works. No need to duplicate.
+function renderWizardStepSetups(q, part) {
+  const machineOpts = state.settings.rates.map(r => r.name);
+  return `
+    <div class="text-mute small" style="margin-bottom:10px;">Add the operations you'll run on this part. Setup time + run time per tier are the bones of the labor cost.</div>
+    ${renderSetupsCard(q, part, machineOpts)}
+  `;
+}
+function renderWizardStepDxf(q, part) {
+  return `
+    <div class="text-mute small" style="margin-bottom:10px;">Drop the DXF/DWG/STEP files for any outside cutting (laser, waterjet, plasma, etc.). The vendor picker, material, and thickness drive the auto-cost estimate.</div>
+    ${renderDxfCard(q, part)}
+  `;
+}
+function renderWizardStepTooling(q, part) {
+  return `
+    <div class="text-mute small" style="margin-bottom:10px;">Specialty tooling (custom inserts, special drills, tool holders) that isn't shared across other parts. Paste a McMaster URL for auto-fill.</div>
+    ${renderSpecialtyToolingCard(q, part)}
+  `;
+}
+function renderWizardStepWeldOps(q, part) {
+  const machineOpts = state.settings.rates.map(r => r.name);
+  return `
+    <div class="text-mute small" style="margin-bottom:10px;">Welding operations — TIG, MIG, stick, etc. Per-tier time so the pricing accounts for batch efficiencies.</div>
+    ${renderWeldOpsCard(q, part, machineOpts)}
+  `;
+}
+function renderWizardStepFinishing(q, part) {
+  return `
+    <div class="text-mute small" style="margin-bottom:10px;">Outside services — heat treat, plating, painting, powder coat, anodize, etc. Vendor lookup pulls from your Vendors page.</div>
+    ${renderOutsideServicesCard(q, part)}
+  `;
+}
+
 function renderWizardStepReview(q, part) {
   const tiers = part.qtyTiers || [1];
   const lines = tiers.map((qty, i) => {
@@ -12485,10 +12546,10 @@ function renderWizardStepReview(q, part) {
         <tbody>${lines}</tbody>
       </table>
       <div style="margin-top:16px; padding:12px; background:#ECFDF3; border-left:3px solid var(--green); font-size:13px;">
-        ✓ Part identity captured · material assigned · ready to quote.
+        ✓ All wizard steps for this part complete · ready to quote.
       </div>
       <div style="margin-top:10px; font-size:11px; color:var(--text-mute);">
-        Full machine setups / DXF / finishing / tooling cards still live in <a href="javascript:App.setWizardMode(false)">classic view</a> until Layer 2 lands.
+        Need the full quote-level Summary, Materials list, BOM, or Health Check? Switch to <a href="javascript:App.setWizardMode(false)">classic view</a> — same data, different layout.
       </div>
     </div>
   `;
