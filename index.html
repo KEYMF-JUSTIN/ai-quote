@@ -769,7 +769,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '8.9.0';
+const APP_VERSION = '8.10.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -1004,7 +1004,7 @@ const state = {
     colorPicker: null,          // v8.4: { action, args, currentColor } when the 128-swatch color picker is open. Picked color is delivered by calling App[action](...args, color). Replaces native <input type=color>.
     expandedNotes: {},          // v8.6: per-entity collapsible state for notes — keyed `${entityType}:${entityId}` → true when expanded. Empty notes show as a "+ Add note" link; non-empty notes show as a collapsed preview that expands on click.
     expandedOneDrive: {},       // v8.6: per-customer collapsible state for the OneDrive config block — keyed customerId → true when expanded.
-    wizardMode: false,          // v8.0: toggle for the new wizard-style quote page. When false, falls back to classic all-cards view. Set per session — not persisted.
+    wizardMode: true,           // v8.10: wizard is now the ONLY quote view (classic killed). Flag kept in state for any legacy code paths that reference it; renderQuote() no longer branches on it.
     wizardStep: {},             // v8.0: keyed partId → step index. Tracks where in the wizard each part is, so switching chips remembers your spot.
     trainingPicker: null,       // v7.62: { entityType, entityId, sampleId?, file?, parsed?, docType, notes, error, loading } for the training sample editor
     activePurchaseId: null,     // v7.50: currently-open purchase in the Purchasing workspace
@@ -12729,7 +12729,6 @@ function renderQuoteCustomerBanner(q) {
           <div>${esc(q.date)} · <span class="pill ${esc(q.status)}" style="background:rgba(255,255,255,0.15); color:white; border:none;">${esc(q.status)}</span></div>
           <div>${nParts} part${nParts===1?'':'s'} · ${fmtMoney(total)}</div>
         </div>
-        <button class="btn" style="background:rgba(255,255,255,0.1); color:white; border:1px solid rgba(255,255,255,0.3);" onclick="App.setWizardMode(false)" title="Switch to classic all-cards view">⊞ Classic view</button>
       </div>
     </div>
   `;
@@ -12740,24 +12739,32 @@ function renderQuoteWizardChipRow(q) {
   const partTypes = state.settings.partTypes || [];
   const typeOf = id => partTypes.find(t => t.id === id) || { icon: '⚙', color: '#64748B', label: 'Part' };
   const activeId = (state.ui.activePartIdForInfo || {})[q.id];
+  // v8.10: BIGGER chips. Icon-over-label tab style with qty + draft badge.
+  // 28px icon at top, 13px label below, qty pill inline. Active chip gets
+  // an orange accent stripe at the bottom + colored background tint.
   const chips = (q.parts || []).map((p, i) => {
     const t = typeOf(p.typeId || 'machined');
     const isActive = activeId === p.id;
+    const qty = (p.qtyTiers && p.qtyTiers[0]) || 1;
     return `
       <button onclick="App.selectPartChip('${q.id}','${p.id}')"
-              style="display:inline-flex; align-items:center; gap:6px; padding:6px 12px; border-radius:4px; cursor:pointer; border:2px solid ${isActive ? t.color : 'var(--line-dark)'}; background:${isActive ? t.color : 'var(--paper)'}; color:${isActive ? 'white' : 'var(--text)'}; font-size:12px; font-weight:600; transition:all 0.1s;">
-        <span style="font-size:16px;">${t.icon}</span>
-        <span>${esc(p.partNum || ('Part ' + (i+1)))}</span>
-        ${p.isDraft ? '<span style="font-size:10px; padding:1px 5px; background:#FEF3C7; color:#B45309; border-radius:2px;">draft</span>' : ''}
+              title="${esc(p.description || p.partNum || ('Part ' + (i+1)))}"
+              style="display:flex; flex-direction:column; align-items:center; gap:2px; padding:10px 16px; min-width:120px; border-radius:6px; cursor:pointer; border:1px solid ${isActive ? t.color : 'var(--line-dark)'}; border-bottom:3px solid ${isActive ? t.color : 'transparent'}; background:${isActive ? t.color+'18' : 'var(--paper)'}; color:${isActive ? t.color : 'var(--text)'}; transition:all 0.12s; position:relative;">
+        <span style="font-size:28px; line-height:1;">${t.icon}</span>
+        <span style="font-size:13px; font-weight:700; margin-top:4px;">${esc(p.partNum || ('Part ' + (i+1)))}</span>
+        <span style="font-size:11px; color:${isActive ? t.color : 'var(--text-mute)'}; opacity:${isActive?1:0.85};">${esc(t.label.replace(/^(Welded |Picture-frame )/, ''))} · qty ${qty}</span>
+        ${p.isDraft ? '<span style="position:absolute; top:4px; right:4px; font-size:9px; padding:1px 5px; background:#FEF3C7; color:#B45309; border-radius:2px; letter-spacing:0.04em; font-weight:700;">DRAFT</span>' : ''}
       </button>
     `;
   }).join('');
   return `
-    <div style="background:var(--paper); border:1px solid var(--line); border-radius:4px; padding:10px; margin-bottom:10px;">
-      <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
-        <span style="font-size:11px; color:var(--text-mute); text-transform:uppercase; letter-spacing:0.06em; font-weight:600; margin-right:6px;">Parts</span>
-        ${chips || '<span class="text-mute small">No parts yet</span>'}
-        <button class="btn btn-primary btn-sm" style="margin-left:auto;" onclick="App.promptAddPart()">+ Add Part</button>
+    <div style="background:var(--paper); border:1px solid var(--line); border-radius:4px; padding:12px; margin-bottom:10px;">
+      <div style="display:flex; gap:8px; align-items:stretch; flex-wrap:wrap;">
+        ${chips || '<span class="text-mute small" style="align-self:center;">No parts yet</span>'}
+        <button class="btn btn-primary" style="margin-left:auto; padding:10px 18px; font-size:13px; font-weight:700; align-self:stretch; min-height:80px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px;" onclick="App.promptAddPart()">
+          <span style="font-size:24px; line-height:1;">+</span>
+          <span style="font-size:12px;">Add Part</span>
+        </button>
       </div>
     </div>
   `;
@@ -12851,6 +12858,10 @@ function renderPartWizard(q, part) {
 // --- Step renderers (Layer 1: identity, material, review) -----------------
 function renderWizardStepIdentity(q, part) {
   const partTypes = state.settings.partTypes || [];
+  // v8.10: ensure qtyTiers is initialized so the editor has at least one tier
+  if (!Array.isArray(part.qtyTiers) || part.qtyTiers.length === 0) {
+    part.qtyTiers = [1];
+  }
   return `
     <div style="display:grid; grid-template-columns:1fr 2fr; gap:14px;">
       <div class="field"><label>Part number</label>
@@ -12858,6 +12869,22 @@ function renderWizardStepIdentity(q, part) {
       </div>
       <div class="field"><label>Description</label>
         ${bind({label:'Description', value:part.description, onChange:v=>{ part.description = v; }, placeholder:'What is this part for?'})}
+      </div>
+      <!-- v8.10: quantity tiers — first tier feeds the Collar nesting math
+           + drives qty-break pricing on every type. Keep it visible and
+           editable on Identity so the user can set it BEFORE moving on. -->
+      <div class="field" style="grid-column:span 2;"><label>Quantity (qty-break tiers)</label>
+        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+          ${part.qtyTiers.map((qt, i) => `
+            <span style="display:inline-flex; align-items:center; gap:4px; padding:4px 8px; background:var(--bg); border:1px solid var(--line-dark); border-radius:3px;">
+              <span style="font-size:10px; color:var(--text-mute); text-transform:uppercase; letter-spacing:0.06em; font-weight:700;">Tier ${i+1}</span>
+              ${bind({label:`Quantity tier ${i+1}`, value:qt, type:'number', onChange:v=>{ part.qtyTiers[i] = num(v) || 1; ensureMatPerPiece(part); }, attrs:'min="1" step="1"'})}
+              ${part.qtyTiers.length > 1 ? `<span style="cursor:pointer; color:var(--orange); font-weight:700;" onclick="App.removeQtyTier('${part.id}',${i})" title="Remove tier">×</span>` : ''}
+            </span>
+          `).join('')}
+          <button class="btn btn-sm" onclick="App.addQtyTier('${part.id}')">+ Tier</button>
+        </div>
+        <div class="hint">First tier = the quantity used by Collar nesting math. Add more tiers for qty-break pricing on a single quote.</div>
       </div>
       <div class="field" style="grid-column:span 2;"><label>Part type</label>
         <div style="display:flex; gap:6px; flex-wrap:wrap;">
@@ -13463,7 +13490,7 @@ function renderWizardStepReview(q, part) {
         ✓ All wizard steps for this part complete · ready to quote.
       </div>
       <div style="margin-top:10px; font-size:11px; color:var(--text-mute);">
-        Need the full quote-level Summary, Materials list, BOM, or Health Check? Switch to <a href="javascript:App.setWizardMode(false)">classic view</a> — same data, different layout.
+        For the quote-level Summary, Materials list, or BOM, use the tab strip at the top of this page.
       </div>
     </div>
   `;
@@ -13631,61 +13658,55 @@ function renderQuoteWizardView(q) {
 function renderQuote() {
   const q = getActiveQuote();
   if (!q) return `<p>No quote selected.</p>`;
-  // v8.0: wizard-mode dispatch. Wizard mode replaces the entire body —
-  // no tabs, no classic cards. Classic mode keeps the existing layout
-  // exactly so nothing breaks while we iterate.
-  if (state.ui.wizardMode) {
-    const c = getCustomer(q.customerId);
-    return `
-      <div class="page-header" style="margin-bottom:8px;">
-        <div>
-          <div class="page-title" style="font-size:16px;">
-            ${esc(q.quoteNum || 'New Quote')}
-            <span class="pill" style="background:var(--orange); color:white; border:none; vertical-align:middle; margin-left:6px; font-size:10px;">✨ WIZARD v8 BETA</span>
-          </div>
-        </div>
-        <div class="header-actions">
-          <button class="btn" onclick="App.downloadQuotePDF('${q.id}')">⬇ Download PDF</button>
-          <button class="btn btn-primary" onclick="App.convertToOrder('${q.id}')">→ Convert to Order</button>
-          <button class="btn" onclick="App.go('quotes')">← Back to Quotes</button>
-        </div>
-      </div>
-      ${renderQuoteWizardView(q)}
-    `;
-  }
-  // Classic mode — existing behavior preserved verbatim
-  const t = state.ui.activeQuoteTab;
-  let body;
-  if (t === 'info') body = renderQuoteInfo(q);
-  else if (t === 'summary') body = renderQuoteSummary(q);
-  else if (t === 'materials') body = renderMaterialList(q);
-  else if (t === 'bom') body = renderBomEditor(q);
-  else if (t.startsWith('part-')) {
-    const id = t.slice(5);
-    const part = q.parts.find(p => p.id === id);
-    body = part ? renderPartEditor(q, part) : '<p>Part not found.</p>';
-  } else body = '';
+  // v8.10: wizard is now the only quote view. Classic killed. The top-tab
+  // strip below routes between Parts (the wizard proper) and the
+  // quote-level views (Summary / Materials / BOM) that used to be classic
+  // subnav.
   const c = getCustomer(q.customerId);
+  const t = state.ui.activeQuoteTab || 'info';
+  // 'info' = parts wizard (default). Other tabs render via existing fns.
+  let body;
+  if      (t === 'summary')   body = renderQuoteSummary(q);
+  else if (t === 'materials') body = renderMaterialList(q);
+  else if (t === 'bom')       body = renderBomEditor(q);
+  else                        body = renderQuoteWizardView(q);  // 'info', 'part-*', anything else
+  // Top tabs — quote-level navigation
+  const tabs = [
+    { id: 'info',      label: 'Parts',     icon: '🧩' },
+    { id: 'summary',   label: 'Summary',   icon: '📊' },
+    { id: 'materials', label: 'Materials', icon: '📦' },
+    { id: 'bom',       label: 'BOM',       icon: '📋' },
+  ];
+  const tabStrip = tabs.map(tab => {
+    const isActive = (t === tab.id) || (t.startsWith('part-') && tab.id === 'info');
+    return `
+      <button onclick="App.goTab('${tab.id}')"
+              style="padding:8px 16px; border:none; border-bottom:3px solid ${isActive?'var(--orange)':'transparent'}; background:${isActive?'var(--paper)':'transparent'}; color:${isActive?'var(--navy)':'var(--text-mute)'}; font-weight:${isActive?'700':'500'}; font-size:13px; cursor:pointer; display:flex; align-items:center; gap:6px;">
+        <span style="font-size:16px;">${tab.icon}</span>
+        ${esc(tab.label)}
+      </button>
+    `;
+  }).join('');
   return `
-    <div class="page-header">
+    <div class="page-header" style="margin-bottom:8px;">
       <div>
-        <div class="page-title">
+        <div class="page-title" style="font-size:16px;">
           ${esc(q.quoteNum || 'New Quote')}
           <span class="pill" style="background:${quoteKindColor(q)}22; color:${quoteKindColor(q)}; border:1px solid ${quoteKindColor(q)}55; vertical-align:middle; margin-left:6px; font-size:11px;" title="${esc(quoteKindLabel(q))}">${quoteKindIcon(q)} ${esc(quoteKindShort(q))}</span>
         </div>
-        <div class="page-subtitle">${esc(c?.name || 'No customer')} · ${esc(q.date)} · <span class="pill ${esc(q.status)}">${esc(q.status)}</span> · <span class="text-mute">Type:</span> <select onchange="App.setQuoteKind('${q.id}', this.value)" style="font-size:11px; padding:1px 4px; margin-left:2px;">
-          ${QUOTE_KINDS.map(k => `<option value="${k.id}" ${(q.kind||'multipart')===k.id?'selected':''}>${esc(k.label)}</option>`).join('')}
-        </select></div>
       </div>
       <div class="header-actions">
-        <button class="btn" style="background:var(--orange); color:white;" onclick="App.setWizardMode(true)" title="Try the new wizard-style quote page (v8)">✨ Switch to Wizard view</button>
         <button class="btn" onclick="App.downloadQuotePDF('${q.id}')">⬇ Download PDF</button>
-        <button class="btn" onclick="App.emailQuote('${q.id}')" ${!c?.email?'disabled title="No email on file for the customer"':''}>✉ Email PDF to Customer</button>
+        <button class="btn" onclick="App.emailQuote('${q.id}')" ${!c?.email?'disabled title="No email on file for the customer"':''}>✉ Email PDF</button>
         <button class="btn btn-primary" onclick="App.convertToOrder('${q.id}')">→ Convert to Order</button>
         <button class="btn" onclick="App.go('quotes')">← Back to Quotes</button>
       </div>
     </div>
-    ${renderPdfDock(q)}
+    <!-- v8.10: quote-level tab strip — Parts is the wizard, the other three
+         are the legacy renderers (still useful for quote-wide rollups). -->
+    <div style="display:flex; gap:0; border-bottom:2px solid var(--line); margin-bottom:12px;">
+      ${tabStrip}
+    </div>
     ${body}
   `;
 }
