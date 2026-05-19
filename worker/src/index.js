@@ -882,6 +882,8 @@ async function handleExtractPart(env, body) {
       'You are looking at a file the user dropped on the Identity step of a quote part in a precision-machining-shop quoting app.',
       'Identify what KIND of document it is, then extract any structured part data visible.',
       '',
+      'CRITICAL: For any field you cannot see clearly, OMIT it entirely from the tool call (do NOT include the field with a string value of "null", "N/A", or "unknown" — that\'s worse than not answering). Only include fields where you have a concrete, readable value to report.',
+      '',
       hint ? `User hint: ${hint}` : '',
       '',
       'docType heuristics:',

@@ -769,7 +769,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '8.13.0';
+const APP_VERSION = '8.13.1';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -1466,8 +1466,20 @@ function migrateState() {
   // v7.61: every part gets a typeId. Existing parts without one default to
   // 'machined' (the most common case for KMF's historical work). Estimators
   // can re-tag in the chip-card via the type pill on each part.
+  // v8.13.1: also scrub any "null"/"undefined"/"N/A" string sentinels that
+  // landed in part fields from Claude's extract-part response in v8.13.0
+  // (the bug: Claude returned the literal string "null" for missing fields
+  // and we wrote it). Replaces those with empty string so chip labels /
+  // wizard headers / pricing don't show the literal word "null".
+  const NULL_STRINGS = new Set(['null','undefined','n/a','na','none','-','--']);
+  const isBogus = (v) => typeof v === 'string' && NULL_STRINGS.has(v.trim().toLowerCase());
   (state.quotes || []).forEach(q => (q.parts || []).forEach(p => {
     if (!p.typeId) p.typeId = 'machined';
+    ['partNum','description','material','customerPN','notes','materialNotes'].forEach(f => {
+      if (isBogus(p[f])) p[f] = '';
+    });
+    if (p.materialCost && isBogus(p.materialCost.vendorPartNum)) p.materialCost.vendorPartNum = '';
+    if (p.materialCost && isBogus(p.materialCost.vendorUrl))     p.materialCost.vendorUrl = '';
   }));
   // v7.62: extraction training — every vendor and every customer gets a
   // training bucket. Stores labeled sample extractions (parsed JSON + filename)
@@ -20103,6 +20115,24 @@ const App = {
     }
   },
 
+  // v8.13.1: shared "is this a real value" helper. Claude sometimes
+  // returns the STRING "null" or "undefined" instead of a JSON null —
+  // and my v8.13.0 code happily wrote those strings into part.partNum,
+  // part.description, etc. Result: chip labels, wizard headers, and
+  // pricing all showed the literal word "null". This filters out the
+  // bogus strings (and trims whitespace-only values) so we only apply
+  // values that actually mean something.
+  _isMeaningfulValue(v) {
+    if (v == null) return false;
+    if (typeof v === 'number') return isFinite(v);
+    if (typeof v === 'string') {
+      const t = v.trim().toLowerCase();
+      return t !== '' && t !== 'null' && t !== 'undefined' && t !== 'n/a' && t !== 'na';
+    }
+    if (Array.isArray(v)) return v.length > 0;
+    return true;
+  },
+
   // v8.13.0: dropped/pasted image or PDF on Identity → Claude Vision
   // extracts structured part data → applied to the part. Handles every
   // doc type the Worker schema lists (McMaster page, engineering drawing,
@@ -20128,6 +20158,14 @@ const App = {
       this._wizardMcMasterLookupAndApply(partId, parsed.sourceUrl);
       return;
     }
+    // v8.13.1: filter parsed object through _isMeaningfulValue so "null"/
+    // "undefined"/"N/A" strings from Claude don't end up written to the
+    // part. Build a clean object once instead of repeating the guard.
+    const isMeaningful = (v) => this._isMeaningfulValue(v);
+    const clean = {};
+    Object.keys(parsed).forEach(k => {
+      if (isMeaningful(parsed[k])) clean[k] = parsed[k];
+    });
     // Apply generic part data
     let applied = [];
     update(s => {
@@ -20136,66 +20174,69 @@ const App = {
       const p = (q.parts || []).find(pp => pp.id === partId);
       if (!p) return;
       // Suggested type — only override if part still has its default
-      if (parsed.suggestedType && (!p.typeId || p.typeId === 'machined')) {
-        if (parsed.suggestedType !== p.typeId) {
-          p.typeId = parsed.suggestedType;
-          applied.push(`type=${parsed.suggestedType}`);
+      if (clean.suggestedType && (!p.typeId || p.typeId === 'machined')) {
+        if (clean.suggestedType !== p.typeId) {
+          p.typeId = clean.suggestedType;
+          applied.push(`type=${clean.suggestedType}`);
         }
       }
       // Part number (only if blank)
-      if (parsed.partNum && !p.partNum) { p.partNum = parsed.partNum; applied.push('part #'); }
+      if (clean.partNum && !p.partNum) { p.partNum = clean.partNum; applied.push('part #'); }
       // Description
-      if (parsed.description && !p.description) { p.description = parsed.description; applied.push('description'); }
+      if (clean.description && !p.description) { p.description = clean.description; applied.push('description'); }
       // Material (use the existing materials picker — if Claude's value is
       // a recognized material name, set it; otherwise put in notes)
-      if (parsed.material && !p.material) {
+      if (clean.material && !p.material) {
         const matNames = (s.settings.materials || []).map(m => (m.name || '').toLowerCase());
-        if (matNames.includes(parsed.material.toLowerCase())) {
-          // Find the canonical case
-          const canon = (s.settings.materials || []).find(m => (m.name || '').toLowerCase() === parsed.material.toLowerCase());
+        if (matNames.includes(clean.material.toLowerCase())) {
+          const canon = (s.settings.materials || []).find(m => (m.name || '').toLowerCase() === clean.material.toLowerCase());
           if (canon) { p.material = canon.name; applied.push('material'); }
         } else {
-          p.material = parsed.material;
+          p.material = clean.material;
           applied.push('material');
         }
       }
       // Pricing → material cost (mostly for McMaster / catalog pages)
-      if (parsed.price != null && isFinite(parsed.price) && parsed.price > 0) {
+      if (clean.price != null && isFinite(clean.price) && clean.price > 0) {
         if (!p.materialCost) p.materialCost = { perPiece: [null], perBar: null, perSheet: null, vendorId: null, vendorPartNum: '', vendorUrl: '' };
-        if (parsed.partNum && !p.materialCost.vendorPartNum) p.materialCost.vendorPartNum = parsed.partNum;
-        if (parsed.sourceUrl && !p.materialCost.vendorUrl) p.materialCost.vendorUrl = parsed.sourceUrl;
-        if (parsed.priceUnit === 'pack' && parsed.packSize > 0) {
+        if (clean.partNum && !p.materialCost.vendorPartNum) p.materialCost.vendorPartNum = clean.partNum;
+        if (clean.sourceUrl && !p.materialCost.vendorUrl) p.materialCost.vendorUrl = clean.sourceUrl;
+        if (clean.priceUnit === 'pack' && clean.packSize > 0) {
           p.materialCost.isComponent = true;
-          p.materialCost.packSize = parsed.packSize;
-          p.materialCost.perPack = parsed.price;
-          applied.push(`$${parsed.price}/pack of ${parsed.packSize}`);
+          p.materialCost.packSize = clean.packSize;
+          p.materialCost.perPack = clean.price;
+          applied.push(`$${clean.price}/pack of ${clean.packSize}`);
         } else {
           if (!Array.isArray(p.materialCost.perPiece)) p.materialCost.perPiece = [];
           if (typeof ensureMatPerPiece === 'function') ensureMatPerPiece(p);
-          p.materialCost.perPiece[0] = parsed.price;
-          applied.push(`$${parsed.price} each`);
+          p.materialCost.perPiece[0] = clean.price;
+          applied.push(`$${clean.price} each`);
         }
       }
       // Everything else → tagged notes line so it's not lost
       const extras = [];
-      if (parsed.finish)     extras.push(`Finish: ${parsed.finish}`);
-      if (parsed.dimensions) extras.push(`Dims: ${parsed.dimensions}`);
-      if (parsed.tolerance)  extras.push(`Tol: ${parsed.tolerance}`);
-      if (parsed.revision)   extras.push(`Rev: ${parsed.revision}`);
-      if (parsed.threadSize) extras.push(`Thread: ${parsed.threadSize}`);
-      if (parsed.length)     extras.push(`Length: ${parsed.length}`);
-      if (parsed.weight)     extras.push(`Weight: ${parsed.weight}`);
-      if (parsed.availability) extras.push(`Avail: ${parsed.availability}`);
-      if (parsed.notes)      extras.push(parsed.notes);
+      if (clean.finish)     extras.push(`Finish: ${clean.finish}`);
+      if (clean.dimensions) extras.push(`Dims: ${clean.dimensions}`);
+      if (clean.tolerance)  extras.push(`Tol: ${clean.tolerance}`);
+      if (clean.revision)   extras.push(`Rev: ${clean.revision}`);
+      if (clean.threadSize) extras.push(`Thread: ${clean.threadSize}`);
+      if (clean.length)     extras.push(`Length: ${clean.length}`);
+      if (clean.weight)     extras.push(`Weight: ${clean.weight}`);
+      if (clean.availability) extras.push(`Avail: ${clean.availability}`);
+      if (clean.notes)      extras.push(clean.notes);
       if (extras.length) {
-        const tag = `[Claude read ${file.name} · ${parsed.docType || 'unknown'} · conf=${parsed.confidence || '?'}] ${extras.join(' · ')}`;
+        const docType = isMeaningful(clean.docType) ? clean.docType : 'unknown';
+        const conf = isMeaningful(clean.confidence) ? clean.confidence : '?';
+        const tag = `[Claude read ${file.name} · ${docType} · conf=${conf}] ${extras.join(' · ')}`;
         p.notes = p.notes ? `${p.notes}\n${tag}` : tag;
         applied.push('notes');
       }
       logActivity('Claude extracted from attachment', p.partNum || file.name, applied.join(', '));
     });
     if (applied.length === 0) {
-      showToast(`⚠ Claude looked but didn't find anything useful in ${file.name}. (docType: ${parsed.docType}, confidence: ${parsed.confidence})`, 5000);
+      const docType = isMeaningful(clean.docType) ? clean.docType : 'unknown';
+      const conf = isMeaningful(clean.confidence) ? clean.confidence : 'low';
+      showToast(`⚠ Claude looked but didn't find anything useful in ${file.name}. (docType: ${docType}, confidence: ${conf})`, 5000);
     } else {
       showToast(`✨ Applied from ${file.name}: ${applied.join(', ')}`, 6000);
     }
