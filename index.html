@@ -769,7 +769,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '8.18.1';
+const APP_VERSION = '8.18.2';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -13069,10 +13069,17 @@ function renderPartWizard(q, part) {
           <strong>${esc(part.partNum || 'New part')}</strong>
           <span style="opacity:0.8; margin-left:6px; font-weight:400;">· ${esc(type.label)} · step ${curIdx+1} of ${steps.length}: ${esc(cur.label)}</span>
         </div>
-        <div style="display:flex; gap:6px;">
+        <div style="display:flex; gap:6px; align-items:center;">
           ${part.isDraft ? '<span style="padding:2px 8px; background:rgba(255,255,255,0.2); border-radius:3px; font-size:11px;">draft</span>' : ''}
           <button class="btn btn-sm" style="background:rgba(255,255,255,0.15); color:white; border:1px solid rgba(255,255,255,0.3);" onclick="App.savePartAsDraft('${part.id}')" title="Mark this part as a draft (still working on it). Stays on current step.">💾 Save draft</button>
-          <button class="btn btn-sm btn-danger" onclick="App.deletePart('${part.id}')" title="Delete this part">×</button>
+          <!-- v8.18.2: × and Delete are now visually distinct. × just closes
+               the wizard back to the parts row (non-destructive); the red
+               "🗑 Delete part" button is the only way to actually remove
+               the part from the quote. Separated by a vertical divider so
+               there's no ambiguity about which is which. -->
+          <button class="btn btn-sm" style="background:rgba(220,67,24,0.85); color:white; border:1px solid rgba(255,255,255,0.3); font-weight:600;" onclick="App.deletePart('${part.id}')" title="Permanently remove this part from the quote">🗑 Delete part</button>
+          <span style="opacity:0.3; padding:0 2px;">|</span>
+          <button class="btn btn-sm" style="background:rgba(255,255,255,0.10); color:white; border:1px solid rgba(255,255,255,0.25); font-weight:600;" onclick="App.closeActivePart('${q.id}')" title="Close this part's wizard (returns to the parts row above). Doesn't delete anything.">× Close</button>
         </div>
       </div>
       <div style="padding:6px 14px; background:#FAFAFA; border-bottom:1px solid var(--line);">
@@ -20448,10 +20455,10 @@ const App = {
     showToast(`Appended ${sourceParts.length} part(s) from quote ${source.quoteNum || sourceId}.`);
   },
   openQuote(id) {
-    // v7.67.1: defensive — close any stuck modal before switching views, so a
-    // zombie backdrop from a prior interaction can't make the click look like
-    // a no-op. Also log so DevTools shows whether the click ever fired.
-    console.log('[openQuote]', id, 'view→quote');
+    // v7.67.1: defensive — close any stuck modal before switching views, so
+    // a zombie backdrop from a prior interaction can't make the click look
+    // like a no-op. v8.18.2: removed the diagnostic console.log now that
+    // the bug it was debugging has been fixed for many versions.
     closeAllModals();
     update(s => { s.ui.view = 'quote'; s.ui.activeQuoteId = id; s.ui.activeQuoteTab = 'info'; });
   },
@@ -21836,6 +21843,17 @@ const App = {
       s.ui.activeQuoteTab = 'part-' + copy.id;
     });
   },
+  // v8.18.2: non-destructive close — exits the part wizard back to the
+  // parts row "Pick a part to edit" state. Just clears the active-part
+  // slot for this quote; the part itself stays untouched. The × button on
+  // the wizard header calls this; Delete part calls deletePart() instead.
+  closeActivePart(quoteId) {
+    update(s => {
+      if (!s.ui.activePartIdForInfo) s.ui.activePartIdForInfo = {};
+      s.ui.activePartIdForInfo[quoteId] = null;
+    });
+  },
+
   // v8.18.1: merged version — handles classic + wizard cleanup. Single-arg
   // signature matches all existing call sites. Wizard state (activePartIdForInfo
   // and wizardStep) gets cleared/promoted to the next surviving part so the
