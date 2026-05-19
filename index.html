@@ -769,7 +769,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '8.6.1';
+const APP_VERSION = '8.7.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -1820,6 +1820,12 @@ const SyncEngine = {
       this.SYNCED_FIELDS.forEach(k => {
         if (remote[k] !== undefined) state[k] = remote[k];
       });
+      // v8.7: re-run migrateState after remote-apply so defaults missing
+      // from the remote payload (e.g. an older session that synced before
+      // partTypes / colorFavorites / etc. were introduced) get restored
+      // locally. Without this, the user opens "+ Add Part" and the picker
+      // is empty because remote.settings.partTypes was missing or [].
+      try { migrateState(); } catch (e) { console.warn('post-sync migrate failed:', e); }
       saveStateLocal();   // persist to localStorage but don't push
       this.applyingRemote = false;
       // v8: CRITICAL — call render() after applying remote state. Without this
@@ -1845,6 +1851,9 @@ const SyncEngine = {
       this.SYNCED_FIELDS.forEach(k => {
         if (remote[k] !== undefined) state[k] = remote[k];
       });
+      // v8.7: also re-migrate on live remote updates so defaults aren't
+      // clobbered by an older client pushing without the new fields.
+      try { migrateState(); } catch (_) {}
       saveStateLocal();
       this.applyingRemote = false;
       // Refresh UI — but only if user isn't actively typing
@@ -12648,16 +12657,26 @@ function renderPartWizard(q, part) {
   const partTypes = state.settings.partTypes || [];
   const type = partTypes.find(t => t.id === part.typeId) || { icon: '⚙', color: '#64748B', label: 'Part' };
 
-  // Step dots
+  // v8.7: bigger step buttons with prominent icons. Was 11px font / 4px
+  // padding (basically pill-sized), too small to scan or hit. Now a proper
+  // tab-style row: 18px icon over a 12px label, taller hit target,
+  // colored top border on active.
   const dots = steps.map((s, i) => {
     const isActive = i === curIdx;
     const isDone = i < curIdx;
+    const accent = isActive ? type.color : isDone ? 'var(--green)' : 'var(--line-dark)';
+    const bg     = isActive ? type.color : isDone ? '#ECFDF3' : 'var(--paper)';
+    const fg     = isActive ? 'white'    : isDone ? 'var(--green)' : 'var(--text-mute)';
     return `
       <button onclick="App.wizardGoToStep('${part.id}', ${i})"
               title="${esc(s.label)} — ${esc(s.desc)}"
-              style="display:flex; align-items:center; gap:4px; padding:4px 10px; border-radius:14px; cursor:pointer; border:1px solid ${isActive ? type.color : isDone ? 'var(--green)' : 'var(--line-dark)'}; background:${isActive ? type.color : isDone ? '#ECFDF3' : 'var(--paper)'}; color:${isActive ? 'white' : isDone ? 'var(--green)' : 'var(--text-mute)'}; font-size:11px; font-weight:600; transition:all 0.1s;">
-        <span>${i+1}</span>
-        <span>${esc(s.icon)} ${esc(s.label)}</span>
+              style="display:flex; flex-direction:column; align-items:center; gap:2px; padding:8px 14px; min-width:80px; border-radius:6px; cursor:pointer; border:1px solid ${accent}; border-top:3px solid ${accent}; background:${bg}; color:${fg}; font-weight:600; transition:all 0.1s; flex:1;">
+        <span style="display:flex; align-items:center; gap:6px; font-size:11px; opacity:${isActive?0.85:0.7}; letter-spacing:0.04em; text-transform:uppercase;">
+          <span>${i+1}</span>
+          ${isDone ? '<span>✓</span>' : ''}
+        </span>
+        <span style="font-size:22px; line-height:1;">${esc(s.icon)}</span>
+        <span style="font-size:12px;">${esc(s.label)}</span>
       </button>
     `;
   }).join('');
@@ -12696,7 +12715,7 @@ function renderPartWizard(q, part) {
         </div>
       </div>
       <div style="padding:6px 14px; background:#FAFAFA; border-bottom:1px solid var(--line);">
-        <div style="display:flex; gap:4px; flex-wrap:wrap;">${dots}</div>
+        <div style="display:flex; gap:6px; flex-wrap:wrap; align-items:stretch;">${dots}</div>
       </div>
       <div style="padding:14px;">
         ${body}
@@ -13590,15 +13609,32 @@ function renderPartTypePickerModal() {
     return;
   }
   const types = state.settings.partTypes || [];
+  // v8.7: graceful empty-state — if partTypes is empty (deleted all in
+  // Settings, or remote sync didn't carry them, or older project state),
+  // show the 5 defaults inline with a "Restore defaults" button instead
+  // of an empty modal. User can pick one immediately AND the click also
+  // persists the defaults back into settings so it doesn't keep happening.
+  const isEmpty = types.length === 0;
+  const fallbackTypes = isEmpty ? [
+    { id:'machined',  label:'Machined Part',     icon:'🔧', color:'#1E5BAE', desc:'Standard CNC machining from raw stock' },
+    { id:'cutblank',  label:'Cut Blank',         icon:'⚡', color:'#C56B1C', desc:'Outside-cut (laser/waterjet/plasma) — no machining' },
+    { id:'welded',    label:'Welded Assembly',   icon:'🔥', color:'#C73E1D', desc:'Welded component with weld ops, may include cutting + machining' },
+    { id:'hybrid',    label:'Hybrid (cut+mill)', icon:'🛠', color:'#7C3AED', desc:'Outside-cut blank that also needs secondary machining' },
+    { id:'purchased', label:'Purchased Item',    icon:'📦', color:'#64748B', desc:'Off-the-shelf component (McMaster, Grainger, etc.) — no operations' },
+  ] : types;
   modalHost.innerHTML = `
     <div class="modal-backdrop" onclick="App.closePartTypePicker()">
-      <div class="modal" style="width:640px; max-width:96vw;" onclick="event.stopPropagation()">
+      <div class="modal" style="width:680px; max-width:96vw;" onclick="event.stopPropagation()">
         <div class="modal-header">What kind of part?</div>
         <div class="modal-body">
-          <p class="text-mute small" style="margin:0 0 14px;">Tag the part by type so it gets the right color in the parts chip row. You can change it later from the part header.</p>
+          ${isEmpty ? `
+            <div style="padding:10px 14px; background:#FFFBEB; border:1px solid #FDE68A; border-radius:4px; margin-bottom:14px; font-size:12px;">
+              ⚠ Your part-types list is empty (probably deleted in Settings → Part Types, or wasn't carried over from an older sync). Showing the 5 defaults below — pick one and it'll be restored to your list automatically. <a href="javascript:App.restoreDefaultPartTypes()" style="color:var(--orange); font-weight:600;">Or restore all 5 defaults now.</a>
+            </div>
+          ` : `<p class="text-mute small" style="margin:0 0 14px;">Tag the part by type — that decides which sections you'll see in the wizard.</p>`}
           <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(220px, 1fr)); gap:10px;">
-            ${types.map(t => `
-              <button class="type-picker-card" onclick="App.createPartOfType('${esc(t.id)}')" style="--type-color:${esc(t.color)};">
+            ${fallbackTypes.map(t => `
+              <button class="type-picker-card" onclick="${isEmpty ? `App.restoreDefaultPartTypes(); App.createPartOfType('${esc(t.id)}')` : `App.createPartOfType('${esc(t.id)}')`}" style="--type-color:${esc(t.color)};">
                 <span class="type-picker-stripe" style="background:${esc(t.color)};"></span>
                 <span class="type-picker-body">
                   <span class="type-picker-top"><span style="font-size:20px;">${t.icon}</span><strong>${esc(t.label)}</strong></span>
@@ -20750,6 +20786,28 @@ const App = {
       });
       logActivity('Added part type', 'New Part Type');
     });
+  },
+  // v8.7: one-click restore of the 5 default part types. Wired from the
+  // empty-state notice in the part-type picker AND linked from Settings
+  // → Part Types when the list is empty.
+  restoreDefaultPartTypes() {
+    update(s => {
+      const existing = new Set((s.settings.partTypes || []).map(t => t.id));
+      const defaults = [
+        { id:'machined',  label:'Machined Part',     icon:'🔧', color:'#1E5BAE', desc:'Standard CNC machining from raw stock' },
+        { id:'cutblank',  label:'Cut Blank',         icon:'⚡', color:'#C56B1C', desc:'Outside-cut (laser/waterjet/plasma) — no machining' },
+        { id:'welded',    label:'Welded Assembly',   icon:'🔥', color:'#C73E1D', desc:'Welded component with weld ops, may include cutting + machining' },
+        { id:'hybrid',    label:'Hybrid (cut+mill)', icon:'🛠', color:'#7C3AED', desc:'Outside-cut blank that also needs secondary machining' },
+        { id:'purchased', label:'Purchased Item',    icon:'📦', color:'#64748B', desc:'Off-the-shelf component (McMaster, Grainger, etc.) — no operations' },
+      ];
+      if (!Array.isArray(s.settings.partTypes)) s.settings.partTypes = [];
+      let added = 0;
+      defaults.forEach(d => {
+        if (!existing.has(d.id)) { s.settings.partTypes.push(d); added++; }
+      });
+      logActivity('Restored default part types', '', `${added} added`);
+    });
+    showToast('✓ Default part types restored.', 2500);
   },
   removePartType(idx) {
     const t = (state.settings.partTypes || [])[idx];
