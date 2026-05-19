@@ -769,7 +769,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '8.8.0';
+const APP_VERSION = '8.8.1';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -1750,6 +1750,15 @@ const SyncEngine = {
     if (!this.config.apiKey || !this.config.databaseURL) {
       throw new Error('Firebase apiKey and databaseURL are required.');
     }
+    // v8.8.1: defensive — the Firebase loader is set up by an inline
+    // <script> block at the very top of the page. If something blocks it
+    // (CSP, certain Chrome extensions, network error on initial parse),
+    // window._firebase is undefined and we'd crash with the cryptic
+    // "Cannot read properties of undefined (reading 'loadModules')".
+    // Surface a clearer message so the retry loop logs something useful.
+    if (!window._firebase || typeof window._firebase.loadModules !== 'function') {
+      throw new Error('Firebase loader not initialized. Hard-refresh the page (Ctrl+F5) — if it persists, check the browser console for blocked scripts.');
+    }
     const fb = await window._firebase.loadModules();
     this.fb = fb;
     try {
@@ -2044,6 +2053,9 @@ const SyncEngine = {
   // by their email, creates the Firebase Auth user with their chosen password,
   // and removes the invite. Called by the in-app invite-acceptance flow.
   async acceptInviteAndSignUp(email, password, displayName) {
+    if (!window._firebase || typeof window._firebase.loadModules !== 'function') {
+      throw new Error('Firebase loader not initialized. Hard-refresh the page (Ctrl+F5).');
+    }
     const fb = await window._firebase.loadModules();
     if (!this.config) throw new Error('Sync config missing.');
     // Initialize a temporary app/auth just for signup (we may not have an app instance yet)
@@ -2102,6 +2114,9 @@ const SyncEngine = {
     return { uid, name: displayName || inviteData.name || email.split('@')[0] };
   },
   async sendPasswordReset(email) {
+    if (!window._firebase || typeof window._firebase.loadModules !== 'function') {
+      throw new Error('Firebase loader not initialized. Hard-refresh the page (Ctrl+F5).');
+    }
     const fb = await window._firebase.loadModules();
     if (!this.config) throw new Error('Sync config missing.');
     let app;
