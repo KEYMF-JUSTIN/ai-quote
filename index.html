@@ -769,7 +769,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '8.7.0';
+const APP_VERSION = '8.8.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -1084,6 +1084,24 @@ function migrateState() {
   if (state.settings && !Array.isArray(state.settings.colorFavorites)) {
     state.settings.colorFavorites = [];
   }
+  // v8.8: Collar machining defaults — feed rate, depth-of-cut, load/unload,
+  // screw-down. Used by the Collar wizard's cut-time calculator. Configurable
+  // in Settings → Collar Defaults so the shop can tweak as machines change.
+  if (!state.settings.collarDefaults || typeof state.settings.collarDefaults !== 'object') {
+    state.settings.collarDefaults = {};
+  }
+  const cd = state.settings.collarDefaults;
+  if (cd.feedIpm        == null) cd.feedIpm = 50;        // inches per minute
+  if (cd.doc            == null) cd.doc = 0.25;          // depth of cut per pass (in)
+  if (cd.loadUnloadMin  == null) cd.loadUnloadMin = 5;   // sheet load/unload time (min)
+  if (cd.screwDownMin   == null) cd.screwDownMin = 5;    // time to fixture/screw sheet to table (min)
+  if (cd.kerf           == null) cd.kerf = 0.05;         // saw/cutter kerf for nesting math (in)
+  if (cd.sheetLen       == null) cd.sheetLen = 96;       // default sheet length (4×8 in)
+  if (cd.sheetWid       == null) cd.sheetWid = 48;
+  if (!Array.isArray(cd.sheetPresets)) cd.sheetPresets = [
+    { label:'4ft × 8ft (standard)', len:96, wid:48 },
+    { label:'5ft × 10ft (rare)',    len:120, wid:60 },
+  ];
   // v7.19: accounting documents - ensure arrays + counters + tax/terms defaults
   if (!Array.isArray(state.purchaseOrders)) state.purchaseOrders = [];
   if (!Array.isArray(state.packingSlips)) state.packingSlips = [];
@@ -1388,6 +1406,20 @@ function migrateState() {
         // Older imports didn't include one — backfill here.
         if (!m.id) m.id = uid();
       });
+      // v8.8: seed G-10 / GPO-3 / G-11 if missing — these are the materials
+      // the shop uses for collars (picture-frame parts cut from sheet stock).
+      // Don't overwrite existing densities / vendor assignments.
+      const seedCollarMats = [
+        { name:'G-10',   density:0.069, category:'plastic' },
+        { name:'GPO-3',  density:0.063, category:'plastic' },
+        { name:'G-11',   density:0.070, category:'plastic' },
+      ];
+      const haveNames = new Set(state.settings.materials.map(m => (m.name||'').toLowerCase()));
+      seedCollarMats.forEach(sm => {
+        if (!haveNames.has(sm.name.toLowerCase())) {
+          state.settings.materials.push({ id: uid(), name: sm.name, density: sm.density, category: sm.category, vendorIds: [], notes: '(seeded for Collar parts — finish defining in Settings)' });
+        }
+      });
     }
   }
   state.quotes.forEach(q => {
@@ -1417,7 +1449,17 @@ function migrateState() {
       { id:'welded',    label:'Welded Assembly',   icon:'🔥', color:'#C73E1D', desc:'Welded component with weld ops, may include cutting + machining' },
       { id:'hybrid',    label:'Hybrid (cut+mill)', icon:'🛠', color:'#7C3AED', desc:'Outside-cut blank that also needs secondary machining' },
       { id:'purchased', label:'Purchased Item',    icon:'📦', color:'#64748B', desc:'Off-the-shelf component (McMaster, Grainger, etc.) — no operations' },
+      // v8.8: Collar / Frame — picture-frame-shaped rectangles cut from
+      // G-10/GPO-3/G-11 sheet. Specialized wizard with a nesting calculator
+      // (rectangle pack on 4×8 or 5×10 sheets) + a cut-time calculator
+      // (perimeter × passes / feed rate).
+      { id:'collar',    label:'Collar / Frame',    icon:'🖼', color:'#0891B2', desc:'Picture-frame rectangle from G-10/GPO-3/G-11 sheet — nesting + cut-time calculator built in' },
     ];
+  }
+  // v8.8: ensure 'collar' is added to existing part-type lists (post v7.74,
+  // upgrades from older sessions get the new type without losing customizations)
+  if (Array.isArray(state.settings.partTypes) && !state.settings.partTypes.some(t => t.id === 'collar')) {
+    state.settings.partTypes.push({ id:'collar', label:'Collar / Frame', icon:'🖼', color:'#0891B2', desc:'Picture-frame rectangle from G-10/GPO-3/G-11 sheet — nesting + cut-time calculator built in' });
   }
   // v7.61: every part gets a typeId. Existing parts without one default to
   // 'machined' (the most common case for KMF's historical work). Estimators
@@ -11862,6 +11904,54 @@ function renderSettings() {
       </div>
     </div>
 
+    <!-- v8.8: Collar Defaults — drives the cut-time calculator + nesting
+         math on the Collar wizard. Shop-wide defaults the user can dial
+         in once and override per-part as needed. -->
+    <div class="card">
+      <div class="card-header">
+        <span>🖼 Collar Defaults · feed/speed + handling time</span>
+      </div>
+      <div class="card-body">
+        <p class="text-mute small" style="margin:0 0 12px;">
+          Defaults used by the Collar / Frame part type's cut-time calculator. Each can be overridden per-part in the wizard. Sheet presets show up as one-click buttons on the Nesting step.
+        </p>
+        <div class="form-grid cols-3">
+          <div class="field"><label>Feed rate (IPM)</label>
+            ${bind({label:'Feed IPM', value:s.collarDefaults.feedIpm, type:'number', onChange:v=>{ s.collarDefaults.feedIpm = num(v) || 50; }, attrs:'step="5" min="1"'})}
+            <div class="hint">Default cutter feed in inches/min</div>
+          </div>
+          <div class="field"><label>Depth of cut per pass (in)</label>
+            ${bind({label:'DOC', value:s.collarDefaults.doc, type:'number', onChange:v=>{ s.collarDefaults.doc = num(v) || 0.25; }, attrs:'step="0.0625" min="0.001"'})}
+            <div class="hint">Material thickness ÷ DOC = pass count</div>
+          </div>
+          <div class="field"><label>Kerf (in)</label>
+            ${bind({label:'Kerf', value:s.collarDefaults.kerf, type:'number', onChange:v=>{ s.collarDefaults.kerf = num(v) || 0.05; }, attrs:'step="0.005" min="0"'})}
+            <div class="hint">Affects nesting math</div>
+          </div>
+          <div class="field"><label>Load / unload (min)</label>
+            ${bind({label:'Load/unload', value:s.collarDefaults.loadUnloadMin, type:'number', onChange:v=>{ s.collarDefaults.loadUnloadMin = num(v) || 0; }, attrs:'step="0.25" min="0"'})}
+            <div class="hint">Sheet on, sheet off</div>
+          </div>
+          <div class="field"><label>Screw-down (min)</label>
+            ${bind({label:'Screw-down', value:s.collarDefaults.screwDownMin, type:'number', onChange:v=>{ s.collarDefaults.screwDownMin = num(v) || 0; }, attrs:'step="0.25" min="0"'})}
+            <div class="hint">Fixture sheet to table</div>
+          </div>
+          <div class="field"><label>Default sheet</label>
+            <div style="display:flex; gap:6px;">
+              <input type="number" value="${s.collarDefaults.sheetLen}" onchange="state.settings.collarDefaults.sheetLen = parseFloat(this.value) || 96; saveState(); render();" style="width:70px;" step="1" min="0">
+              <span style="align-self:center; color:var(--text-mute);">×</span>
+              <input type="number" value="${s.collarDefaults.sheetWid}" onchange="state.settings.collarDefaults.sheetWid = parseFloat(this.value) || 48; saveState(); render();" style="width:70px;" step="1" min="0">
+              <span style="align-self:center; color:var(--text-mute); font-size:11px;">inches</span>
+            </div>
+            <div class="hint">4×8 (96×48) standard</div>
+          </div>
+        </div>
+        <div style="margin-top:10px; padding:10px 12px; background:#F0F9FF; border-left:3px solid var(--blue); border-radius:3px; font-size:12px;">
+          💡 Sheet presets (4×8 standard, 5×10 rare) live on every Collar wizard — click to switch sheet size mid-quote. Edit the presets array in code if you need different ones.
+        </div>
+      </div>
+    </div>
+
     <div class="card">
       <div class="card-header">
         <span>Material Densities (lb/in³) &amp; Vendor Assignments</span>
@@ -12553,14 +12643,16 @@ function renderPdfDock(quote) {
 // _default until they're explicitly mapped here — at which point you just
 // add another entry below.
 const WIZARD_STEP_DEFS = {
-  identity:  { id: 'identity',  label: 'Identity',  icon: '📝', desc: 'Part number, description, drawing.' },
-  material:  { id: 'material',  label: 'Material',  icon: '🪶', desc: 'Stock material + dimensions.' },
-  setups:    { id: 'setups',    label: 'Setups',    icon: '⚙',  desc: 'Machine operations + setup/run times per tier.' },
-  dxf:       { id: 'dxf',       label: 'DXF / Cut', icon: '⚡', desc: 'Outside cut files + vendor selection.' },
-  tooling:   { id: 'tooling',   label: 'Tooling',   icon: '🔧', desc: 'Specialty tooling + insert costs.' },
-  weldops:   { id: 'weldops',   label: 'Weld Ops',  icon: '🔥', desc: 'Welding operations + filler material.' },
-  finishing: { id: 'finishing', label: 'Finishing', icon: '🛠', desc: 'Outside services — paint, plating, heat treat, etc.' },
-  review:    { id: 'review',    label: 'Review',    icon: '✓',  desc: 'Pricing summary + sanity check.' },
+  identity:      { id: 'identity',      label: 'Identity',  icon: '📝', desc: 'Part number, description, drawing.' },
+  material:      { id: 'material',      label: 'Material',  icon: '🪶', desc: 'Stock material + dimensions.' },
+  setups:        { id: 'setups',        label: 'Setups',    icon: '⚙',  desc: 'Machine operations + setup/run times per tier.' },
+  dxf:           { id: 'dxf',           label: 'DXF / Cut', icon: '⚡', desc: 'Outside cut files + vendor selection.' },
+  tooling:       { id: 'tooling',       label: 'Tooling',   icon: '🔧', desc: 'Specialty tooling + insert costs.' },
+  weldops:       { id: 'weldops',       label: 'Weld Ops',  icon: '🔥', desc: 'Welding operations + filler material.' },
+  finishing:     { id: 'finishing',     label: 'Finishing', icon: '🛠', desc: 'Outside services — paint, plating, heat treat, etc.' },
+  collarNesting: { id: 'collarNesting', label: 'Nesting',   icon: '🧩', desc: 'How many collars fit on a sheet — rectangle pack calculator.' },
+  collarCut:     { id: 'collarCut',     label: 'Cut Time',  icon: '⏱',  desc: 'Inside + outside perimeter cut time per sheet, with passes math.' },
+  review:        { id: 'review',        label: 'Review',    icon: '✓',  desc: 'Pricing summary + sanity check.' },
 };
 const WIZARD_STEPS_BY_TYPE = {
   machined:  ['identity', 'material', 'setups', 'tooling', 'finishing', 'review'],
@@ -12568,6 +12660,11 @@ const WIZARD_STEPS_BY_TYPE = {
   welded:    ['identity', 'material', 'setups', 'weldops', 'finishing', 'review'],
   hybrid:    ['identity', 'material', 'dxf', 'setups', 'tooling', 'finishing', 'review'],
   purchased: ['identity', 'material', 'review'],
+  // v8.8: Collar / Frame steps — material first (G-10 default), then the
+  // two specialized calculators (nesting + cut time), then the standard
+  // setups card for load/unload/screw-down ops, then finishing (grinding
+  // for packets, etc.), then review.
+  collar:    ['identity', 'material', 'collarNesting', 'collarCut', 'setups', 'finishing', 'review'],
   _default:  ['identity', 'material', 'review'],
 };
 function wizardStepsFor(part) {
@@ -12691,12 +12788,15 @@ function renderPartWizard(q, part) {
   else if (cur.id === 'dxf')       body = renderWizardStepDxf(q, part);
   else if (cur.id === 'tooling')   body = renderWizardStepTooling(q, part);
   else if (cur.id === 'weldops')   body = renderWizardStepWeldOps(q, part);
+  else if (cur.id === 'collarNesting') body = renderWizardStepCollarNesting(q, part);
+  else if (cur.id === 'collarCut')     body = renderWizardStepCollarCut(q, part);
   else if (cur.id === 'finishing') body = renderWizardStepFinishing(q, part);
   else if (cur.id === 'review')    body = renderWizardStepReview(q, part);
   else body = `<p class="text-mute">Step "${esc(cur.label)}" — no renderer registered.</p>`;
   // v8.2: every step body gets a drop zone prepended. Review doesn't need
-  // one (it's read-only), but every other step can accept attachments.
-  if (cur.id !== 'review') {
+  // one (it's read-only); collar calculator steps have their own focused
+  // UIs and adding a drop zone would dilute the calculation flow.
+  if (cur.id !== 'review' && cur.id !== 'collarNesting' && cur.id !== 'collarCut') {
     body = renderWizardStepDropZone(part, cur.id) + body;
   }
 
@@ -12901,6 +13001,274 @@ function renderWizardStepWeldOps(q, part) {
     ${renderWeldOpsCard(q, part, machineOpts)}
   `;
 }
+// v8.8: Collar nesting math. Given outside dims + sheet dims + kerf, returns
+// the max parts that fit on one sheet (best of two orientations) plus the
+// row × column layout for visualization.
+function _calcCollarNesting(outsideLen, outsideWid, sheetLen, sheetWid, kerf) {
+  outsideLen = Math.max(0.001, num(outsideLen));
+  outsideWid = Math.max(0.001, num(outsideWid));
+  sheetLen   = Math.max(0.001, num(sheetLen));
+  sheetWid   = Math.max(0.001, num(sheetWid));
+  kerf       = Math.max(0, num(kerf));
+  const oL = outsideLen + kerf;
+  const oW = outsideWid + kerf;
+  // Orientation A: long side along sheet length
+  const colsA = Math.floor((sheetLen + kerf) / oL);
+  const rowsA = Math.floor((sheetWid + kerf) / oW);
+  const nA = Math.max(0, colsA) * Math.max(0, rowsA);
+  // Orientation B: rotated 90°
+  const colsB = Math.floor((sheetLen + kerf) / oW);
+  const rowsB = Math.floor((sheetWid + kerf) / oL);
+  const nB = Math.max(0, colsB) * Math.max(0, rowsB);
+  if (nB > nA) return { cols:colsB, rows:rowsB, count:nB, rotated:true, partLen:outsideWid, partWid:outsideLen };
+  return { cols:colsA, rows:rowsA, count:nA, rotated:false, partLen:outsideLen, partWid:outsideWid };
+}
+// v8.8: SVG visualization — draw the sheet outline with N collar rectangles
+// laid out in the computed nesting grid. Picture-frame inner cutout shown
+// as a hatched/lighter rectangle inside each part.
+function _renderNestingSVG(nest, sheetLen, sheetWid, frameWidth, color) {
+  const maxWidth = 560;
+  const scale = Math.min(maxWidth / sheetLen, 280 / sheetWid);
+  const svgW = sheetLen * scale;
+  const svgH = sheetWid * scale;
+  const tiles = [];
+  for (let r = 0; r < nest.rows; r++) {
+    for (let c = 0; c < nest.cols; c++) {
+      const x = c * nest.partLen * scale;
+      const y = r * nest.partWid * scale;
+      const w = nest.partLen * scale;
+      const h = nest.partWid * scale;
+      const fw = Math.max(0, frameWidth) * scale;
+      tiles.push(`
+        <rect x="${x+1}" y="${y+1}" width="${w-2}" height="${h-2}" fill="${color}" fill-opacity="0.55" stroke="${color}" stroke-width="1.2"/>
+        ${fw > 0 && (w - 2*fw) > 4 && (h - 2*fw) > 4 ? `<rect x="${x+fw}" y="${y+fw}" width="${w-2*fw}" height="${h-2*fw}" fill="var(--bg)" stroke="${color}" stroke-width="0.6" stroke-dasharray="2 2"/>` : ''}
+      `);
+    }
+  }
+  return `
+    <svg width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}" style="background:repeating-linear-gradient(45deg, #FAFAFA, #FAFAFA 8px, #F0F0F0 8px, #F0F0F0 10px); border:1px solid var(--line-dark); border-radius:3px;">
+      ${tiles.join('')}
+      <rect x="0.5" y="0.5" width="${svgW-1}" height="${svgH-1}" fill="none" stroke="var(--navy)" stroke-width="1.5"/>
+    </svg>
+  `;
+}
+
+// v8.8: Collar nesting wizard step. Lets the user enter the collar's
+// outside dims + frame border width + pick the sheet size, see how many
+// parts fit per sheet (live SVG + count), and see how many sheets are
+// needed for the desired quantity.
+function renderWizardStepCollarNesting(q, part) {
+  if (!part.collar) part.collar = {};
+  const co = part.collar;
+  if (co.outsideLen == null) co.outsideLen = 30;
+  if (co.outsideWid == null) co.outsideWid = 10;
+  if (co.frameWidth == null) co.frameWidth = 2;
+  const cd = state.settings.collarDefaults || {};
+  const sheetLen = co.sheetLen != null ? co.sheetLen : cd.sheetLen;
+  const sheetWid = co.sheetWid != null ? co.sheetWid : cd.sheetWid;
+  const kerf = (co.kerf != null ? co.kerf : cd.kerf) || 0.05;
+  const nest = _calcCollarNesting(co.outsideLen, co.outsideWid, sheetLen, sheetWid, kerf);
+  const partType = (state.settings.partTypes || []).find(t => t.id === 'collar') || { color: '#0891B2' };
+  // Desired qty — pull primary qty tier for "sheets needed" math
+  const qty = (part.qtyTiers && part.qtyTiers[0]) || 1;
+  const sheetsNeeded = nest.count > 0 ? Math.ceil(qty / nest.count) : 0;
+  const presets = cd.sheetPresets || [];
+  return `
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:18px;">
+      <div>
+        <h3 style="font-size:13px; color:var(--steel); margin:0 0 10px;">Collar geometry</h3>
+        <div class="row" style="gap:10px;">
+          <div class="field" style="flex:1;"><label>Outside length (in)</label>
+            ${bind({label:'Outside length', value:co.outsideLen, type:'number', onChange:v=>{ co.outsideLen = v; }, attrs:'step="0.25" min="0"'})}
+          </div>
+          <div class="field" style="flex:1;"><label>Outside width (in)</label>
+            ${bind({label:'Outside width', value:co.outsideWid, type:'number', onChange:v=>{ co.outsideWid = v; }, attrs:'step="0.25" min="0"'})}
+          </div>
+        </div>
+        <div class="row" style="gap:10px; margin-top:8px;">
+          <div class="field" style="flex:1;"><label>Frame border width (in)</label>
+            ${bind({label:'Frame width', value:co.frameWidth, type:'number', onChange:v=>{ co.frameWidth = v; }, attrs:'step="0.125" min="0"'})}
+            <div class="hint">Width of the picture-frame border (≈ 2" default)</div>
+          </div>
+          <div class="field" style="flex:1;"><label>Kerf (in)</label>
+            ${bind({label:'Kerf', value:kerf, type:'number', onChange:v=>{ co.kerf = v; }, attrs:'step="0.005" min="0"'})}
+            <div class="hint">Cutter thickness, eats into nesting</div>
+          </div>
+        </div>
+
+        <h3 style="font-size:13px; color:var(--steel); margin:14px 0 10px;">Sheet size</h3>
+        <div class="row" style="gap:6px; flex-wrap:wrap; margin-bottom:8px;">
+          ${presets.map(p => {
+            const on = (sheetLen === p.len && sheetWid === p.wid);
+            return `<button onclick="App.collarSetSheet('${part.id}', ${p.len}, ${p.wid})"
+                            style="padding:6px 12px; border-radius:4px; cursor:pointer; border:2px solid ${on?'var(--orange)':'var(--line-dark)'}; background:${on?'#FFF7ED':'var(--paper)'}; color:${on?'var(--orange)':'var(--text)'}; font-size:12px; font-weight:600;">
+              ${esc(p.label)}
+            </button>`;
+          }).join('')}
+        </div>
+        <div class="row" style="gap:10px;">
+          <div class="field" style="flex:1;"><label>Sheet length (in)</label>
+            ${bind({label:'Sheet length', value:sheetLen, type:'number', onChange:v=>{ co.sheetLen = v; }, attrs:'step="1" min="0"'})}
+          </div>
+          <div class="field" style="flex:1;"><label>Sheet width (in)</label>
+            ${bind({label:'Sheet width', value:sheetWid, type:'number', onChange:v=>{ co.sheetWid = v; }, attrs:'step="1" min="0"'})}
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <h3 style="font-size:13px; color:var(--steel); margin:0 0 10px;">Nesting result</h3>
+        <div style="padding:14px; background:var(--paper); border:1px solid var(--line); border-radius:4px;">
+          <div style="font-size:32px; font-weight:700; color:${partType.color}; line-height:1;">
+            ${nest.count}
+            <span style="font-size:14px; color:var(--text-mute); font-weight:400; margin-left:6px;">parts / sheet</span>
+          </div>
+          <div class="text-mute small" style="margin-top:6px;">
+            ${nest.cols} cols × ${nest.rows} rows${nest.rotated ? ' · <span style="color:var(--orange); font-weight:600;">rotated 90°</span>' : ''}
+          </div>
+          <div style="margin-top:14px; padding-top:10px; border-top:1px dashed var(--line);">
+            <div style="display:flex; justify-content:space-between; font-size:13px; padding:2px 0;">
+              <span>Qty wanted</span><strong class="mono">${qty}</strong>
+            </div>
+            <div style="display:flex; justify-content:space-between; font-size:13px; padding:2px 0;">
+              <span>Sheets needed</span><strong class="mono" style="color:${partType.color};">${sheetsNeeded}</strong>
+            </div>
+            <div style="display:flex; justify-content:space-between; font-size:11px; padding:2px 0; color:var(--text-mute);">
+              <span>Spare slots (last sheet)</span><span class="mono">${nest.count > 0 ? (sheetsNeeded * nest.count - qty) : '—'}</span>
+            </div>
+          </div>
+          <div style="margin-top:10px; font-size:11px; color:var(--text-mute);">
+            Math uses orientation that fits the most parts. Edit qty tiers on Identity step → propagate here.
+          </div>
+        </div>
+
+        <div style="margin-top:14px;">
+          <div class="text-mute small" style="margin-bottom:4px;">Visual layout — 1 sheet, scaled to fit:</div>
+          ${nest.count > 0
+            ? _renderNestingSVG(nest, sheetLen, sheetWid, co.frameWidth, partType.color)
+            : `<div style="padding:14px; background:#FDEDEA; border:1px dashed #C73E1D; border-radius:3px; color:#C73E1D; font-size:12px;">⚠ This collar doesn't fit on the selected sheet. Try a larger sheet (5×10) or smaller dims.</div>`}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// v8.8: Collar cut-time calculator. Computes inside perimeter, outside
+// perimeter, # of passes from material thickness ÷ DOC, applies feed
+// rate to get cut minutes per sheet. Adds load/unload + screw-down time.
+function _calcCollarCutTime(co, cd, materialThickness) {
+  const oL = num(co.outsideLen);
+  const oW = num(co.outsideWid);
+  const fw = num(co.frameWidth);
+  const feedIpm = co.feedIpm != null ? num(co.feedIpm) : num(cd.feedIpm);
+  const doc     = co.doc     != null ? num(co.doc)     : num(cd.doc);
+  const passes  = doc > 0 ? Math.max(1, Math.ceil(num(materialThickness) / doc)) : 1;
+  // Inside cutout = outside rect − 2 * frame width on each side
+  const innerL = Math.max(0, oL - 2 * fw);
+  const innerW = Math.max(0, oW - 2 * fw);
+  const outerPerimeter = 2 * (oL + oW);
+  const innerPerimeter = 2 * (innerL + innerW);
+  const cutInsidePerPart  = feedIpm > 0 ? (innerPerimeter * passes) / feedIpm : 0;
+  const cutOutsidePerPart = feedIpm > 0 ? (outerPerimeter * passes) / feedIpm : 0;
+  return {
+    passes, feedIpm, doc,
+    innerPerimeter, outerPerimeter,
+    cutInsidePerPart, cutOutsidePerPart,
+    cutCombinedPerPart: cutInsidePerPart + cutOutsidePerPart,
+  };
+}
+
+function renderWizardStepCollarCut(q, part) {
+  if (!part.collar) part.collar = {};
+  const co = part.collar;
+  const cd = state.settings.collarDefaults || {};
+  const matThk = (part.stock && num(part.stock.thickness)) || 0.5;
+  const sheetLen = co.sheetLen != null ? co.sheetLen : cd.sheetLen;
+  const sheetWid = co.sheetWid != null ? co.sheetWid : cd.sheetWid;
+  const kerf = (co.kerf != null ? co.kerf : cd.kerf) || 0.05;
+  const nest = _calcCollarNesting(co.outsideLen || 30, co.outsideWid || 10, sheetLen, sheetWid, kerf);
+  const t = _calcCollarCutTime(co, cd, matThk);
+  const loadUnload = co.loadUnloadMin != null ? num(co.loadUnloadMin) : num(cd.loadUnloadMin);
+  const screwDown  = co.screwDownMin  != null ? num(co.screwDownMin)  : num(cd.screwDownMin);
+  const cutPerSheetCombined = t.cutCombinedPerPart * nest.count;
+  const cutPerSheetInside   = t.cutInsidePerPart   * nest.count;
+  const cutPerSheetOutside  = t.cutOutsidePerPart  * nest.count;
+  const totalPerSheet = cutPerSheetCombined + loadUnload + screwDown;
+  const qty = (part.qtyTiers && part.qtyTiers[0]) || 1;
+  const sheetsNeeded = nest.count > 0 ? Math.ceil(qty / nest.count) : 0;
+  const totalJob = totalPerSheet * sheetsNeeded;
+  const useHours = !!co.timeUnitHours;
+  const fmtTime = (m) => useHours ? `${fmtNum(m/60, 2)} hr` : `${fmtNum(m, 2)} min`;
+  return `
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:18px;">
+      <div>
+        <h3 style="font-size:13px; color:var(--steel); margin:0 0 10px;">Feed &amp; speed</h3>
+        <div class="row" style="gap:10px;">
+          <div class="field" style="flex:1;"><label>Feed rate (IPM)</label>
+            ${bind({label:'Feed IPM', value:co.feedIpm != null ? co.feedIpm : cd.feedIpm, type:'number', onChange:v=>{ co.feedIpm = v; }, attrs:'step="5" min="1"'})}
+            <div class="hint">Default ${cd.feedIpm} IPM (from Settings → Collar Defaults)</div>
+          </div>
+          <div class="field" style="flex:1;"><label>Depth of cut (in)</label>
+            ${bind({label:'DOC', value:co.doc != null ? co.doc : cd.doc, type:'number', onChange:v=>{ co.doc = v; }, attrs:'step="0.0625" min="0.001"'})}
+            <div class="hint">Default ${cd.doc}" per pass</div>
+          </div>
+        </div>
+        <div style="margin-top:10px; padding:8px 10px; background:var(--bg); border-radius:3px; font-size:12px;">
+          Material thickness <strong class="mono">${fmtNum(matThk,3)}"</strong> ÷ DOC <strong class="mono">${fmtNum(t.doc,3)}"</strong>
+          = <strong style="color:var(--orange);">${t.passes}</strong> pass${t.passes===1?'':'es'}
+        </div>
+
+        <h3 style="font-size:13px; color:var(--steel); margin:14px 0 10px;">Handling time</h3>
+        <div class="row" style="gap:10px; align-items:center;">
+          <div class="field" style="flex:1;"><label>Load / unload (${useHours?'hr':'min'})</label>
+            ${bind({label:'Load/unload', value:useHours ? num(co.loadUnloadMin != null ? co.loadUnloadMin : cd.loadUnloadMin)/60 : (co.loadUnloadMin != null ? co.loadUnloadMin : cd.loadUnloadMin), type:'number', onChange:v=>{ co.loadUnloadMin = useHours ? num(v)*60 : v; }, attrs:'step="0.25" min="0"'})}
+          </div>
+          <div class="field" style="flex:1;"><label>Screw-down to table (${useHours?'hr':'min'})</label>
+            ${bind({label:'Screw-down', value:useHours ? num(co.screwDownMin != null ? co.screwDownMin : cd.screwDownMin)/60 : (co.screwDownMin != null ? co.screwDownMin : cd.screwDownMin), type:'number', onChange:v=>{ co.screwDownMin = useHours ? num(v)*60 : v; }, attrs:'step="0.25" min="0"'})}
+          </div>
+          <label style="display:flex; align-items:center; gap:6px; cursor:pointer; user-select:none; padding-top:18px; font-size:11px;">
+            <input type="checkbox" ${useHours?'checked':''} onchange="App.collarSetTimeUnitHours('${part.id}', this.checked)" style="width:14px; height:14px;">
+            hours
+          </label>
+        </div>
+      </div>
+
+      <div>
+        <h3 style="font-size:13px; color:var(--steel); margin:0 0 10px;">Per-part cut times</h3>
+        <table class="tbl tight" style="font-size:12px;">
+          <tbody>
+            <tr><td>Inside perimeter</td><td class="num">${fmtNum(t.innerPerimeter,2)}"</td><td class="num">${fmtTime(t.cutInsidePerPart)}</td></tr>
+            <tr><td>Outside perimeter</td><td class="num">${fmtNum(t.outerPerimeter,2)}"</td><td class="num">${fmtTime(t.cutOutsidePerPart)}</td></tr>
+            <tr style="background:#FEF3C7;"><td><strong>Combined / part</strong></td><td></td><td class="num"><strong>${fmtTime(t.cutCombinedPerPart)}</strong></td></tr>
+          </tbody>
+        </table>
+
+        <h3 style="font-size:13px; color:var(--steel); margin:14px 0 10px;">Per-sheet totals</h3>
+        <table class="tbl tight" style="font-size:12px;">
+          <tbody>
+            <tr><td>Cut inside × ${nest.count}</td><td class="num">${fmtTime(cutPerSheetInside)}</td></tr>
+            <tr><td>Cut outside × ${nest.count}</td><td class="num">${fmtTime(cutPerSheetOutside)}</td></tr>
+            <tr><td>Load / unload</td><td class="num">${fmtTime(loadUnload)}</td></tr>
+            <tr><td>Screw-down to table</td><td class="num">${fmtTime(screwDown)}</td></tr>
+            <tr style="background:#ECFDF3;"><td><strong>Total / sheet</strong></td><td class="num"><strong>${fmtTime(totalPerSheet)}</strong></td></tr>
+          </tbody>
+        </table>
+
+        <div style="margin-top:10px; padding:10px 12px; background:#FFF7ED; border:1px solid #FED7AA; border-radius:4px;">
+          <div style="font-size:11px; color:var(--text-mute); text-transform:uppercase; letter-spacing:0.06em; font-weight:600;">For ${qty} collars (${sheetsNeeded} sheet${sheetsNeeded===1?'':'s'})</div>
+          <div style="font-size:22px; font-weight:700; color:var(--orange); margin-top:4px; line-height:1;">
+            ${fmtTime(totalJob)}
+            <span style="font-size:11px; color:var(--text-mute); font-weight:400; margin-left:6px;">total cut+handling</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div style="margin-top:14px; padding:10px 12px; background:#F0F9FF; border-left:3px solid var(--blue); border-radius:3px; font-size:12px;">
+      💡 <strong>Sequence:</strong> screw down → cut <em>all</em> the insides → cut <em>all</em> the outsides → unload. Inside cutouts release scrap centers; outside cuts release the finished collars.
+    </div>
+  `;
+}
+
 function renderWizardStepFinishing(q, part) {
   return `
     <div class="text-mute small" style="margin-bottom:10px;">Outside services — heat treat, plating, painting, powder coat, anodize, etc. Vendor lookup pulls from your Vendors page.</div>
@@ -13621,6 +13989,7 @@ function renderPartTypePickerModal() {
     { id:'welded',    label:'Welded Assembly',   icon:'🔥', color:'#C73E1D', desc:'Welded component with weld ops, may include cutting + machining' },
     { id:'hybrid',    label:'Hybrid (cut+mill)', icon:'🛠', color:'#7C3AED', desc:'Outside-cut blank that also needs secondary machining' },
     { id:'purchased', label:'Purchased Item',    icon:'📦', color:'#64748B', desc:'Off-the-shelf component (McMaster, Grainger, etc.) — no operations' },
+    { id:'collar',    label:'Collar / Frame',    icon:'🖼', color:'#0891B2', desc:'Picture-frame rectangle from G-10/GPO-3/G-11 sheet — nesting + cut-time calculator built in' },
   ] : types;
   modalHost.innerHTML = `
     <div class="modal-backdrop" onclick="App.closePartTypePicker()">
@@ -19342,6 +19711,29 @@ const App = {
       showToast('✓ Customer assigned.', 2500);
     }
   },
+  // v8.8: Collar wizard helpers
+  collarSetSheet(partId, len, wid) {
+    update(s => {
+      const q = s.quotes.find(qq => qq.id === s.ui.activeQuoteId);
+      if (!q) return;
+      const p = (q.parts || []).find(pp => pp.id === partId);
+      if (!p) return;
+      if (!p.collar) p.collar = {};
+      p.collar.sheetLen = len;
+      p.collar.sheetWid = wid;
+    });
+  },
+  collarSetTimeUnitHours(partId, on) {
+    update(s => {
+      const q = s.quotes.find(qq => qq.id === s.ui.activeQuoteId);
+      if (!q) return;
+      const p = (q.parts || []).find(pp => pp.id === partId);
+      if (!p) return;
+      if (!p.collar) p.collar = {};
+      p.collar.timeUnitHours = !!on;
+    });
+  },
+
   // v8.2: bar-calc toggle on the wizard material step
   toggleBarCalc(partId, on) {
     update(s => {
@@ -20799,6 +21191,7 @@ const App = {
         { id:'welded',    label:'Welded Assembly',   icon:'🔥', color:'#C73E1D', desc:'Welded component with weld ops, may include cutting + machining' },
         { id:'hybrid',    label:'Hybrid (cut+mill)', icon:'🛠', color:'#7C3AED', desc:'Outside-cut blank that also needs secondary machining' },
         { id:'purchased', label:'Purchased Item',    icon:'📦', color:'#64748B', desc:'Off-the-shelf component (McMaster, Grainger, etc.) — no operations' },
+        { id:'collar',    label:'Collar / Frame',    icon:'🖼', color:'#0891B2', desc:'Picture-frame rectangle from G-10/GPO-3/G-11 sheet — nesting + cut-time calculator built in' },
       ];
       if (!Array.isArray(s.settings.partTypes)) s.settings.partTypes = [];
       let added = 0;
