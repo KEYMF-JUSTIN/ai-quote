@@ -769,7 +769,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '8.15.0';
+const APP_VERSION = '8.16.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -1006,6 +1006,7 @@ const state = {
     expandedOneDrive: {},       // v8.6: per-customer collapsible state for the OneDrive config block — keyed customerId → true when expanded.
     mcMasterAddPrompt: null,    // v8.14: { input, loading, error } when the "+ Add McMaster Part" modal is open. Submitting auto-creates a Purchased part + fires the McMaster lookup.
     cartImport: null,           // v8.15: { text, attachments, parsed, loading, error } when the "🛒 From Cart" modal is open. Parsed.items[] is reviewed then bulk-imported as Purchased parts.
+    expandedPartGroups: {},     // v8.16: per-quote per-type expand state for the chip-row groups — keyed `${quoteId}:${typeId}` → true when expanded. Auto-collapse for groups of 3+; click the group chip to expand.
     wizardMode: true,           // v8.10: wizard is now the ONLY quote view (classic killed). Flag kept in state for any legacy code paths that reference it; renderQuote() no longer branches on it.
     wizardStep: {},             // v8.0: keyed partId → step index. Tracks where in the wizard each part is, so switching chips remembers your spot.
     trainingPicker: null,       // v7.62: { entityType, entityId, sampleId?, file?, parsed?, docType, notes, error, loading } for the training sample editor
@@ -12783,24 +12784,89 @@ function renderQuoteWizardChipRow(q) {
   const partTypes = state.settings.partTypes || [];
   const typeOf = id => partTypes.find(t => t.id === id) || { icon: '⚙', color: '#64748B', label: 'Part' };
   const activeId = (state.ui.activePartIdForInfo || {})[q.id];
-  // v8.10: BIGGER chips. Icon-over-label tab style with qty + draft badge.
-  // 28px icon at top, 13px label below, qty pill inline. Active chip gets
-  // an orange accent stripe at the bottom + colored background tint.
-  const chips = (q.parts || []).map((p, i) => {
-    const t = typeOf(p.typeId || 'machined');
-    const isActive = activeId === p.id;
-    const qty = (p.qtyTiers && p.qtyTiers[0]) || 1;
-    return `
-      <button onclick="App.selectPartChip('${q.id}','${p.id}')"
-              title="${esc(p.description || p.partNum || ('Part ' + (i+1)))}"
-              style="display:flex; flex-direction:column; align-items:center; gap:2px; padding:10px 16px; min-width:120px; border-radius:6px; cursor:pointer; border:1px solid ${isActive ? t.color : 'var(--line-dark)'}; border-bottom:3px solid ${isActive ? t.color : 'transparent'}; background:${isActive ? t.color+'18' : 'var(--paper)'}; color:${isActive ? t.color : 'var(--text)'}; transition:all 0.12s; position:relative;">
-        <span style="font-size:28px; line-height:1;">${t.icon}</span>
-        <span style="font-size:13px; font-weight:700; margin-top:4px;">${esc(p.partNum || ('Part ' + (i+1)))}</span>
-        <span style="font-size:11px; color:${isActive ? t.color : 'var(--text-mute)'}; opacity:${isActive?1:0.85};">${esc(t.label.replace(/^(Welded |Picture-frame )/, ''))} · qty ${qty}</span>
-        ${p.isDraft ? '<span style="position:absolute; top:4px; right:4px; font-size:9px; padding:1px 5px; background:#FEF3C7; color:#B45309; border-radius:2px; letter-spacing:0.04em; font-weight:700;">DRAFT</span>' : ''}
+  const parts = q.parts || [];
+
+  // v8.16: group parts by typeId. Groups of 3+ collapse into a single
+  // count chip by default (saves horizontal space when you have e.g. 8
+  // McMaster parts in one quote). Groups smaller than that always show
+  // individual chips. The active part's group auto-expands so you can
+  // always SEE which one you're editing. Per-quote expand state lives
+  // in state.ui.expandedPartGroups so the user's preference sticks while
+  // they navigate within a quote.
+  const COLLAPSE_THRESHOLD = 3;
+  const expandedMap = state.ui.expandedPartGroups || {};
+  const groupKey = (typeId) => `${q.id}:${typeId || 'machined'}`;
+
+  // Walk parts in order, building groups as we go. Preserves
+  // user-added order while grouping CONSECUTIVE same-type parts. If a
+  // user interleaves types (1 machined, 1 collar, 1 machined), each
+  // run is its own group — closer to what they intend visually than
+  // re-sorting everything.
+  const groups = [];
+  let cur = null;
+  parts.forEach((p, i) => {
+    const typeId = p.typeId || 'machined';
+    if (!cur || cur.typeId !== typeId) {
+      cur = { typeId, type: typeOf(typeId), parts: [] };
+      groups.push(cur);
+    }
+    cur.parts.push({ p, i });
+  });
+
+  // Render each group: collapsed chip OR individual chips depending on
+  // expand state + threshold + active-part membership.
+  const groupsHtml = groups.map(g => {
+    const containsActive = g.parts.some(({ p }) => p.id === activeId);
+    const isExpanded = !!expandedMap[groupKey(g.typeId)] || containsActive || g.parts.length < COLLAPSE_THRESHOLD;
+    if (!isExpanded) {
+      // Collapsed group chip — one button representing N parts
+      const t = g.type;
+      const totalQty = g.parts.reduce((s, { p }) => s + ((p.qtyTiers && p.qtyTiers[0]) || 1), 0);
+      const draftCount = g.parts.filter(({ p }) => p.isDraft).length;
+      return `
+        <button onclick="App.togglePartGroup('${q.id}','${esc(g.typeId)}')"
+                title="${g.parts.length} ${esc(t.label)} parts on this quote — click to expand"
+                style="display:flex; flex-direction:column; align-items:center; gap:2px; padding:10px 18px; min-width:140px; border-radius:6px; cursor:pointer; border:2px dashed ${t.color}; background:${t.color}10; color:${t.color}; transition:all 0.12s; position:relative;">
+          <span style="font-size:28px; line-height:1;">${t.icon}</span>
+          <span style="font-size:13px; font-weight:700; margin-top:4px;">
+            ${g.parts.length} × ${esc(t.label.replace(/^(Welded |Picture-frame )/, '').replace(/ \\/ Frame$/, '').replace(/ Item$/, '').replace(/ Part$/, '').replace(/ Assembly$/, ''))}
+          </span>
+          <span style="font-size:11px; opacity:0.8;">qty ${totalQty} total · ▾ expand</span>
+          ${draftCount > 0 ? `<span style="position:absolute; top:4px; right:4px; font-size:9px; padding:1px 5px; background:#FEF3C7; color:#B45309; border-radius:2px; letter-spacing:0.04em; font-weight:700;">${draftCount} DRAFT</span>` : ''}
+        </button>
+      `;
+    }
+    // Expanded — render individual chips for this group + a small "collapse" affordance if it would normally be collapsed
+    const individualChips = g.parts.map(({ p, i }) => {
+      const t = g.type;
+      const isActive = activeId === p.id;
+      const qty = (p.qtyTiers && p.qtyTiers[0]) || 1;
+      return `
+        <button onclick="App.selectPartChip('${q.id}','${p.id}')"
+                title="${esc(p.description || p.partNum || ('Part ' + (i+1)))}"
+                style="display:flex; flex-direction:column; align-items:center; gap:2px; padding:10px 16px; min-width:120px; border-radius:6px; cursor:pointer; border:1px solid ${isActive ? t.color : 'var(--line-dark)'}; border-bottom:3px solid ${isActive ? t.color : 'transparent'}; background:${isActive ? t.color+'18' : 'var(--paper)'}; color:${isActive ? t.color : 'var(--text)'}; transition:all 0.12s; position:relative;">
+          <span style="font-size:28px; line-height:1;">${t.icon}</span>
+          <span style="font-size:13px; font-weight:700; margin-top:4px;">${esc(p.partNum || ('Part ' + (i+1)))}</span>
+          <span style="font-size:11px; color:${isActive ? t.color : 'var(--text-mute)'}; opacity:${isActive?1:0.85};">${esc(t.label.replace(/^(Welded |Picture-frame )/, ''))} · qty ${qty}</span>
+          ${p.isDraft ? '<span style="position:absolute; top:4px; right:4px; font-size:9px; padding:1px 5px; background:#FEF3C7; color:#B45309; border-radius:2px; letter-spacing:0.04em; font-weight:700;">DRAFT</span>' : ''}
+        </button>
+      `;
+    }).join('');
+    // Collapse affordance — only shown if the group is "auto-expanded only because the user clicked"
+    // (not because it contains the active part or is below threshold). Easy way to put it back.
+    const userExpanded = !!expandedMap[groupKey(g.typeId)];
+    const couldCollapse = g.parts.length >= COLLAPSE_THRESHOLD && userExpanded;
+    const collapseBtn = couldCollapse ? `
+      <button onclick="App.togglePartGroup('${q.id}','${esc(g.typeId)}')"
+              title="Collapse this group back to a single chip"
+              style="display:flex; align-items:center; padding:0 10px; cursor:pointer; border:1px dashed var(--line-dark); background:transparent; color:var(--text-mute); border-radius:6px; font-size:11px; align-self:stretch;">
+        ◂ collapse ${esc(g.type.label.replace(/^(Welded |Picture-frame )/, ''))}
       </button>
-    `;
+    ` : '';
+    return individualChips + collapseBtn;
   }).join('');
+
+  const chips = groupsHtml;
   return `
     <div style="background:var(--paper); border:1px solid var(--line); border-radius:4px; padding:12px; margin-bottom:10px;">
       <div style="display:flex; gap:8px; align-items:stretch; flex-wrap:wrap;">
@@ -20432,6 +20498,19 @@ const App = {
       logActivity('Added McMaster part', np.partNum || '?', `via quick-add · ${parsed.priceUnit || 'each'} · ${url}`);
     });
     showToast(`✨ Added McMaster ${parsed.partNum || '(?)'} as a Purchased part.`, 4500);
+  },
+
+  // v8.16: toggle a part-group chip on the wizard chip row between
+  // collapsed (single count chip) and expanded (individual chips per
+  // part). The active part's group is always considered expanded, so
+  // toggling it when it contains the active part is a no-op. Per-quote
+  // per-type state lives in state.ui.expandedPartGroups.
+  togglePartGroup(quoteId, typeId) {
+    update(s => {
+      if (!s.ui.expandedPartGroups) s.ui.expandedPartGroups = {};
+      const key = `${quoteId}:${typeId}`;
+      s.ui.expandedPartGroups[key] = !s.ui.expandedPartGroups[key];
+    });
   },
 
   // v8.15: Cart import — paste/screenshot cart → Claude reads → bulk
