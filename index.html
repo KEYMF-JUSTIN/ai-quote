@@ -769,7 +769,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '8.13.1';
+const APP_VERSION = '8.14.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -1004,6 +1004,7 @@ const state = {
     colorPicker: null,          // v8.4: { action, args, currentColor } when the 128-swatch color picker is open. Picked color is delivered by calling App[action](...args, color). Replaces native <input type=color>.
     expandedNotes: {},          // v8.6: per-entity collapsible state for notes — keyed `${entityType}:${entityId}` → true when expanded. Empty notes show as a "+ Add note" link; non-empty notes show as a collapsed preview that expands on click.
     expandedOneDrive: {},       // v8.6: per-customer collapsible state for the OneDrive config block — keyed customerId → true when expanded.
+    mcMasterAddPrompt: null,    // v8.14: { input, loading, error } when the "+ Add McMaster Part" modal is open. Submitting auto-creates a Purchased part + fires the McMaster lookup.
     wizardMode: true,           // v8.10: wizard is now the ONLY quote view (classic killed). Flag kept in state for any legacy code paths that reference it; renderQuote() no longer branches on it.
     wizardStep: {},             // v8.0: keyed partId → step index. Tracks where in the wizard each part is, so switching chips remembers your spot.
     trainingPicker: null,       // v7.62: { entityType, entityId, sampleId?, file?, parsed?, docType, notes, error, loading } for the training sample editor
@@ -1662,6 +1663,7 @@ function closeAllModals() {
   state.ui.entityChipPicker = null; // v7.72
   state.ui.iconPicker = null;       // v7.74
   state.ui.colorPicker = null;      // v8.4 (already added but listed here so closeAllModals clears it)
+  state.ui.mcMasterAddPrompt = null; // v8.14
   state.ui.mcMasterPaste = null;
   state.ui.missingCustFolder = null;
   state.ui.inviteDialog = null;
@@ -6105,6 +6107,7 @@ function render() {
   renderPartTypePickerModal();
   renderIconPickerModal();      // v7.74
   renderColorPickerModal();     // v8.4
+  renderMcMasterAddPromptModal(); // v8.14
   renderVendorWizardModal();    // v7.68
   renderCustomerWizardModal();  // v7.68
   renderTrainingModal();
@@ -12799,10 +12802,23 @@ function renderQuoteWizardChipRow(q) {
     <div style="background:var(--paper); border:1px solid var(--line); border-radius:4px; padding:12px; margin-bottom:10px;">
       <div style="display:flex; gap:8px; align-items:stretch; flex-wrap:wrap;">
         ${chips || '<span class="text-mute small" style="align-self:center;">No parts yet</span>'}
-        <button class="btn btn-primary" style="margin-left:auto; padding:10px 18px; font-size:13px; font-weight:700; align-self:stretch; min-height:80px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px;" onclick="App.promptAddPart()">
-          <span style="font-size:24px; line-height:1;">+</span>
-          <span style="font-size:12px;">Add Part</span>
-        </button>
+        <div style="margin-left:auto; display:flex; gap:8px; align-self:stretch;">
+          <!-- v8.14: McMaster quick-add — bypass the part-type picker.
+               Click → paste URL/part# modal → fetch → create Purchased part
+               with everything pre-filled in one shot. Mustard "M" badge
+               approximates McMaster's signature catalog yellow. -->
+          <button class="btn" style="padding:10px 16px; min-height:80px; background:#FFFFFF; border:2px solid var(--line-dark); display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; cursor:pointer;"
+                  onclick="App.promptAddMcMasterPart()"
+                  onmouseover="this.style.borderColor='#F2C40D';" onmouseout="this.style.borderColor='var(--line-dark)';"
+                  title="Paste a McMaster URL or part # — auto-creates a Purchased part with description, price, vendor link filled in">
+            <span style="background:#F2C40D; color:#000; font-weight:900; padding:3px 10px; border-radius:2px; font-family:'Arial Black','Impact',sans-serif; font-size:16px; line-height:1; letter-spacing:-0.5px;">M</span>
+            <span style="font-size:11px; color:var(--text-mute); font-weight:600;">Add McMaster</span>
+          </button>
+          <button class="btn btn-primary" style="padding:10px 18px; font-size:13px; font-weight:700; min-height:80px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px;" onclick="App.promptAddPart()">
+            <span style="font-size:24px; line-height:1;">+</span>
+            <span style="font-size:12px;">Add Part</span>
+          </button>
+        </div>
       </div>
     </div>
   `;
@@ -12956,6 +12972,12 @@ function renderWizardStepMaterial(q, part) {
   // below stays for every other part type.
   if (part.typeId === 'collar') {
     return renderWizardStepMaterialCollar(q, part);
+  }
+  // v8.14: Purchased parts skip stock/dims entirely — they're catalog
+  // items, not raw stock we machine from. The Material step instead
+  // captures vendor + part # + price (per-each or per-pack) + markup.
+  if (part.typeId === 'purchased') {
+    return renderWizardStepMaterialPurchased(q, part);
   }
   const materials = state.settings.materials || [];
   const grouped = groupedMaterialOptions(materials);
@@ -13181,6 +13203,97 @@ function renderWizardStepMaterialCollar(q, part) {
         </div>
         <div style="margin-top:10px; padding:10px 12px; background:#FFF7ED; border:1px solid #FED7AA; border-radius:3px; font-size:11px; color:var(--text-mute);">
           💡 The Nesting step uses these dims + the sheet price to show "X sheets needed × $/sheet" for the full quote quantity.
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// v8.14: Purchased-specific Material step. Catalog items don't need stock
+// form / dimensions / weight — they need vendor + part # + price + markup.
+// Per-pack vs per-each pricing handled inline with live $/piece preview.
+function renderWizardStepMaterialPurchased(q, part) {
+  if (!part.materialCost) {
+    part.materialCost = { perPiece: [null], perBar: null, perSheet: null, vendorId: null, vendorPartNum: '', vendorUrl: '', isComponent: true, packSize: null, perPack: null };
+  }
+  const mc = part.materialCost;
+  // Normalize: purchased parts default to component mode (so perPack/packSize)
+  if (mc.isComponent == null) mc.isComponent = true;
+  const vendors = (state.settings.vendors || []).filter(v => vendorTypes(v).includes('material') || vendorTypes(v).includes('tooling'));
+  const sortedV = vendors.slice().sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+  const vendorOpts = sortedV.map(v => ({ value: v.id, label: v.name }));
+  // Derived $/piece
+  const perPiece = mc.isComponent && mc.packSize > 0 && mc.perPack > 0
+    ? mc.perPack / mc.packSize
+    : (Array.isArray(mc.perPiece) ? num(mc.perPiece[0]) : 0);
+  const markupPct = num(state.settings.markups && state.settings.markups.material) || 0;
+  const quotedPerPiece = perPiece * (1 + markupPct);
+  const qty = (part.qtyTiers && part.qtyTiers[0]) || 1;
+  const lineTotal = quotedPerPiece * qty;
+
+  return `
+    <div style="padding:10px 12px; background:#F1F5F9; border-left:3px solid var(--steel); border-radius:3px; font-size:12px; margin-bottom:14px;">
+      📦 <strong>Purchased item</strong> — catalog part from a supplier (McMaster, Misumi, etc.). Capture vendor + part # + price below. No stock or machining math.
+    </div>
+
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:18px;">
+      <div>
+        <h3 style="font-size:13px; color:var(--steel); margin:0 0 10px;">Source / vendor</h3>
+        <div class="field" style="margin-bottom:10px;"><label>Vendor</label>
+          ${bind({label:'Vendor', value: mc.vendorId, type:'select', options: vendorOpts, placeholder:'— select supplier —', onChange:v=>{ mc.vendorId = v || null; }})}
+          <div class="hint">If your supplier isn't in the list, add them on the <a href="javascript:App.go('vendors')">Vendors page</a>.</div>
+        </div>
+        <div class="field" style="margin-bottom:10px;"><label>Vendor part #</label>
+          ${bind({label:'Vendor part number', value: mc.vendorPartNum, onChange:v=>{ mc.vendorPartNum = v || ''; }, placeholder:'e.g. 91290A115'})}
+        </div>
+        <div class="field" style="margin-bottom:10px;"><label>Vendor URL <span class="text-mute small">(optional)</span></label>
+          ${bind({label:'Vendor URL', value: mc.vendorUrl, onChange:v=>{ mc.vendorUrl = v || ''; }, placeholder:'https://...'})}
+        </div>
+        <div class="hint">💡 Want to skip this? Drop a McMaster URL or page screenshot on the Identity drop zone — Claude auto-fills these fields.</div>
+      </div>
+
+      <div>
+        <h3 style="font-size:13px; color:var(--steel); margin:0 0 10px;">Pricing</h3>
+        <div style="margin-bottom:10px;">
+          <label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:13px; padding:4px 0;">
+            <input type="radio" name="purchased-price-mode-${part.id}" ${mc.isComponent ? 'checked' : ''}
+                   onchange="App.purchasedSetPriceMode('${part.id}', true)">
+            <span>Per-pack pricing</span>
+            <span class="text-mute small" style="margin-left:auto;">(e.g. $11.45 / pack of 50)</span>
+          </label>
+          <label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:13px; padding:4px 0;">
+            <input type="radio" name="purchased-price-mode-${part.id}" ${!mc.isComponent ? 'checked' : ''}
+                   onchange="App.purchasedSetPriceMode('${part.id}', false)">
+            <span>Per-each pricing</span>
+            <span class="text-mute small" style="margin-left:auto;">(e.g. $0.229 each)</span>
+          </label>
+        </div>
+        ${mc.isComponent ? `
+          <div class="row" style="gap:10px;">
+            <div class="field" style="flex:1;"><label>Pack size</label>
+              ${bind({label:'Pack size', value:mc.packSize, type:'number', onChange:v=>{ mc.packSize = num(v) || null; }, attrs:'step="1" min="1"', placeholder:'e.g. 50'})}
+            </div>
+            <div class="field" style="flex:1;"><label>$ / pack</label>
+              ${bind({label:'Price per pack', value:mc.perPack, type:'number', onChange:v=>{ mc.perPack = num(v) || null; }, attrs:'step="0.01" min="0"', placeholder:'e.g. 11.45'})}
+            </div>
+          </div>
+        ` : `
+          <div class="field"><label>$ / each</label>
+            ${bind({label:'Price per each', value:Array.isArray(mc.perPiece) ? mc.perPiece[0] : null, type:'number', onChange:v=>{ if(!Array.isArray(mc.perPiece)) mc.perPiece = []; mc.perPiece[0] = num(v) || 0; }, attrs:'step="0.01" min="0"', placeholder:'e.g. 0.229'})}
+          </div>
+        `}
+
+        <div style="margin-top:14px; padding:14px; background:var(--paper); border:1px solid var(--line); border-radius:4px;">
+          <div style="font-size:11px; color:var(--text-mute); text-transform:uppercase; letter-spacing:0.06em; font-weight:700;">Cost preview</div>
+          <table class="tbl tight" style="width:100%; margin-top:6px; font-size:13px;">
+            <tbody>
+              <tr><td>Cost / piece</td><td class="num"><strong>${fmtMoney(perPiece)}</strong></td></tr>
+              <tr><td>Markup</td><td class="num">${(markupPct * 100).toFixed(0)}% (shop default)</td></tr>
+              <tr><td>Quoted / piece</td><td class="num"><strong style="color:#16A34A;">${fmtMoney(quotedPerPiece)}</strong></td></tr>
+              <tr style="border-top:1px dashed var(--line);"><td>× ${qty} qty</td><td class="num"><strong style="color:var(--orange); font-size:16px;">${fmtMoney(lineTotal)}</strong></td></tr>
+            </tbody>
+          </table>
+          <div class="hint" style="margin-top:6px;">Markup is set per-quote in <a href="javascript:App.go('settings')">Settings → Markups</a>.</div>
         </div>
       </div>
     </div>
@@ -14442,6 +14555,65 @@ function renderColorPickerModal() {
 }
 
 // =================================================================
+// v8.14: McMaster quick-add modal. Click the "+ Add McMaster" button on
+// the parts chip row → this modal opens → paste a URL or part # →
+// submit → backend fetches the page → frontend creates a Purchased
+// part with everything pre-filled → wizard opens on the new part.
+function renderMcMasterAddPromptModal() {
+  let host = document.getElementById('mcmaster-add-host');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'mcmaster-add-host';
+    document.body.appendChild(host);
+  }
+  const p = state.ui.mcMasterAddPrompt;
+  if (!p) { host.innerHTML = ''; return; }
+  const input = p.input || '';
+  const loading = !!p.loading;
+  const error = p.error || '';
+  host.innerHTML = `
+    <div class="modal-backdrop" onclick="App.closeMcMasterAddPrompt()">
+      <div class="modal" style="width:520px; max-width:96vw;" onclick="event.stopPropagation()">
+        <div class="modal-header" style="display:flex; align-items:center; gap:10px;">
+          <span style="background:#F2C40D; color:#000; font-weight:900; padding:3px 10px; border-radius:2px; font-family:'Arial Black','Impact',sans-serif; font-size:16px; letter-spacing:-0.5px;">M</span>
+          <span>Add McMaster Part</span>
+        </div>
+        <div class="modal-body">
+          <p class="text-mute small" style="margin:0 0 12px;">
+            Paste a McMaster URL or just a part number. Claude reads the catalog page → creates a Purchased part on this quote with description, price, pack size, vendor link, and spec data all filled in.
+          </p>
+          <label class="small" style="font-weight:600; color:var(--steel);">McMaster URL or part #</label>
+          <input type="text" id="mcmaster-add-input"
+                 value="${esc(input)}"
+                 placeholder="https://www.mcmaster.com/91290A115/   or just   91290A115"
+                 onkeydown="if(event.key==='Enter'){App.submitMcMasterAddPrompt(); event.preventDefault();}"
+                 oninput="App.setMcMasterAddPromptInput(this.value)"
+                 ${loading ? 'disabled' : 'autofocus'}
+                 style="width:100%; font-family:var(--font-mono); font-size:13px; padding:10px 12px; margin-top:4px;">
+          ${loading ? `
+            <div style="margin-top:12px; padding:10px 14px; background:#FFF7ED; border:1px solid #FED7AA; border-radius:4px; font-size:12px; color:var(--orange);">
+              ⏳ Fetching McMaster… (~5–15s)
+            </div>
+          ` : error ? `
+            <div style="margin-top:12px; padding:10px 14px; background:#FDEDEA; border:1px solid #FCA5A5; border-radius:4px; font-size:12px; color:#991B1B;">
+              ⚠ ${esc(error)}
+            </div>
+          ` : ''}
+          <div class="hint" style="margin-top:10px;">
+            Need to add a part from a different supplier? Use the regular <strong>+ Add Part</strong> button → Purchased Item type → fill in vendor + price on the Material step.
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn" onclick="App.closeMcMasterAddPrompt()" ${loading?'disabled':''}>Cancel</button>
+          <button class="btn btn-primary" onclick="App.submitMcMasterAddPrompt()" ${loading || !input.trim() ? 'disabled' : ''}>
+            ${loading ? 'Fetching…' : 'Add Part →'}
+          </button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 // v7.68: VENDOR + CUSTOMER WIZARDS — step-by-step add flow.
 // Replaces the legacy one-shot "+ Add Vendor / + Add Customer" buttons that
 // dumped the user into an empty inline row. Now the buttons open a small
@@ -20003,6 +20175,119 @@ const App = {
     // touching the slider DOM. We re-render only the right column of
     // the nesting step.
     if (typeof renderCollarLiveReadout === 'function') renderCollarLiveReadout(p);
+  },
+
+  // v8.14: McMaster quick-add modal — open / typing / submit / close
+  promptAddMcMasterPart() {
+    update(s => { s.ui.mcMasterAddPrompt = { input: '', loading: false, error: '' }; });
+    // Focus the input next tick (after render)
+    setTimeout(() => {
+      const el = document.getElementById('mcmaster-add-input');
+      if (el) el.focus();
+    }, 50);
+  },
+  closeMcMasterAddPrompt() {
+    update(s => { s.ui.mcMasterAddPrompt = null; });
+  },
+  setMcMasterAddPromptInput(text) {
+    if (!state.ui.mcMasterAddPrompt) return;
+    state.ui.mcMasterAddPrompt.input = text;
+    // No render — let the input value flow normally, button-disabled
+    // state updates on next render (which fires on blur / submit).
+  },
+  async submitMcMasterAddPrompt() {
+    const p = state.ui.mcMasterAddPrompt;
+    if (!p) return;
+    const input = (p.input || '').trim();
+    if (!input) return;
+    // Normalize: bare part # → canonical URL
+    const isUrl = /^https?:\/\//i.test(input);
+    const partNumMatch = !isUrl && input.match(/^[0-9][0-9A-Z]{3,9}$/i);
+    const url = isUrl ? input : (partNumMatch ? `https://www.mcmaster.com/${input.toUpperCase()}/` : '');
+    if (!url) {
+      p.error = 'Doesn\'t look like a McMaster URL or part number (expected something like 91290A115).';
+      render();
+      return;
+    }
+    // 1. Mark loading
+    p.loading = true;
+    p.error = '';
+    render();
+    // 2. Fire the Worker lookup BEFORE creating the part (so a failed
+    //    lookup doesn't leave an empty part stranded on the quote)
+    let parsed;
+    try {
+      const res = await workerCall('/api/mcmaster/lookup', { url }, { timeoutMs: 30000 });
+      parsed = res.parsed || {};
+    } catch (e) {
+      const p2 = state.ui.mcMasterAddPrompt;
+      if (p2) { p2.loading = false; p2.error = (e && e.message) || String(e); render(); }
+      return;
+    }
+    // 3. Create a new Purchased part with the parsed fields applied
+    const isMeaningful = (v) => this._isMeaningfulValue(v);
+    let newPartId;
+    update(s => {
+      const q = s.quotes.find(qq => qq.id === s.ui.activeQuoteId);
+      if (!q) return;
+      const np = newPart({ typeId: 'purchased' });
+      newPartId = np.id;
+      if (isMeaningful(parsed.partNum)) np.partNum = parsed.partNum;
+      if (isMeaningful(parsed.description)) np.description = parsed.description;
+      // Material cost
+      np.materialCost = np.materialCost || { perPiece: [null], perBar: null, perSheet: null, vendorId: null, vendorPartNum: '', vendorUrl: '', isComponent: false };
+      np.materialCost.vendorUrl = url;
+      if (isMeaningful(parsed.partNum)) np.materialCost.vendorPartNum = parsed.partNum;
+      if (parsed.price != null && isFinite(parsed.price) && parsed.price > 0) {
+        if (parsed.priceUnit === 'pack' && parsed.packSize > 0) {
+          np.materialCost.isComponent = true;
+          np.materialCost.packSize = parsed.packSize;
+          np.materialCost.perPack = parsed.price;
+        } else {
+          np.materialCost.isComponent = false;
+          np.materialCost.perPiece = [parsed.price];
+        }
+      }
+      // Auto-link McMaster vendor if we have it
+      if (typeof recognizeSupplierUrl === 'function' && typeof findVendorByName === 'function') {
+        const detected = recognizeSupplierUrl(url);
+        if (detected) {
+          const existing = findVendorByName(detected.vendorName);
+          if (existing) np.materialCost.vendorId = existing.id;
+        }
+      }
+      // Append spec data to notes
+      const extras = [];
+      if (isMeaningful(parsed.material))   extras.push(`Material: ${parsed.material}`);
+      if (isMeaningful(parsed.finish))     extras.push(`Finish: ${parsed.finish}`);
+      if (isMeaningful(parsed.threadSize)) extras.push(`Thread: ${parsed.threadSize}`);
+      if (isMeaningful(parsed.length))     extras.push(`Length: ${parsed.length}`);
+      if (isMeaningful(parsed.weight))     extras.push(`Weight: ${parsed.weight}`);
+      if (isMeaningful(parsed.availability)) extras.push(`Avail: ${parsed.availability}`);
+      if (extras.length) {
+        np.notes = `[McMaster ${new Date().toISOString().slice(0,10)}] ${extras.join(' · ')}`;
+      }
+      q.parts.push(np);
+      // Make it the active part
+      if (!s.ui.activePartIdForInfo) s.ui.activePartIdForInfo = {};
+      s.ui.activePartIdForInfo[q.id] = np.id;
+      // Close the modal
+      s.ui.mcMasterAddPrompt = null;
+      logActivity('Added McMaster part', np.partNum || '?', `via quick-add · ${parsed.priceUnit || 'each'} · ${url}`);
+    });
+    showToast(`✨ Added McMaster ${parsed.partNum || '(?)'} as a Purchased part.`, 4500);
+  },
+
+  // v8.14: Purchased-step pricing mode toggle (per-pack vs per-each)
+  purchasedSetPriceMode(partId, isPack) {
+    update(s => {
+      const q = s.quotes.find(qq => qq.id === s.ui.activeQuoteId);
+      if (!q) return;
+      const p = (q.parts || []).find(pp => pp.id === partId);
+      if (!p) return;
+      if (!p.materialCost) p.materialCost = { perPiece: [null], perBar: null, perSheet: null, vendorId: null, vendorPartNum: '', vendorUrl: '' };
+      p.materialCost.isComponent = !!isPack;
+    });
   },
 
   // v8.8: Collar wizard helpers
