@@ -769,7 +769,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '8.16.0';
+const APP_VERSION = '8.16.1';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -12779,6 +12779,20 @@ function renderQuoteCustomerBanner(q) {
   `;
 }
 
+// v8.16.1: shared abbreviator. "Machined Part" → "Machined", "Welded
+// Assembly" → "Welded", "Purchased Item" → "Purchased", "Collar / Frame"
+// → "Collar", "Hybrid (cut+mill)" → "Hybrid". Used in the group chip
+// header so the visible label stays terse.
+function _shortPartTypeLabel(label) {
+  return (label || '')
+    .replace(/ Item$/i, '')
+    .replace(/ Part$/i, '')
+    .replace(/ Assembly$/i, '')
+    .replace(/ \/ Frame$/i, '')
+    .replace(/ \([^)]*\)$/, '')
+    .trim();
+}
+
 // --- Parts chip row (one chip per part, click to activate) ----------------
 function renderQuoteWizardChipRow(q) {
   const partTypes = state.settings.partTypes || [];
@@ -12829,7 +12843,7 @@ function renderQuoteWizardChipRow(q) {
                 style="display:flex; flex-direction:column; align-items:center; gap:2px; padding:10px 18px; min-width:140px; border-radius:6px; cursor:pointer; border:2px dashed ${t.color}; background:${t.color}10; color:${t.color}; transition:all 0.12s; position:relative;">
           <span style="font-size:28px; line-height:1;">${t.icon}</span>
           <span style="font-size:13px; font-weight:700; margin-top:4px;">
-            ${g.parts.length} × ${esc(t.label.replace(/^(Welded |Picture-frame )/, '').replace(/ \\/ Frame$/, '').replace(/ Item$/, '').replace(/ Part$/, '').replace(/ Assembly$/, ''))}
+            ${g.parts.length} × ${esc(_shortPartTypeLabel(t.label))}
           </span>
           <span style="font-size:11px; opacity:0.8;">qty ${totalQty} total · ▾ expand</span>
           ${draftCount > 0 ? `<span style="position:absolute; top:4px; right:4px; font-size:9px; padding:1px 5px; background:#FEF3C7; color:#B45309; border-radius:2px; letter-spacing:0.04em; font-weight:700;">${draftCount} DRAFT</span>` : ''}
@@ -12860,7 +12874,7 @@ function renderQuoteWizardChipRow(q) {
       <button onclick="App.togglePartGroup('${q.id}','${esc(g.typeId)}')"
               title="Collapse this group back to a single chip"
               style="display:flex; align-items:center; padding:0 10px; cursor:pointer; border:1px dashed var(--line-dark); background:transparent; color:var(--text-mute); border-radius:6px; font-size:11px; align-self:stretch;">
-        ◂ collapse ${esc(g.type.label.replace(/^(Welded |Picture-frame )/, ''))}
+        ◂ collapse ${esc(_shortPartTypeLabel(g.type.label))}
       </button>
     ` : '';
     return individualChips + collapseBtn;
