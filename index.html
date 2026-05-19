@@ -769,7 +769,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '8.12.0';
+const APP_VERSION = '8.12.1';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -20025,6 +20025,114 @@ const App = {
       logActivity('Attached file to part', p.partNum || '(unnamed)', `${file.name} → ${stepId}`);
     });
     showToast(`📎 Attached ${file.name} to ${stepId} step.`, 3000);
+    // v8.12.1: smart-detect McMaster URLs in any attached file (URL drops,
+    // .url shortcuts, plain text containing a mcmaster.com link). If we
+    // find one, kick off the Worker McMaster lookup and apply the result
+    // to the part — same as Smart Paste in the part editor, but reachable
+    // from any wizard step's drop zone.
+    let mcMasterUrl = '';
+    const isUrlLike = /\.url$/i.test(file.name) || /^text\//.test(file.type || '');
+    if (isUrlLike) {
+      try {
+        const text = await new Promise((resolve, reject) => {
+          const r = new FileReader();
+          r.onload = () => resolve(String(r.result || ''));
+          r.onerror = reject;
+          r.readAsText(file);
+        });
+        const m = text.match(/https?:\/\/(?:www\.)?mcmaster\.com\/[^\s\r\n\)\]\"\'<]+/i);
+        if (m) mcMasterUrl = m[0];
+      } catch (_) {}
+    }
+    if (mcMasterUrl) {
+      this._wizardMcMasterLookupAndApply(partId, mcMasterUrl);
+    }
+  },
+
+  // v8.12.1: drop a McMaster URL anywhere in the wizard → look it up via
+  // Worker + Claude + apply the structured fields directly to this part
+  // (no Smart Paste modal trip required). Auto-flips the part to
+  // "purchased" type if it isn't already, fills materialCost from the
+  // returned price/packSize, sets vendorPartNum + vendorUrl + description.
+  async _wizardMcMasterLookupAndApply(partId, url) {
+    showToast(`✨ Looking up McMaster part from URL…`, 3500);
+    let parsed;
+    try {
+      const res = await workerCall('/api/mcmaster/lookup', { url }, { timeoutMs: 30000 });
+      parsed = res.parsed || {};
+    } catch (e) {
+      console.warn('[wizard mcmaster lookup]', e);
+      showToast(`⚠ McMaster lookup failed: ${(e && e.message) || e}`, 5000);
+      return;
+    }
+    if (!parsed.partNum && parsed.price == null && !parsed.description) {
+      showToast('⚠ McMaster page didn\'t yield usable data. Try the Smart Paste in the part editor.', 5000);
+      return;
+    }
+    let appliedFields = [];
+    update(s => {
+      const q = s.quotes.find(qq => qq.id === s.ui.activeQuoteId);
+      if (!q) return;
+      const p = (q.parts || []).find(pp => pp.id === partId);
+      if (!p) return;
+      // Flip to Purchased type if the part still has its default
+      if (!p.typeId || p.typeId === 'machined' || p.typeId === 'cutblank') {
+        p.typeId = 'purchased';
+        appliedFields.push('type=purchased');
+      }
+      // Description
+      if (parsed.description && !p.description) {
+        p.description = parsed.description;
+        appliedFields.push('description');
+      }
+      // Part number — only fill if blank (don't clobber whatever the user typed)
+      if (parsed.partNum && !p.partNum) {
+        p.partNum = parsed.partNum;
+        appliedFields.push('part #');
+      }
+      // Material cost — flip to component mode if pack-priced, else per-each
+      if (!p.materialCost) p.materialCost = { perPiece: [null], perBar: null, perSheet: null, vendorId: null, vendorPartNum: '', vendorUrl: '' };
+      if (parsed.partNum) p.materialCost.vendorPartNum = parsed.partNum;
+      p.materialCost.vendorUrl = url;
+      if (parsed.price != null && isFinite(parsed.price) && parsed.price > 0) {
+        if (parsed.priceUnit === 'pack' && parsed.packSize > 0) {
+          p.materialCost.isComponent = true;
+          p.materialCost.packSize = parsed.packSize;
+          p.materialCost.perPack = parsed.price;
+          appliedFields.push(`$${parsed.price}/pack of ${parsed.packSize}`);
+        } else {
+          if (!Array.isArray(p.materialCost.perPiece)) p.materialCost.perPiece = [];
+          if (typeof ensureMatPerPiece === 'function') ensureMatPerPiece(p);
+          p.materialCost.perPiece[0] = parsed.price;
+          appliedFields.push(`$${parsed.price} each`);
+        }
+      }
+      // Auto-link McMaster vendor if recognized + present in vendor list
+      if (typeof recognizeSupplierUrl === 'function') {
+        const detected = recognizeSupplierUrl(url);
+        if (detected && typeof findVendorByName === 'function') {
+          const existing = findVendorByName(detected.vendorName);
+          if (existing && !p.materialCost.vendorId) {
+            p.materialCost.vendorId = existing.id;
+            appliedFields.push('vendor=' + detected.vendorName);
+          }
+        }
+      }
+      // Stash extras as a tagged note
+      const extras = [];
+      if (parsed.material)   extras.push(`Material: ${parsed.material}`);
+      if (parsed.finish)     extras.push(`Finish: ${parsed.finish}`);
+      if (parsed.threadSize) extras.push(`Thread: ${parsed.threadSize}`);
+      if (parsed.length)     extras.push(`Length: ${parsed.length}`);
+      if (parsed.weight)     extras.push(`Weight: ${parsed.weight}`);
+      if (parsed.availability) extras.push(`Avail: ${parsed.availability}`);
+      if (extras.length) {
+        const tag = `[McMaster ${new Date().toISOString().slice(0,10)}] ${extras.join(' · ')}`;
+        p.notes = p.notes ? `${p.notes}\n${tag}` : tag;
+      }
+      logActivity('Applied McMaster lookup', p.partNum || parsed.partNum || '?', appliedFields.join(', '));
+    });
+    showToast(`✨ Applied McMaster ${parsed.partNum || ''}: ${appliedFields.join(', ')}`, 6000);
   },
   removeAttachment(partId, attId) {
     if (!confirm('Remove this attachment?')) return;
