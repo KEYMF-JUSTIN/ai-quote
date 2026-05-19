@@ -769,7 +769,7 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '8.6.0';
+const APP_VERSION = '8.6.1';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -4663,6 +4663,21 @@ const COLOR_PALETTE = [
   { name:'Rose',    shades:['#fff1f2','#ffe4e6','#fecdd3','#fda4af','#f43f5e','#e11d48','#be123c','#881337'] },
 ];
 const COLOR_FAVORITES_MAX = 10;
+
+// v8.6.1: pick a readable foreground color (white or dark navy) for any
+// hex background. YIQ-luma rule: if perceived brightness ≥ 160, use dark
+// text; otherwise use white. Used by the customer picker tiles (top
+// banner) and any future colored chips that have to host text.
+function _textOnColor(hex) {
+  if (!hex || typeof hex !== 'string' || !hex.startsWith('#')) return 'white';
+  let h = hex.replace('#','');
+  if (h.length === 3) h = h.split('').map(c => c+c).join('');
+  if (h.length !== 6) return 'white';
+  const r = parseInt(h.slice(0,2),16), g = parseInt(h.slice(2,4),16), b = parseInt(h.slice(4,6),16);
+  if (!isFinite(r)||!isFinite(g)||!isFinite(b)) return 'white';
+  const yiq = (r*299 + g*587 + b*114) / 1000;
+  return yiq >= 160 ? '#1F2937' : 'white';
+}
 
 const MATERIAL_CATEGORIES = [
   { id:'stainless',  label:'Stainless Steel', icon:'✨', color:'#1E5BAE',
@@ -12963,22 +12978,27 @@ function renderWizardCustomerStep(q) {
            </div>`
         : filtered.length === 0
           ? `<div style="padding:18px; text-align:center; color:var(--text-mute);">No customers match "${esc(search)}". <a href="javascript:App.openCustomerWizard()" style="color:var(--orange); font-weight:600;">Add as new customer?</a></div>`
-          : `<!-- v8.3: bigger grid, no scrollbar — see everyone in one shot.
-                  Each tile uses customer.color as a left stripe so locations
-                  of the same parent company group visually. -->
+          : `<!-- v8.6.1: top banner with the customer's color — wraps the
+                  name across the full tile width so groups of sister
+                  locations stand out at a glance. Text color flips between
+                  dark navy and white based on banner luminance so the name
+                  stays readable on any palette pick. -->
             <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(220px, 1fr)); gap:10px;">
               ${filtered.map(c => {
                 const col = c.color || '#94a3b8';
+                const tx = _textOnColor(col);
                 return `
                 <button onclick="App.pickCustomerForQuote('${q.id}','${c.id}')"
-                        style="text-align:left; padding:0; cursor:pointer; border:1px solid var(--line-dark); border-radius:4px; background:var(--paper); transition:all 0.12s; display:flex; overflow:hidden; align-items:stretch;"
+                        style="text-align:left; padding:0; cursor:pointer; border:1px solid var(--line-dark); border-radius:4px; background:var(--paper); transition:all 0.12s; display:flex; flex-direction:column; overflow:hidden;"
                         onmouseover="this.style.borderColor='${col}'; this.style.transform='translateY(-1px)'; this.style.boxShadow='0 4px 10px rgba(0,0,0,0.08)';"
                         onmouseout="this.style.borderColor='var(--line-dark)'; this.style.transform='translateY(0)'; this.style.boxShadow='none';">
-                  <span style="flex:0 0 6px; background:${col};"></span>
-                  <span style="flex:1; padding:10px 12px;">
-                    <span style="display:block; font-weight:700; color:var(--navy); line-height:1.2;">${esc(c.name || '(unnamed)')}</span>
-                    <span style="display:block; font-size:11px; color:var(--text-mute); margin-top:3px; line-height:1.3;">
-                      ${c.code ? `<span class="mono">${esc(c.code)}</span> · ` : ''}${esc(c.contact || '—')}
+                  <span style="display:block; background:${col}; color:${tx}; padding:8px 12px; font-weight:700; font-size:14px; line-height:1.2;">
+                    ${esc(c.name || '(unnamed)')}
+                  </span>
+                  <span style="display:block; padding:8px 12px;">
+                    ${c.code ? `<span class="mono small" style="color:var(--text-mute); font-weight:600;">${esc(c.code)}</span>` : ''}
+                    <span style="display:block; font-size:11px; color:var(--text-mute); margin-top:${c.code?'3px':'0'}; line-height:1.3;">
+                      ${esc(c.contact || '—')}
                     </span>
                     <span style="display:block; font-size:11px; color:var(--text-mute); margin-top:1px; line-height:1.3;">
                       ${esc(c.email || '—')}
