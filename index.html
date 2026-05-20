@@ -817,7 +817,7 @@ if (typeof window !== 'undefined') {
   }
   window.addEventListener('resize', () => { if (_zoomState.autoScale) applyZoom(); });
 }
-const APP_VERSION = '8.19.0';
+const APP_VERSION = '8.20.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -1595,12 +1595,22 @@ function migrateState() {
       // (rectangle pack on 4×8 or 5×10 sheets) + a cut-time calculator
       // (perimeter × passes / feed rate).
       { id:'collar',    label:'Collar / Frame',    icon:'🖼', color:'#0891B2', desc:'Picture-frame rectangle from G-10/GPO-3/G-11 sheet — nesting + cut-time calculator built in' },
+      // v8.20: Turn Insulation (a.k.a. B-stage quote). The "𝐉𝐉" glyph is
+      // two Mathematical Bold Capital J characters (Unicode U+1D409) —
+      // renders as two tall, ultra-bold J's in any font. Industry shorthand
+      // for J-stage / B-stage cured insulation tape used between motor /
+      // transformer winding turns.
+      { id:'turninsulation', label:'Turn Insulation', icon:'𝐉𝐉', color:'#A21CAF', desc:'B-stage cured insulation between coil turns. Calculator coming — for now, capture qty + material as Purchased Item with a B-stage tag.' },
     ];
   }
   // v8.8: ensure 'collar' is added to existing part-type lists (post v7.74,
   // upgrades from older sessions get the new type without losing customizations)
   if (Array.isArray(state.settings.partTypes) && !state.settings.partTypes.some(t => t.id === 'collar')) {
     state.settings.partTypes.push({ id:'collar', label:'Collar / Frame', icon:'🖼', color:'#0891B2', desc:'Picture-frame rectangle from G-10/GPO-3/G-11 sheet — nesting + cut-time calculator built in' });
+  }
+  // v8.20: same migration safety for Turn Insulation
+  if (Array.isArray(state.settings.partTypes) && !state.settings.partTypes.some(t => t.id === 'turninsulation')) {
+    state.settings.partTypes.push({ id:'turninsulation', label:'Turn Insulation', icon:'𝐉𝐉', color:'#A21CAF', desc:'B-stage cured insulation between coil turns. Calculator coming — for now, capture qty + material as Purchased Item with a B-stage tag.' });
   }
   // v7.61: every part gets a typeId. Existing parts without one default to
   // 'machined' (the most common case for KMF's historical work). Estimators
@@ -12869,6 +12879,11 @@ const WIZARD_STEPS_BY_TYPE = {
   // setups card for load/unload/screw-down ops, then finishing (grinding
   // for packets, etc.), then review.
   collar:    ['identity', 'material', 'collarNesting', 'collarCut', 'setups', 'finishing', 'review'],
+  // v8.20: Turn Insulation = B-stage cured tape consumed by length per
+  // coil turn. For now uses the Purchased-style flow (material step has
+  // vendor + price). Dedicated turn-insulation calculator step will land
+  // in a future version.
+  turninsulation: ['identity', 'material', 'review'],
   _default:  ['identity', 'material', 'review'],
 };
 function wizardStepsFor(part) {
@@ -13157,7 +13172,31 @@ function renderWizardStepIdentity(q, part) {
   if (!Array.isArray(part.qtyTiers) || part.qtyTiers.length === 0) {
     part.qtyTiers = [1];
   }
+  // v8.20: part-type picker moved to the TOP of the Identity step and
+  // upgraded to card-style buttons (40px icon over a 12px label + desc
+  // tooltip). Picking the type is the first thing the user does — it
+  // determines which subsequent steps appear in the wizard, so it should
+  // lead the form, not trail it.
+  const typeButtons = partTypes.map(t => {
+    const on = part.typeId === t.id;
+    return `
+      <button onclick="App.setPartType('${part.id}','${t.id}')"
+              title="${esc(t.desc || t.label)}"
+              style="flex:1; min-width:130px; padding:12px 10px; border-radius:6px; cursor:pointer; border:2px solid ${on?t.color:'var(--line-dark)'}; background:${on?t.color+'15':'var(--paper)'}; color:${on?t.color:'var(--text)'}; transition:all 0.12s; display:flex; flex-direction:column; align-items:center; gap:6px; font-family:inherit;">
+        <span style="font-size:38px; line-height:1; font-weight:900; ${t.icon === '𝐉𝐉' ? 'letter-spacing:-2px; font-family:Impact, \"Arial Black\", sans-serif;' : ''}">${t.icon}</span>
+        <span style="font-size:12px; font-weight:700; line-height:1.15; text-align:center;">${esc(t.label)}</span>
+      </button>
+    `;
+  }).join('');
   return `
+    <div class="field" style="margin-bottom:18px;">
+      <label style="font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:0.06em; color:var(--steel);">What kind of part?</label>
+      <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;">
+        ${typeButtons}
+      </div>
+      <div class="hint" style="margin-top:6px;">Picking the type decides which steps the wizard shows next (material, setups, DXF, etc.).</div>
+    </div>
+
     <div style="display:grid; grid-template-columns:1fr 2fr; gap:14px;">
       <div class="field"><label>Part number</label>
         ${bind({label:'Part number', value:part.partNum, onChange:v=>{ part.partNum = v; }})}
@@ -13175,17 +13214,6 @@ function renderWizardStepIdentity(q, part) {
           ${bind({label:'Quantity', value:part.qtyTiers[0], type:'number', onChange:v=>{ part.qtyTiers[0] = num(v) || 1; ensureMatPerPiece(part); }, attrs:'min="1" step="1"'})}
         </div>
         <div class="hint">How many of this part the customer is ordering.</div>
-      </div>
-      <div class="field" style="grid-column:span 2;"><label>Part type</label>
-        <div style="display:flex; gap:6px; flex-wrap:wrap;">
-          ${partTypes.map(t => {
-            const on = part.typeId === t.id;
-            return `<button onclick="App.setPartType('${part.id}','${t.id}')"
-                            style="padding:6px 12px; border-radius:4px; cursor:pointer; border:2px solid ${on?t.color:'var(--line-dark)'}; background:${on?t.color+'22':'var(--paper)'}; color:${on?t.color:'var(--text)'}; font-weight:600; font-size:12px; display:flex; align-items:center; gap:4px;">
-              <span style="font-size:14px;">${t.icon}</span>${esc(t.label)}
-            </button>`;
-          }).join('')}
-        </div>
       </div>
       <div class="field" style="grid-column:span 2;"><label>Drawing / DXF (drop here or click)</label>
         <div style="border:2px dashed var(--line-dark); padding:18px; text-align:center; font-size:12px; color:var(--text-mute); border-radius:3px;">
@@ -13212,7 +13240,9 @@ function renderWizardStepMaterial(q, part) {
   // v8.14: Purchased parts skip stock/dims entirely — they're catalog
   // items, not raw stock we machine from. The Material step instead
   // captures vendor + part # + price (per-each or per-pack) + markup.
-  if (part.typeId === 'purchased') {
+  // v8.20: Turn Insulation rides on the same Purchased Material step
+  // until its dedicated calculator (length × $/ft × turns × coils) ships.
+  if (part.typeId === 'purchased' || part.typeId === 'turninsulation') {
     return renderWizardStepMaterialPurchased(q, part);
   }
   const materials = state.settings.materials || [];
@@ -14715,6 +14745,7 @@ function renderPartTypePickerModal() {
     { id:'hybrid',    label:'Hybrid (cut+mill)', icon:'🛠', color:'#7C3AED', desc:'Outside-cut blank that also needs secondary machining' },
     { id:'purchased', label:'Purchased Item',    icon:'📦', color:'#64748B', desc:'Off-the-shelf component (McMaster, Grainger, etc.) — no operations' },
     { id:'collar',    label:'Collar / Frame',    icon:'🖼', color:'#0891B2', desc:'Picture-frame rectangle from G-10/GPO-3/G-11 sheet — nesting + cut-time calculator built in' },
+    { id:'turninsulation', label:'Turn Insulation', icon:'𝐉𝐉', color:'#A21CAF', desc:'B-stage cured insulation between coil turns. Calculator coming.' },
   ] : types;
   modalHost.innerHTML = `
     <div class="modal-backdrop" onclick="App.closePartTypePicker()">
@@ -22903,6 +22934,7 @@ const App = {
         { id:'hybrid',    label:'Hybrid (cut+mill)', icon:'🛠', color:'#7C3AED', desc:'Outside-cut blank that also needs secondary machining' },
         { id:'purchased', label:'Purchased Item',    icon:'📦', color:'#64748B', desc:'Off-the-shelf component (McMaster, Grainger, etc.) — no operations' },
         { id:'collar',    label:'Collar / Frame',    icon:'🖼', color:'#0891B2', desc:'Picture-frame rectangle from G-10/GPO-3/G-11 sheet — nesting + cut-time calculator built in' },
+        { id:'turninsulation', label:'Turn Insulation', icon:'𝐉𝐉', color:'#A21CAF', desc:'B-stage cured insulation between coil turns. Calculator coming.' },
       ];
       if (!Array.isArray(s.settings.partTypes)) s.settings.partTypes = [];
       let added = 0;
