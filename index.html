@@ -710,7 +710,10 @@
 </head>
 <body>
 
-<header id="app-header">
+<!-- v8.19: right-click anywhere on the header opens the settings popover
+     (font/zoom slider, auto-scale toggle, future quick-settings). Native
+     context menu suppressed via oncontextmenu. -->
+<header id="app-header" oncontextmenu="App.openHeaderMenu(event); return false;">
   <div class="brand">
     <svg width="56" height="50" viewBox="0 0 80 70" xmlns="http://www.w3.org/2000/svg" style="margin-right:14px; flex-shrink:0;" aria-label="Keystone Machine & Fab">
       <!-- Keystone arch -->
@@ -769,7 +772,52 @@
 "use strict";
 
 const STORAGE_KEY = 'keystone-quoting-v1';  // keep same key for migration
-const APP_VERSION = '8.18.2';
+
+// v8.19: user-controlled zoom (font + UI scaling). Persists per-machine
+// because monitor DPI/size varies. Slider in the header right-click menu
+// gives 70%-150% manual control; optional auto-scale-with-window kicks in
+// extra scale on wide monitors. Uses CSS `zoom` for genuine UI rescaling
+// (every px, every font-size, every padding) — supported in Chrome, Edge,
+// Safari, and Firefox 126+. Falls back to base 100% on older browsers.
+const ZOOM_KEY = 'aiq-zoom-v1';
+let _zoomState = { manual: 1.0, autoScale: false };
+try {
+  const raw = localStorage.getItem(ZOOM_KEY);
+  if (raw) _zoomState = Object.assign(_zoomState, JSON.parse(raw));
+} catch (_) {}
+function _zoomViewportFactor() {
+  if (!_zoomState.autoScale) return 1.0;
+  // Linear-ish ramp: 1280px → 0.92, 1440px → 1.00, 1920px → 1.12, 2560px → 1.25
+  const w = window.innerWidth || 1440;
+  if (w >= 2560) return 1.25;
+  if (w >= 1920) return 1.12;
+  if (w >= 1440) return 1.00;
+  if (w >= 1280) return 0.92;
+  return 0.85;
+}
+function applyZoom() {
+  const scale = (_zoomState.manual || 1) * _zoomViewportFactor();
+  // Cap so the user can't accidentally zoom to 0 or 10x
+  const safe = Math.max(0.5, Math.min(2.0, scale));
+  document.body.style.zoom = safe;
+  // For Firefox <126 compatibility: also write the value to a CSS var that
+  // any future component could use for em-based sizing. Not used by core
+  // styles today (everything is px) but keeps the door open.
+  document.documentElement.style.setProperty('--zoom', safe);
+}
+function saveZoom() {
+  try { localStorage.setItem(ZOOM_KEY, JSON.stringify(_zoomState)); } catch (_) {}
+}
+// Apply on load (after styles are parsed) and on window resize for auto-scale
+if (typeof window !== 'undefined') {
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', applyZoom);
+  } else {
+    applyZoom();
+  }
+  window.addEventListener('resize', () => { if (_zoomState.autoScale) applyZoom(); });
+}
+const APP_VERSION = '8.19.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -1092,6 +1140,7 @@ const state = {
     expandedOneDrive: {},       // v8.6: per-customer collapsible state for the OneDrive config block — keyed customerId → true when expanded.
     mcMasterAddPrompt: null,    // v8.14: { input, loading, error } when the "+ Add McMaster Part" modal is open. Submitting auto-creates a Purchased part + fires the McMaster lookup.
     cartImport: null,           // v8.15: { text, attachments, parsed, loading, error } when the "🛒 From Cart" modal is open. Parsed.items[] is reviewed then bulk-imported as Purchased parts.
+    headerMenu: null,           // v8.19: { x, y } pixel coords for the header right-click settings popover. Hosts the zoom slider + auto-scale toggle.
     expandedPartGroups: {},     // v8.16: per-quote per-type expand state for the chip-row groups — keyed `${quoteId}:${typeId}` → true when expanded. Auto-collapse for groups of 3+; click the group chip to expand.
     wizardMode: true,           // v8.10: wizard is now the ONLY quote view (classic killed). Flag kept in state for any legacy code paths that reference it; renderQuote() no longer branches on it.
     wizardStep: {},             // v8.0: keyed partId → step index. Tracks where in the wizard each part is, so switching chips remembers your spot.
@@ -1754,6 +1803,7 @@ function closeAllModals() {
   state.ui.colorPicker = null;      // v8.4 (already added but listed here so closeAllModals clears it)
   state.ui.mcMasterAddPrompt = null; // v8.14
   state.ui.cartImport = null;       // v8.15
+  state.ui.headerMenu = null;       // v8.19
   state.ui.mcMasterPaste = null;
   state.ui.missingCustFolder = null;
   state.ui.inviteDialog = null;
@@ -6199,6 +6249,7 @@ function render() {
   renderColorPickerModal();     // v8.4
   renderMcMasterAddPromptModal(); // v8.14
   renderCartImportModal();        // v8.15
+  renderHeaderMenu();             // v8.19
   renderVendorWizardModal();    // v7.68
   renderCustomerWizardModal();  // v7.68
   renderTrainingModal();
@@ -14917,6 +14968,64 @@ function renderMcMasterAddPromptModal() {
   `;
 }
 
+// v8.19: header right-click settings popover. Anchored to the click
+// position. Hosts the font/zoom slider, auto-scale toggle, and any
+// future quick-settings. Click outside / Esc → closes.
+function renderHeaderMenu() {
+  let host = document.getElementById('header-menu-host');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'header-menu-host';
+    document.body.appendChild(host);
+  }
+  const hm = state.ui.headerMenu;
+  if (!hm) { host.innerHTML = ''; return; }
+  const z = _zoomState;
+  const manualPct = Math.round((z.manual || 1) * 100);
+  // Position: clamp to viewport so the menu doesn't fall off the edge
+  const menuWidth = 280;
+  const menuHeight = 240;
+  const x = Math.min(Math.max(8, hm.x), window.innerWidth - menuWidth - 8);
+  const y = Math.min(Math.max(8, hm.y), window.innerHeight - menuHeight - 8);
+  host.innerHTML = `
+    <div onclick="App.closeHeaderMenu()"
+         style="position:fixed; inset:0; z-index:9998; background:transparent;"></div>
+    <div style="position:fixed; left:${x}px; top:${y}px; width:${menuWidth}px; z-index:9999; background:var(--paper); border:1px solid var(--line-dark); border-radius:5px; box-shadow:0 8px 24px rgba(0,0,0,0.18); padding:12px 14px;"
+         onclick="event.stopPropagation()">
+      <div style="font-family:var(--font-display); font-size:10px; letter-spacing:0.1em; color:var(--text-mute); font-weight:700; margin-bottom:8px;">⚙ QUICK SETTINGS</div>
+
+      <label style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:4px;">
+        <span style="font-size:12px; font-weight:600;">Font / UI size</span>
+        <span style="font-size:11px; color:var(--text-mute); font-family:var(--font-mono);">${manualPct}%</span>
+      </label>
+      <input type="range" min="70" max="150" step="5" value="${manualPct}"
+             oninput="App.setZoomPct(this.value)"
+             style="width:100%; margin-bottom:6px;">
+      <div style="display:flex; gap:4px; margin-bottom:12px;">
+        ${[80, 100, 120, 140].map(pct => `
+          <button onclick="App.setZoomPct(${pct})"
+                  style="flex:1; padding:4px 0; font-size:11px; border:1px solid ${pct === manualPct ? 'var(--orange)' : 'var(--line-dark)'}; background:${pct === manualPct ? '#FFF7ED' : 'var(--paper)'}; color:${pct === manualPct ? 'var(--orange)' : 'var(--text)'}; border-radius:3px; cursor:pointer; font-weight:600;">${pct}%</button>
+        `).join('')}
+      </div>
+
+      <label style="display:flex; align-items:center; gap:8px; cursor:pointer; padding:4px 0; font-size:12px;">
+        <input type="checkbox" ${z.autoScale ? 'checked' : ''}
+               onchange="App.setZoomAutoScale(this.checked)"
+               style="width:14px; height:14px;">
+        <span>Auto-scale with window width</span>
+      </label>
+      <div class="hint" style="margin:0 0 12px;">
+        Ramps the zoom on larger monitors (≥1920px gets +12%, ≥2560px gets +25%) so the UI doesn't look tiny on 4K screens.
+      </div>
+
+      <div style="padding-top:8px; border-top:1px dashed var(--line); display:flex; gap:6px;">
+        <button class="btn btn-sm" style="flex:1;" onclick="App.setZoomPct(100); App.setZoomAutoScale(false);">Reset</button>
+        <button class="btn btn-sm" style="flex:1;" onclick="App.closeHeaderMenu()">Close</button>
+      </div>
+    </div>
+  `;
+}
+
 // v8.15: Cart import modal. User pastes supplier cart contents (text,
 // screenshot, or PDF). Worker hands to Claude → returns supplier name +
 // array of line items. User reviews the parsed table, optionally
@@ -21843,6 +21952,30 @@ const App = {
       s.ui.activeQuoteTab = 'part-' + copy.id;
     });
   },
+  // v8.19: header right-click settings popover
+  openHeaderMenu(ev) {
+    const x = (ev && ev.clientX) || 100;
+    const y = (ev && ev.clientY) || 80;
+    update(s => { s.ui.headerMenu = { x, y }; });
+  },
+  closeHeaderMenu() {
+    update(s => { s.ui.headerMenu = null; });
+  },
+  setZoomPct(pct) {
+    const v = Math.max(50, Math.min(200, parseFloat(pct) || 100)) / 100;
+    _zoomState.manual = v;
+    saveZoom();
+    applyZoom();
+    // Re-render the menu so the % readout + active preset updates
+    if (state.ui.headerMenu) renderHeaderMenu();
+  },
+  setZoomAutoScale(on) {
+    _zoomState.autoScale = !!on;
+    saveZoom();
+    applyZoom();
+    if (state.ui.headerMenu) renderHeaderMenu();
+  },
+
   // v8.18.2: non-destructive close — exits the part wizard back to the
   // parts row "Pick a part to edit" state. Just clears the active-part
   // slot for this quote; the part itself stays untouched. The × button on
