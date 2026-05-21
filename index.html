@@ -854,7 +854,7 @@ if (typeof window !== 'undefined') {
   }
   window.addEventListener('resize', () => { if (_zoomState.autoScale) applyZoom(); });
 }
-const APP_VERSION = '8.23.0';
+const APP_VERSION = '8.24.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -8444,6 +8444,56 @@ function renderPosList() {
   `;
 }
 
+// v8.24: Smart drop zone on the PO page. Dispatches files / pasted text /
+// pasted images / dragged URLs into the right extractor:
+//   - McMaster URL or bare McMaster part # → /api/mcmaster/lookup → 1 line
+//   - Any other URL or multi-line text → /api/claude/parse-cart (text)
+//   - File or pasted image (PDF, screenshot, vendor quote, email) →
+//     /api/claude/parse-cart (attachment)
+// Parsed items become PO docLines. Supplier (when detected) auto-fills the
+// vendor on the PO header if it matches a name in the vendor book.
+function renderPoSmartDropZone(po) {
+  const sd = state.ui.poSmartDrop || {};
+  const busy = sd.poId === po.id && sd.loading;
+  const lastResult = sd.poId === po.id ? sd.lastResult : '';
+  const error = sd.poId === po.id ? sd.error : '';
+  return `
+    <div data-po-smart-drop="${esc(po.id)}"
+         style="border:2px dashed var(--orange); background:#FFF7ED; padding:14px 16px; margin-bottom:14px; border-radius:5px; cursor:pointer;"
+         onclick="document.getElementById('po-smart-input-${esc(po.id)}').click()">
+      <div style="display:flex; align-items:center; gap:14px;">
+        <span style="display:inline-flex; align-items:center; justify-content:center; width:54px; height:54px; flex:0 0 54px; border-radius:50%; background:white; border:2px solid var(--orange); font-size:32px; line-height:1; box-shadow:0 2px 6px rgba(220,67,24,0.18);">
+          ${busy ? '⏳' : '📎'}
+        </span>
+        <span style="flex:1; color:var(--orange); font-weight:600; font-size:13px;">
+          ${busy ? 'Reading attachment with Claude…' : 'Smart drop — vendor quote PDF, McMaster URL or part #, cart screenshot, email'}
+          <span style="display:block; font-weight:400; color:var(--text-mute); font-size:11px; margin-top:3px;">
+            Drop a file · paste from clipboard · click to browse — Claude fills the vendor + line items
+          </span>
+        </span>
+        <div style="display:flex; gap:6px;">
+          <button class="btn btn-sm" onclick="event.stopPropagation(); App.poSmartPasteFromClipboard('${esc(po.id)}')" title="Paste from clipboard — image, URL, or text" style="background:var(--paper); border:1px solid var(--orange); color:var(--orange); font-weight:600;">📋 Paste</button>
+          <button class="btn btn-sm" onclick="event.stopPropagation(); App.poSmartPromptMcMaster('${esc(po.id)}')" title="Quick-add by McMaster URL or part #" style="background:var(--paper); border:1px solid var(--orange); color:var(--orange); font-weight:600;">🔧 McMaster</button>
+        </div>
+      </div>
+      <input type="file" id="po-smart-input-${esc(po.id)}" style="display:none;" multiple
+             onchange="if(this.files && this.files.length){App.poSmartAttachFiles('${esc(po.id)}', this.files); this.value='';}"
+             accept="*/*"
+             onclick="event.stopPropagation()">
+      ${error ? `
+        <div style="margin-top:10px; padding:8px 12px; background:white; border:1px solid var(--red); border-radius:3px; color:var(--red); font-size:12px;" onclick="event.stopPropagation()">
+          <strong>⚠</strong> ${esc(error)}
+        </div>
+      ` : ''}
+      ${lastResult ? `
+        <div style="margin-top:10px; padding:8px 12px; background:white; border:1px solid var(--green); border-radius:3px; color:var(--green); font-size:12px;" onclick="event.stopPropagation()">
+          ✅ ${esc(lastResult)}
+        </div>
+      ` : ''}
+    </div>
+  `;
+}
+
 function renderPo() {
   const po = state.purchaseOrders.find(x => x.id === state.ui.activePoId);
   if (!po) {
@@ -8464,6 +8514,8 @@ function renderPo() {
         <button class="btn" onclick="App.go('pos')">← Back</button>
       </div>
     </div>
+
+    ${renderPoSmartDropZone(po)}
 
     <div class="card">
       <div class="card-header"><span>Header</span></div>
@@ -24900,6 +24952,153 @@ Online Metals,Brass,Round,1.25 dia,per_lb,5.20`;
       po.updatedAt = new Date().toISOString();
     });
   },
+
+  // ============================================================================
+  // v8.24: PO Smart Drop — file/paste/URL → Claude → PO line items
+  // ============================================================================
+
+  // Dropped or selected files (PDF, image, .msg, screenshot of a vendor quote)
+  // → base64 → /api/claude/parse-cart → line items.
+  async poSmartAttachFiles(poId, files) {
+    const arr = Array.from(files || []);
+    if (arr.length === 0) return;
+    this._poSetSmartStatus(poId, { loading: true, error: '', lastResult: '' });
+    try {
+      const attachments = [];
+      for (const f of arr) {
+        const data = await blobToBase64(f);
+        attachments.push({ name: f.name || 'dropped', mimeType: f.type || 'application/octet-stream', data });
+      }
+      const res = await workerCall('/api/claude/parse-cart', { text: '', attachments }, { timeoutMs: 60000 });
+      this._poApplyParsed(poId, res.parsed || {});
+    } catch (e) {
+      this._poSetSmartStatus(poId, { loading: false, error: (e && e.message) || String(e), lastResult: '' });
+    }
+  },
+
+  // Clipboard read — prefers images, falls through to text. Text gets routed
+  // through poSmartHandleText for URL detection.
+  async poSmartPasteFromClipboard(poId) {
+    try {
+      if (navigator.clipboard && navigator.clipboard.read) {
+        try {
+          const items = await navigator.clipboard.read();
+          for (const it of items) {
+            for (const type of (it.types || [])) {
+              if (type.startsWith('image/')) {
+                const blob = await it.getType(type);
+                const ext = (type.split('/')[1] || 'png').replace(/[^a-z0-9]/gi,'');
+                const file = new File([blob], `pasted-${Date.now()}.${ext}`, { type });
+                return this.poSmartAttachFiles(poId, [file]);
+              }
+            }
+          }
+        } catch (_) { /* fall through to text */ }
+      }
+      const text = await navigator.clipboard.readText();
+      if (text && text.trim()) {
+        return this.poSmartHandleText(poId, text);
+      }
+      this._poSetSmartStatus(poId, { loading: false, error: 'Clipboard empty (no image, URL, or text).', lastResult: '' });
+    } catch (e) {
+      this._poSetSmartStatus(poId, { loading: false, error: 'Clipboard read failed: ' + (e.message || e), lastResult: '' });
+    }
+  },
+
+  // Pasted/typed text dispatcher. McMaster URL or bare McMaster part # → fast
+  // path lookup. Anything else → Claude cart parser.
+  async poSmartHandleText(poId, text) {
+    const trimmed = (text || '').trim();
+    if (!trimmed) return;
+    if (/^https?:\/\/\S+$/i.test(trimmed) && /mcmaster\.com/i.test(trimmed)) {
+      return this.poSmartLookupMcMaster(poId, trimmed);
+    }
+    if (/^[0-9][0-9A-Z]{3,9}$/i.test(trimmed)) {
+      return this.poSmartLookupMcMaster(poId, `https://www.mcmaster.com/${trimmed.toUpperCase()}/`);
+    }
+    this._poSetSmartStatus(poId, { loading: true, error: '', lastResult: '' });
+    try {
+      const res = await workerCall('/api/claude/parse-cart', { text: trimmed, attachments: [] }, { timeoutMs: 60000 });
+      this._poApplyParsed(poId, res.parsed || {});
+    } catch (e) {
+      this._poSetSmartStatus(poId, { loading: false, error: (e && e.message) || String(e), lastResult: '' });
+    }
+  },
+
+  // McMaster URL → scrape via Worker → 1 PO line. Auto-link the McMaster
+  // vendor if it exists in the vendor book.
+  async poSmartLookupMcMaster(poId, url) {
+    this._poSetSmartStatus(poId, { loading: true, error: '', lastResult: '' });
+    try {
+      const res = await workerCall('/api/mcmaster/lookup', { url }, { timeoutMs: 30000 });
+      const parsed = res.parsed || {};
+      update(s => {
+        const po = s.purchaseOrders.find(x => x.id === poId); if (!po) return;
+        const line = newDocLine();
+        if (parsed.partNum) line.partNum = parsed.partNum;
+        if (parsed.description) line.description = parsed.description;
+        if (parsed.price != null && isFinite(parsed.price)) line.unitCost = parsed.price;
+        if (parsed.packSize > 0 && parsed.priceUnit === 'pack') {
+          line.notes = `Pack of ${parsed.packSize} @ ${fmtMoney(parsed.price)}/pack`;
+        }
+        po.lines.push(line);
+        po.updatedAt = new Date().toISOString();
+        if (!po.vendorId) {
+          const mcm = (s.settings.vendors || []).find(x => /mcmaster/i.test(x.name || ''));
+          if (mcm) po.vendorId = mcm.id;
+        }
+      });
+      this._poSetSmartStatus(poId, { loading: false, error: '', lastResult: `Added McMaster ${parsed.partNum || '(?)'}` });
+    } catch (e) {
+      this._poSetSmartStatus(poId, { loading: false, error: (e && e.message) || String(e), lastResult: '' });
+    }
+  },
+
+  poSmartPromptMcMaster(poId) {
+    const url = prompt('McMaster URL or part # (e.g. 91290A115):');
+    if (url && url.trim()) this.poSmartHandleText(poId, url.trim());
+  },
+
+  // Apply parsed items from Claude cart parser to a PO. Auto-set vendor if
+  // blank + supplier name fuzzy-matches a vendor in the book.
+  _poApplyParsed(poId, parsed) {
+    const items = Array.isArray(parsed.items) ? parsed.items : [];
+    if (items.length === 0) {
+      this._poSetSmartStatus(poId, { loading: false, error: 'Claude found no line items — check the file shows actual cart/quote rows (part #, qty, price).', lastResult: '' });
+      return;
+    }
+    const supplier = (parsed.supplier || '').trim();
+    let added = 0;
+    update(s => {
+      const po = s.purchaseOrders.find(x => x.id === poId); if (!po) return;
+      if (!po.vendorId && supplier) {
+        const needle = supplier.toLowerCase().slice(0, 8);
+        const v = (s.settings.vendors || []).find(x => (x.name || '').toLowerCase().includes(needle));
+        if (v) po.vendorId = v.id;
+      }
+      items.forEach(it => {
+        const line = newDocLine();
+        if (it.partNum) line.partNum = it.partNum;
+        if (it.description) line.description = it.description;
+        if (it.qty != null && num(it.qty) > 0) line.qty = num(it.qty);
+        const price = (it.unitPrice != null) ? it.unitPrice : (it.price != null ? it.price : null);
+        if (price != null && isFinite(price)) line.unitCost = num(price);
+        if (it.notes) line.notes = it.notes;
+        po.lines.push(line);
+        added++;
+      });
+      po.updatedAt = new Date().toISOString();
+    });
+    this._poSetSmartStatus(poId, { loading: false, error: '', lastResult: `Added ${added} line${added === 1 ? '' : 's'}${supplier ? ` from ${supplier}` : ''}` });
+  },
+
+  _poSetSmartStatus(poId, fields) {
+    update(s => {
+      if (!s.ui.poSmartDrop) s.ui.poSmartDrop = {};
+      s.ui.poSmartDrop.poId = poId;
+      Object.assign(s.ui.poSmartDrop, fields);
+    });
+  },
   setPoFilter(field, value) {
     state.ui.poFilters[field] = value;
     saveState(); render();
@@ -27132,6 +27331,15 @@ setTimeout(() => {
       App.handleTrainingFile(file);
       return;
     }
+    // v8.24: if a PO is open, route all drops to the PO smart drop handler.
+    // Catches vendor quote PDFs, cart screenshots, email .msg files, dropped
+    // URLs — Claude figures out the rest.
+    if (state.ui.view === 'po' && state.ui.activePoId) {
+      e.preventDefault();
+      App.poSmartAttachFiles(state.ui.activePoId, [file]);
+      return;
+    }
+
     // v8.2: if wizard mode is active and there's an active part with a
     // current step, route the drop there — attach to that step. Identity
     // step still falls through to existing logic (Claude type detection
