@@ -854,7 +854,7 @@ if (typeof window !== 'undefined') {
   }
   window.addEventListener('resize', () => { if (_zoomState.autoScale) applyZoom(); });
 }
-const APP_VERSION = '8.22.0';
+const APP_VERSION = '8.23.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -13312,11 +13312,53 @@ function renderWizardStepMaterial(q, part) {
   const isBar = (part.stock?.form === 'Bar/Block' || part.stock?.form === 'Round');
   const isSheet = part.stock?.form === 'Sheet';
   const useBarCalc = !!part.stock?.useBarCalc;
+  const csm = !!part.customerSuppliedMaterial;
   // v8.21: relabel Length/Width as "Sheet length / Sheet width" when in
   // Sheet mode so the user knows those drive the nesting calc below.
   const lenLabel = isSheet ? 'Sheet length (in)' : 'Length';
   const widLabel = isSheet ? 'Sheet width (in)'  : 'Width';
   return `
+    <!-- v8.23: Customer-supplied material — banner at the top of the
+         Material step. Field has existed since v7.25 with full cost-rollup
+         wiring (zeros material spend, swaps in a declared-value × handling-fee
+         model, suffixes the material label in the customer PDF). The wizard
+         just never had a UI for it until now. When checked, the CSM mini-
+         panel (declared value + handling %) appears inline. -->
+    <div style="display:flex; align-items:center; gap:10px; padding:10px 14px; margin-bottom:14px; background:${csm ? 'var(--orange-l)' : 'rgba(220,67,24,0.04)'}; border:1px solid ${csm ? 'var(--orange)' : 'var(--line)'}; border-left:4px solid var(--orange); border-radius:3px;">
+      <label style="display:inline-flex; align-items:center; gap:10px; cursor:pointer; user-select:none; margin:0; flex:1;">
+        <input type="checkbox" ${csm ? 'checked' : ''}
+               onchange="App.toggleCustomerSuppliedMaterial('${part.id}')"
+               style="width:18px; height:18px; cursor:pointer; flex:0 0 auto;">
+        <strong style="${csm ? 'color:var(--orange);' : ''}">📦 Customer-supplied material</strong>
+        <span class="text-mute small">— customer ships the metal; we charge a handling fee on declared value</span>
+      </label>
+    </div>
+    ${csm ? `
+      <div style="margin-bottom:14px; padding:14px 16px; background:var(--orange-l); border:1px solid var(--orange); border-radius:3px;">
+        <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px;">
+          <div class="field">
+            <label>Declared value ($/piece)</label>
+            ${bind({label:'CSM declared value', value:part.csmDeclaredValue, type:'number', onChange:v=>{ part.csmDeclaredValue = v; }, attrs:'step="any" min="0"', placeholder:'e.g. 25.00'})}
+            <div class="hint">Customer's per-piece value declaration</div>
+          </div>
+          <div class="field">
+            <label>Handling fee (%)</label>
+            ${bind({label:'CSM handling fee %', value:part.csmHandlingFeePct, type:'number', onChange:v=>{ part.csmHandlingFeePct = v; }, attrs:'step="any" min="0"', placeholder:'e.g. 15'})}
+            <div class="hint">% markup on declared value</div>
+          </div>
+          <div class="field">
+            <label>Effective handling fee</label>
+            <div style="padding:6px 10px; background:white; border:1px solid var(--orange); border-radius:2px; font-family:var(--font-mono); font-weight:700; color:var(--orange); font-size:14px;">
+              ${fmtMoney(num(part.csmDeclaredValue) * (num(part.csmHandlingFeePct) / 100))} / pc
+            </div>
+            <div class="hint">= declared × fee%</div>
+          </div>
+        </div>
+        <div class="text-mute small" style="margin-top:10px; line-height:1.5;">
+          ✓ Material out-of-pocket = $0 · ✓ Sheet nesting cost suppressed · ✓ "(customer-supplied)" suffix on the customer PDF
+        </div>
+      </div>
+    ` : ''}
     <div style="display:grid; grid-template-columns:2fr 1fr 1fr 1fr; gap:14px;">
       <div class="field" style="grid-column:span 2;"><label>Material</label>
         ${bind({label:'Material', value:part.material, type:'select', options: grouped, onChange:v=>{ part.material = v; }})}
@@ -13715,7 +13757,11 @@ function renderSheetNestPanel(part) {
       sheetLen, sheetWid, kerf: sn.kerf,
       allowRotate: !!sn.allowRotate,
     });
-    const sheetPrice = num(sn.sheetPrice);
+    // v8.23: if customer is supplying the metal, suppress the per-part
+    // material cost — the user still wants the layout / parts-per-sheet
+    // info, but the $/pc field shouldn't read like we're paying for stock.
+    const csmOn = !!part.customerSuppliedMaterial;
+    const sheetPrice = csmOn ? 0 : num(sn.sheetPrice);
     const sheetsNeeded = nest.count > 0 ? Math.ceil(qty / nest.count) : 0;
     const matPerPart  = nest.count > 0 && sheetPrice > 0 ? sheetPrice / nest.count : 0;
     const totalMatCost = sheetsNeeded * sheetPrice;
