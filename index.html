@@ -414,7 +414,9 @@
   .setup-pill.weld-pill { background:#C73E1D; }
   .setup-name-input { border:1px solid var(--line); background:white; border-radius:3px; }
   .setup-name-input:focus { border-color:var(--navy); outline:none; }
-  .setup-meta-grid { display:grid; grid-template-columns:repeat(4, minmax(0, 1fr)); gap:10px; }
+  /* v8.22: 6 columns — Machine, Fixture, Pgm hrs, Pgm $, Setup hrs, Setup $.
+     Machine + Fixture get 1.5x so they don't squeeze the labels. */
+  .setup-meta-grid { display:grid; grid-template-columns:1.5fr 1.5fr 1fr 1fr 1fr 1fr; gap:10px; }
   .setup-meta-grid .label { font-size:10px; text-transform:uppercase; letter-spacing:0.08em; color:var(--text-mute); font-weight:600; margin-bottom:3px; }
   .setup-meta-grid input, .setup-meta-grid select { width:100%; padding:5px 7px; border:1px solid var(--line); background:var(--input-bg); font-size:13px; }
   .setup-meta-grid input:focus, .setup-meta-grid select:focus { border-color:var(--navy); outline:none; }
@@ -852,7 +854,7 @@ if (typeof window !== 'undefined') {
   }
   window.addEventListener('resize', () => { if (_zoomState.autoScale) applyZoom(); });
 }
-const APP_VERSION = '8.21.0';
+const APP_VERSION = '8.22.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -3656,7 +3658,12 @@ function newSetup(n) {
     name: 'Setup ' + (n || 1),
     machine: '',
     fixture: '',
-    setupHrs: null,
+    // v8.22: setup time is now split into two buckets so a shop can quote
+    // programming separately from physical machine setup. Both default to
+    // null (= 0); both use the machine's setup rate. Per-machine program
+    // rate override can land later if needed.
+    programHrs: null,   // CAM/programming hours, offline at a workstation
+    setupHrs: null,     // physical setup on the machine — fixturing, touch-off, first article
     notes: '',
     ops: []
   };
@@ -5142,6 +5149,16 @@ function setupSetupCost(setup) {
   if (!setup) return 0;
   return num(setup.setupHrs) * setupRateFor(setup.machine);
 }
+// v8.22: programming cost — same rate as physical setup for now. If a per-
+// machine programRate ever lands in state.settings.rates, swap that lookup
+// in here without touching call sites.
+function setupProgramCost(setup) {
+  if (!setup) return 0;
+  return num(setup.programHrs) * setupRateFor(setup.machine);
+}
+function setupTotalNRE(setup) {
+  return setupProgramCost(setup) + setupSetupCost(setup);
+}
 // v7.47: run cost per part for one nested op (uses parent setup's machine rate)
 function setupOpRunCost(op, setup, discountFactor) {
   const factor = op.runUnit === 'min' ? (1/60) : 1;
@@ -5262,8 +5279,10 @@ function totalNRE(part) {
   // record not yet migrated (defensive — migration runs on load).
   const setups = Array.isArray(part.setups) ? part.setups : [];
   const flatOps = Array.isArray(part.machineOps) ? part.machineOps : [];
+  // v8.22: structured setups now contribute BOTH programming + physical
+  // setup time to NRE (via setupTotalNRE). Flat-ops legacy path unchanged.
   const setupNre = setups.length > 0
-    ? setups.reduce((s, st) => s + setupSetupCost(st), 0)
+    ? setups.reduce((s, st) => s + setupTotalNRE(st), 0)
     : flatOps.reduce((s, op) => s + setupCost(op), 0);
   return setupNre
        + num(part.tooling)
@@ -5499,7 +5518,10 @@ function quoteHealthCheck(quote) {
             // Each setup should have a machine + setup hrs + at least one op with run time
             setups.forEach((st, si) => {
               if (!st.machine) checks.push({ id:`p${i}-st${si}-mach`, level:'warn', message:`${label} ${st.name||('Setup '+(si+1))}: no machine selected`, fixHint:'Pick a machine so the rate looks up' });
-              if (!st.setupHrs || num(st.setupHrs) <= 0) checks.push({ id:`p${i}-st${si}-hrs`, level:'warn', message:`${label} ${st.name||('Setup '+(si+1))}: 0 setup hours`, fixHint:'Set realistic setup hours' });
+              // v8.22: programming hrs counts toward total setup time, so
+              // a setup with pgm hrs but no machine setup hrs is valid (e.g.
+              // a CAM-only quote where the customer already has the fixture).
+              if ((num(st.setupHrs) + num(st.programHrs)) <= 0) checks.push({ id:`p${i}-st${si}-hrs`, level:'warn', message:`${label} ${st.name||('Setup '+(si+1))}: 0 programming + setup hours`, fixHint:'Set programming hrs and/or machine setup hrs' });
               if (!Array.isArray(st.ops) || st.ops.length === 0) {
                 checks.push({ id:`p${i}-st${si}-ops`, level:'warn', message:`${label} ${st.name||('Setup '+(si+1))}: no operations`, fixHint:'Add at least one op with run time' });
               } else if (!st.ops.some(op => num(op.runTime) > 0)) {
@@ -16932,11 +16954,21 @@ function renderSetupsCard(q, p, machineOpts) {
          <div style="margin-top:10px;"><button class="btn btn-sm btn-primary" onclick="App.addSetup('${p.id}')">+ Add First Setup</button></div>
        </div>`
     : setups.map((st, si) => {
-        const setupHrs = num(st.setupHrs);
-        const setupRate = setupRateFor(st.machine);
-        const setupNRE = setupSetupCost(st);
+        const setupHrs   = num(st.setupHrs);
+        const programHrs = num(st.programHrs);
+        const setupRate  = setupRateFor(st.machine);
+        const setupNRE   = setupSetupCost(st);
+        const programNRE = setupProgramCost(st);
+        const totalNRE   = setupNRE + programNRE;
         const runPerPart = setupRunCostPerPart(st);
         const opsTotalMin = (st.ops || []).reduce((s, op) => s + (op.runUnit === 'hr' ? num(op.runTime)*60 : num(op.runTime)), 0);
+        // v8.22: per-piece amortization for the NRE breakdown footer.
+        // Uses the primary qty tier (qtyTiers[0]) — same source as the rest
+        // of the wizard's "$/ea @ qty N" display.
+        const qty = Math.max(1, (p.qtyTiers && num(p.qtyTiers[0])) || 1);
+        const programPerPc = programNRE / qty;
+        const setupPerPc   = setupNRE   / qty;
+        const totalPerPc   = totalNRE   / qty;
         return `
         <div class="setup-block">
           <div class="setup-block-header">
@@ -16960,7 +16992,15 @@ function renderSetupsCard(q, p, machineOpts) {
                 ${bind({value:st.fixture||'', type:'text', placeholder:'e.g. Kurt 6" vise', onChange:v=>{ App.setSetupField(p.id, st.id, 'fixture', v); }})}
               </div>
               <div>
-                <div class="label">Setup hrs <span class="text-mute small">@ ${fmtMoney(setupRate)}/hr · 0.25 hr increments</span></div>
+                <div class="label">Pgm hrs <span class="text-mute small">@ ${fmtMoney(setupRate)}/hr</span></div>
+                ${bind({value:st.programHrs, type:'number', placeholder:'0', onChange:v=>{ App.setSetupField(p.id, st.id, 'programHrs', v); }, attrs:'step="0.25" min="0"'})}
+              </div>
+              <div>
+                <div class="label">Pgm $ <span class="text-mute small">(NRE)</span></div>
+                <div class="value-cell">${fmtMoney(programNRE)}</div>
+              </div>
+              <div>
+                <div class="label">Setup hrs <span class="text-mute small">@ ${fmtMoney(setupRate)}/hr</span></div>
                 ${bind({value:st.setupHrs, type:'number', placeholder:'0', onChange:v=>{ App.setSetupField(p.id, st.id, 'setupHrs', v); }, attrs:'step="0.25" min="0"'})}
               </div>
               <div>
@@ -16993,9 +17033,28 @@ function renderSetupsCard(q, p, machineOpts) {
                 </tbody>
               </table>
             </div>
-            <div class="setup-block-footer">
-              <span class="text-mute small">${fmtNum(setupHrs,2)}hr setup + ${fmtNum(opsTotalMin,1)}min run</span>
-              <strong>$/pc: ${fmtMoney(runPerPart)}</strong>
+            <!-- v8.22: NRE breakdown — one-time charge AND amortized
+                 per-piece next to it, so the user can see "this setup
+                 costs $X total, which is $Y per part at this qty." -->
+            <div class="setup-block-footer" style="flex-wrap:wrap; gap:14px;">
+              <span class="text-mute small">${fmtNum(programHrs,2)}hr pgm + ${fmtNum(setupHrs,2)}hr setup + ${fmtNum(opsTotalMin,1)}min run</span>
+              <div style="display:flex; gap:18px; flex-wrap:wrap; align-items:center; margin-left:auto;">
+                <span class="text-mute small" title="Programming NRE ÷ qty ${qty}">
+                  Pgm <strong style="color:var(--text);">${fmtMoney(programNRE)}</strong>
+                  · <span style="color:var(--navy); font-weight:600;">${fmtMoney(programPerPc)}/pc</span>
+                </span>
+                <span class="text-mute small" title="Setup NRE ÷ qty ${qty}">
+                  Setup <strong style="color:var(--text);">${fmtMoney(setupNRE)}</strong>
+                  · <span style="color:var(--navy); font-weight:600;">${fmtMoney(setupPerPc)}/pc</span>
+                </span>
+                <span class="text-mute small">
+                  Run <strong style="color:var(--text);">—</strong>
+                  · <span style="color:var(--navy); font-weight:600;">${fmtMoney(runPerPart)}/pc</span>
+                </span>
+                <strong title="(Pgm + Setup + Run) per piece at qty ${qty}" style="color:var(--green); font-size:14px;">
+                  TOTAL ${fmtMoney(totalPerPc + runPerPart)}/pc
+                </strong>
+              </div>
             </div>
           </div>
         </div>`;
