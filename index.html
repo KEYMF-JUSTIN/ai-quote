@@ -241,7 +241,7 @@
      left, type icon + label, part #, description, qty + $/ea. Active card has
      a stronger border and "raised" feel. */
   .parts-cards { display:flex; flex-wrap:wrap; gap:10px; padding:10px 0 14px; }
-  .part-card-chip { display:flex; align-items:stretch; min-width:200px; max-width:260px; padding:0; background:var(--paper); border:1px solid var(--line-dark); border-radius:5px; cursor:pointer; text-align:left; font:inherit; color:var(--text); overflow:hidden; transition:all 0.12s ease; }
+  .part-card-chip { display:flex; align-items:stretch; min-width:200px; max-width:260px; padding:0; background:var(--paper); border:1px solid var(--line-dark); border-radius:5px; cursor:pointer; text-align:left; font:inherit; color:var(--text); overflow:hidden; transition:all 0.12s ease; position:relative; }
   .part-card-chip:hover:not(:disabled) { border-color:var(--type-color, var(--orange)); box-shadow:0 2px 6px rgba(0,0,0,0.08); transform:translateY(-1px); }
   .part-card-chip.active { border:2px solid var(--type-color, var(--orange)); box-shadow:0 4px 10px rgba(0,0,0,0.12); background:#FFFCFA; }
   .part-card-chip.active .part-card-stripe { width:8px; }
@@ -256,6 +256,51 @@
   .part-card-meta { font-size:10px; color:var(--text-mute); font-family:var(--font-mono); margin-top:2px; }
   .part-card-add { min-width:120px; max-width:140px; background:transparent; }
   .part-card-add:hover:not(:disabled) { background:#FFF7ED; }
+
+  /* v8.27: drawing thumbnail on the part chip. Sits between the type
+     stripe and the body so the chip layout adapts to whether a part has
+     an attached drawing or not. */
+  .part-card-thumb { flex:0 0 56px; width:56px; align-self:stretch; background:#FAFAFA; border-right:1px solid var(--line); display:flex; align-items:center; justify-content:center; overflow:hidden; position:relative; }
+  .part-card-thumb img { width:100%; height:100%; object-fit:cover; display:block; }
+  .part-card-thumb canvas { width:100%; height:100%; object-fit:contain; display:block; background:white; }
+  .part-card-thumb.pdf { background:#FFF7ED; }
+  .part-card-thumb.pdf .part-card-thumb-fallback { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:#92400E; font-size:22px; pointer-events:none; }
+  /* Hide fallback once the canvas has been painted (it gets a data attribute) */
+  .part-card-thumb.pdf canvas[data-rendered="1"] + .part-card-thumb-fallback { display:none; }
+  .part-card-thumb-badge { position:absolute; top:2px; right:2px; background:rgba(31,41,55,0.85); color:white; font-size:9px; font-weight:700; padding:1px 5px; border-radius:8px; pointer-events:none; }
+
+  /* v8.27: Summary tab — paper-style customer PDF preview. The existing
+     4 tables are wrapped in a letter-sized "sheet of paper" on a gray
+     desk, with a proper letterhead block at the top. Internal cards
+     (the no-print Material Out of Pocket) stay hidden unless the user
+     ticks "Show internal" on the banner. */
+  .summary-preview-banner { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 14px; margin-bottom:14px; background:#FEF3C7; border:1px solid var(--amber, #D97706); border-left:4px solid var(--amber, #D97706); border-radius:4px; font-size:12px; }
+  .summary-paper-wrap { background:#6B7280; padding:24px 16px 48px; margin:0 -16px -16px; min-height:80vh; }
+  .summary-paper { background:white; max-width:8.5in; min-height:11in; margin:0 auto; padding:0.5in 0.55in; box-shadow:0 6px 28px rgba(0,0,0,0.35); border-radius:2px; color:#111; font-family:var(--font-body); }
+  .summary-paper .card { box-shadow:none; border:1px solid #999; background:white; margin-bottom:14px; }
+  .summary-paper .card-header { background:white !important; color:var(--navy) !important; border-bottom:2px solid var(--navy); padding:8px 12px; }
+  .summary-paper table.tbl tr.unit td { background:white !important; color:var(--green) !important; border-top:2px solid var(--green); border-bottom:2px solid var(--green); }
+  /* Internal cards normally hidden via .no-print; show when user toggles */
+  body.summary-show-internal .summary-paper .no-print { display:revert !important; }
+  body.summary-show-internal .summary-paper .no-print { border:1px dashed var(--orange); }
+
+  .summary-paper-letterhead { display:flex; gap:24px; padding-bottom:16px; margin-bottom:18px; border-bottom:3px double var(--navy); }
+  .summary-paper-shop { flex:1; }
+  .summary-paper-shopname { font-family:var(--font-display); font-size:24px; font-weight:800; color:var(--navy); letter-spacing:0.02em; }
+  .summary-paper-tagline { font-size:11px; color:var(--text-mute); font-style:italic; margin-top:2px; }
+  .summary-paper-addr { font-size:12px; color:var(--text); margin-top:8px; line-height:1.4; }
+  .summary-paper-contact { font-size:12px; color:var(--text-mute); margin-top:4px; }
+  .summary-paper-quote-meta { flex:0 0 220px; text-align:right; }
+  .summary-paper-doctype { font-family:var(--font-display); font-size:28px; font-weight:800; color:var(--orange); letter-spacing:0.08em; }
+  .summary-paper-quote-meta table { width:100%; margin-top:8px; border-collapse:collapse; font-size:12px; }
+  .summary-paper-quote-meta th { text-align:right; padding:2px 8px 2px 0; color:var(--text-mute); font-weight:600; text-transform:uppercase; font-size:10px; letter-spacing:0.06em; }
+  .summary-paper-quote-meta td { text-align:right; padding:2px 0; font-family:var(--font-mono); font-weight:600; }
+
+  .summary-paper-customer { background:#F9FAFB; border-left:4px solid var(--orange); padding:10px 14px; margin-bottom:18px; font-size:12px; line-height:1.5; }
+  .summary-paper-customer-label { font-size:10px; text-transform:uppercase; letter-spacing:0.08em; color:var(--text-mute); font-weight:700; }
+  .summary-paper-customer-name { font-size:15px; font-weight:700; color:var(--navy); margin-top:2px; }
+
+  .summary-paper-footer { margin-top:24px; padding-top:14px; border-top:1px solid var(--line); font-size:10.5px; color:var(--text-mute); line-height:1.5; }
 
   /* v7.63: PDF viewer (Mozilla PDF.js wrapper) — used in training wizard,
      RFQ import modal, vendor/customer cards. Toolbar + scrollable canvas. */
@@ -854,7 +899,7 @@ if (typeof window !== 'undefined') {
   }
   window.addEventListener('resize', () => { if (_zoomState.autoScale) applyZoom(); });
 }
-const APP_VERSION = '8.26.0';
+const APP_VERSION = '8.27.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -3556,6 +3601,32 @@ PdfViewer._fitWidth = function(containerId) {
 // Mount a thumbnail (first page only) into a canvas placeholder.
 // Use: html includes `<canvas data-pdf-thumb="blobUrl" data-max-width="160">`
 // and call PdfViewer._mountAllThumbnails() after the DOM is attached.
+// v8.27: paint PDF thumbnails on part chips. Chips render a placeholder
+// canvas with data-part-thumb-pdf=<partId>; this looks up the part's
+// first PDF attachment by id and renders it via PdfViewer.renderThumbnail.
+// Kept separate from _mountAllThumbnails because the data URL lives on
+// the part attachment (not embedded in the canvas attribute) — keeps DOM
+// from bloating with multi-KB base64 strings on every render.
+async function _paintPartChipPdfThumbs() {
+  const canvases = document.querySelectorAll('canvas[data-part-thumb-pdf]:not([data-rendered="1"])');
+  if (canvases.length === 0) return;
+  const q = (typeof getActiveQuote === 'function') ? getActiveQuote() : null;
+  if (!q) return;
+  for (const canvas of canvases) {
+    const partId = canvas.dataset.partThumbPdf;
+    const part = (q.parts || []).find(p => p.id === partId);
+    if (!part) continue;
+    const thumb = (typeof _firstDrawingThumb === 'function') ? _firstDrawingThumb(part) : null;
+    if (!thumb || thumb.kind !== 'pdf' || !thumb.dataUrl) continue;
+    try {
+      await PdfViewer.renderThumbnail(thumb.dataUrl, canvas, 56);
+      canvas.setAttribute('data-rendered', '1');
+    } catch (e) {
+      console.warn('[part chip pdf thumb] failed for', partId, e);
+    }
+  }
+}
+
 PdfViewer._mountAllThumbnails = function(root) {
   root = root || document;
   const canvases = root.querySelectorAll('canvas[data-pdf-thumb]:not([data-pdf-thumb-mounted])');
@@ -6335,6 +6406,8 @@ function render() {
   renderTrainingModal();
   // v7.63: paint any PDF thumbnails (<canvas data-pdf-thumb>) emitted in this render pass
   try { if (typeof PdfViewer !== 'undefined') PdfViewer._mountAllThumbnails(); } catch (_) {}
+  // v8.27: paint PDF thumbs on part chips (data-part-thumb-pdf placeholders)
+  try { _paintPartChipPdfThumbs(); } catch (_) {}
   renderMsgImportModal();
   renderMissingCustFolderModal();
   // v7.34: user management dialogs
@@ -16654,6 +16727,24 @@ function partTypeById(typeId) {
       || { id: typeId || 'unknown', label: typeId || 'Untagged', icon:'❓', color:'#94A3B8', desc:'' };
 }
 
+// v8.27: return the first attachment on a part that should appear as a
+// "drawing" thumbnail on the part-chip card. Prefers attachments tagged
+// stepId='identity' (where drawings actually land), then falls back to
+// any image or PDF. Images render directly (data URL → <img>); PDFs
+// render via PdfViewer.renderThumbnail (lazy, post-mount).
+function _firstDrawingThumb(part) {
+  if (!part || !Array.isArray(part.attachments) || part.attachments.length === 0) return null;
+  const ids = part.attachments.filter(a => a.stepId === 'identity');
+  const pool = ids.length ? ids : part.attachments;
+  const isImg = a => (a.mimeType || '').startsWith('image/') && a.data;
+  const isPdf = a => /pdf/i.test(a.mimeType || '') || /\.pdf$/i.test(a.name || '');
+  const img = pool.find(isImg);
+  if (img) return { kind: 'image', dataUrl: img.data, name: img.name, count: part.attachments.length };
+  const pdf = pool.find(isPdf);
+  if (pdf) return { kind: 'pdf', dataUrl: pdf.data, name: pdf.name, count: part.attachments.length };
+  return null;
+}
+
 // v7.60: render parts as a chip-selected tab view — ONE part visible at a time.
 // Replaces the v7.57 all-stacked layout which produced duplicate-looking cards
 // (Machine Setups + Material Stock × N parts). Single-part quotes skip the chip
@@ -16687,9 +16778,21 @@ function renderInlineParts(q) {
         const desc  = p.description ? esc(p.description.slice(0, 48)) + (p.description.length>48?'…':'') : '';
         const tier1 = (p.qtyTiers && p.qtyTiers[0]) || 1;
         const unit  = unitPriceAt(p, 0);
+        // v8.27: drawing thumbnail. Image attachments render inline via data
+        // URL. PDFs get a canvas seeded by a data-part-thumb-pdf attribute
+        // that _renderPartChipPdfThumbs() picks up post-render and renders
+        // asynchronously via PdfViewer.renderThumbnail.
+        const thumb = _firstDrawingThumb(p);
+        const thumbHtml = thumb && thumb.kind === 'image'
+          ? `<span class="part-card-thumb" title="${esc(thumb.name)}"><img src="${esc(thumb.dataUrl)}" alt="" loading="lazy"></span>`
+          : thumb && thumb.kind === 'pdf'
+          ? `<span class="part-card-thumb pdf" title="${esc(thumb.name)}"><canvas data-part-thumb-pdf="${esc(p.id)}"></canvas><span class="part-card-thumb-fallback">📄</span></span>`
+          : '';
+        const thumbBadge = thumb && thumb.count > 1 ? `<span class="part-card-thumb-badge" title="${thumb.count} attachments">+${thumb.count - 1}</span>` : '';
         return `
           <button class="part-card-chip ${isActive?'active':''}" onclick="App.selectPartChip('${q.id}','${p.id}')" title="${esc(t.label)} — ${esc(p.description || label)}" style="--type-color: ${esc(t.color)};">
             <span class="part-card-stripe" style="background:${esc(t.color)};"></span>
+            ${thumbHtml}${thumbBadge}
             <span class="part-card-body">
               <span class="part-card-top">
                 <span class="part-card-icon">${t.icon}</span>
@@ -18103,8 +18206,68 @@ function renderQuoteSummary(q) {
   const subtotals = tiers.map((_,i) => quoteSubtotalAt(q, i));
   const nre = quoteNREtotal(q);
   const totals = tiers.map((_,i) => quoteTotalAt(q, i));
+  // v8.27: Summary is now the customer-facing PDF preview. Frame the existing
+  // tables inside a letter-sized paper sheet on a gray "desk" so what you see
+  // is what the customer will see. Letterhead at top (shop info + quote meta
+  // + customer block), then the existing 4 tables (Unit Price, Extended,
+  // NRE, Quote Total). The "Internal — Material Out of Pocket" card stays
+  // .no-print so it does NOT render here (it's not customer-facing).
+  const sp = (state.settings && state.settings.shopInfo) || {};
+  const cust = (state.customers || []).find(c => c.id === q.customerId);
+  const today = q.quoteDate || new Date().toISOString().slice(0,10);
+  const validDays = sp.quoteValidDays || 30;
+  const letterhead = `
+    <div class="summary-paper-letterhead">
+      <div class="summary-paper-shop">
+        <div class="summary-paper-shopname">${esc(sp.name || 'Keystone Machine and Fab')}</div>
+        ${sp.tagline ? `<div class="summary-paper-tagline">${esc(sp.tagline)}</div>` : ''}
+        ${sp.address ? `<div class="summary-paper-addr">${esc(sp.address).replace(/\n/g, '<br>')}</div>` : ''}
+        ${(sp.phone || sp.email) ? `<div class="summary-paper-contact">${esc(sp.phone || '')}${sp.phone && sp.email ? ' · ' : ''}${esc(sp.email || '')}</div>` : ''}
+      </div>
+      <div class="summary-paper-quote-meta">
+        <div class="summary-paper-doctype">QUOTE</div>
+        <table>
+          <tr><th>Quote #</th><td>${esc(q.quoteNum || '—')}</td></tr>
+          <tr><th>Date</th><td>${esc(today)}</td></tr>
+          <tr><th>Valid</th><td>${validDays} days</td></tr>
+          ${q.customerPO ? `<tr><th>Customer PO</th><td>${esc(q.customerPO)}</td></tr>` : ''}
+        </table>
+      </div>
+    </div>
+    ${cust ? `
+      <div class="summary-paper-customer">
+        <div class="summary-paper-customer-label">QUOTE FOR</div>
+        <div class="summary-paper-customer-name">${esc(cust.name || '')}</div>
+        ${cust.contact ? `<div>Attn: ${esc(cust.contact)}</div>` : ''}
+        ${cust.billStreet ? `<div>${esc(cust.billStreet)}</div>` : ''}
+        ${(cust.billCity || cust.billState || cust.billZip) ? `<div>${esc([cust.billCity, cust.billState, cust.billZip].filter(Boolean).join(' '))}</div>` : ''}
+        ${cust.email ? `<div class="text-mute small" style="margin-top:4px;">${esc(cust.email)}</div>` : ''}
+      </div>
+    ` : ''}
+  `;
+  const previewToggle = `
+    <div class="summary-preview-banner no-print">
+      <div>
+        <strong>📄 Customer-facing preview</strong>
+        <span class="text-mute small" style="margin-left:10px;">This is what your customer will see in the PDF. Internal breakdown (material out-of-pocket etc.) is hidden — toggle below to peek.</span>
+      </div>
+      <div style="display:flex; gap:6px;">
+        <button class="btn btn-sm" onclick="document.body.classList.toggle('summary-show-internal')">👁 Show/Hide internal</button>
+        <button class="btn btn-sm" onclick="App.downloadQuotePDF('${q.id}')">⬇ PDF</button>
+      </div>
+    </div>
+  `;
+  const footerTerms = sp.footerTerms ? `
+    <div class="summary-paper-footer">
+      ${esc(sp.footerTerms).replace(/\n/g, '<br>')}
+    </div>
+  ` : '';
   return `
-    <div class="card"><div class="card-header"><span>Unit Price by Quantity ($/ea — parts only)</span></div>
+    ${previewToggle}
+    <div class="summary-paper-wrap">
+      <div class="summary-paper">
+        ${letterhead}
+        <div class="card"><div class="card-header"><span>Unit Price by Quantity ($/ea — parts only)</span></div>
       <div class="card-body tight"><table class="tbl">
         <thead><tr><th>Part #</th><th>Description</th><th>Material</th>${tiers.map(t => `<th class="num">Qty ${fmtInt(t)}</th>`).join('')}</tr></thead>
         <tbody>${q.parts.map(p => `
@@ -18157,6 +18320,9 @@ function renderQuoteSummary(q) {
       <div class="hint" style="margin-top:6px;">
         Shows the actual cash KMF spends on raw stock / components to fulfill this order at each quantity tier. Honors whole-bar and whole-pack pricing — buying one bar to cut 3 parts reports the bar cost, not <span class="mono">3 × perPiece</span>. Customer-supplied material is excluded.
       </div>
+      </div>
+    </div>
+        ${footerTerms}
       </div>
     </div>
   `;
@@ -27446,10 +27612,12 @@ setTimeout(() => {
     }
 
     // v8.2: if wizard mode is active and there's an active part with a
-    // current step, route the drop there — attach to that step. Identity
-    // step still falls through to existing logic (Claude type detection
-    // lands here in Layer 3). Other steps absorb the drop as an
-    // attachment.
+    // current step, route the drop there — wizardAttachFile handles the
+    // smart-paste logic (McMaster URL detect, Claude extract on identity,
+    // plain attachment everywhere else).
+    // v8.26: removed the identity exclusion that left identity drops to
+    // a dead `part-` tab check below. wizardAttachFile already does the
+    // identity → Claude extraction internally, so route it the same way.
     if (state.ui.wizardMode && state.ui.view === 'quote') {
       const q = state.quotes.find(qq => qq.id === state.ui.activeQuoteId);
       const activeId = q && state.ui.activePartIdForInfo && state.ui.activePartIdForInfo[q.id];
@@ -27458,11 +27626,33 @@ setTimeout(() => {
         const stepIdx = (state.ui.wizardStep && state.ui.wizardStep[part.id]) || 0;
         const steps = wizardStepsFor(part);
         const curStep = steps[stepIdx];
-        if (curStep && curStep.id !== 'identity' && curStep.id !== 'review') {
+        // v8.26: only the Review step has no useful "attach" semantic —
+        // everything else (identity, material, setups, tooling, finishing,
+        // dxf, weld ops) routes through wizardAttachFile.
+        if (curStep && curStep.id !== 'review') {
           e.preventDefault();
           App.wizardAttachFile(part.id, curStep.id, file);
           return;
         }
+      }
+      // v8.26: quote view but no active part open in the wizard — auto-
+      // create a default Machined part and route the drop to its identity
+      // step. Lets a user drop a drawing onto the quote page (parts chip
+      // row, empty state, etc.) without first clicking "+ Add Part".
+      if (q) {
+        e.preventDefault();
+        let newPartId = null;
+        update(s => {
+          const qq = s.quotes.find(x => x.id === s.ui.activeQuoteId);
+          if (!qq) return;
+          const p = newPart({ typeId: 'machined' });
+          qq.parts.push(p);
+          if (!s.ui.activePartIdForInfo) s.ui.activePartIdForInfo = {};
+          s.ui.activePartIdForInfo[qq.id] = p.id;
+          newPartId = p.id;
+        });
+        if (newPartId) App.wizardAttachFile(newPartId, 'identity', file);
+        return;
       }
     }
     // v7.70: if an Add Vendor / Add Customer wizard is open, route the drop
