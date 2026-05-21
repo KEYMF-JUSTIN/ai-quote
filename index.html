@@ -4,6 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=1200">
 <title>AI Quote</title>
+<link rel="icon" type="image/x-icon" href="icons/ai-quote.ico">
+<link rel="icon" type="image/png" sizes="any" href="icons/ai-quote.png">
+<link rel="apple-touch-icon" href="icons/ai-quote.png">
+<meta name="theme-color" content="#1F2937">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Public+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -698,6 +702,36 @@
     @page { margin:12mm; }
   }
 
+  /* v8.21: PREVIEW MODE — mirrors the @media print rules so what you see
+     IS what you'll print/PDF, but keeps the header visible so the user can
+     toggle out. Renders the document as a letter-sized "sheet of paper"
+     sitting on a gray desk with a soft drop-shadow. */
+  body.print-preview { background:#6B7280 !important; overflow:auto !important; height:auto !important; }
+  body.print-preview #app-nav { display:none !important; }
+  body.print-preview .no-print { display:none !important; }
+  body.print-preview #app-shell { grid-template-columns:1fr; height:auto; }
+  body.print-preview #app-main {
+    padding:32px 24px 64px;
+    background:#6B7280;
+    overflow:auto;
+    display:flex;
+    justify-content:center;
+  }
+  body.print-preview #app-main > * {
+    background:white;
+    width:8.5in;
+    max-width:100%;
+    min-height:11in;
+    padding:0.5in;
+    box-shadow:0 6px 28px rgba(0,0,0,0.35);
+    border-radius:2px;
+    color:#111;
+  }
+  body.print-preview .card { border:1px solid #999; }
+  body.print-preview .card-header { background:white !important; color:var(--navy) !important; border-bottom:2px solid var(--navy); }
+  body.print-preview table.tbl tr.unit td { background:white !important; color:var(--green) !important; border-top:2px solid var(--green); border-bottom:2px solid var(--green); }
+  body.print-preview .btn-preview-toggle { background:var(--orange) !important; color:white !important; border-color:var(--orange) !important; }
+
   .mt-2 { margin-top:16px; }
   .text-mute { color:var(--text-mute); }
   .small { font-size:12px; }
@@ -749,6 +783,7 @@
     <button class="btn btn-ghost" onclick="App.toggleTheme()" title="Toggle dark/light"><span id="theme-icon">☀</span></button>
     <button class="btn btn-ghost" onclick="App.exportBackup()">Backup</button>
     <button class="btn btn-ghost" onclick="App.importBackup()">Restore</button>
+    <button class="btn btn-ghost btn-preview-toggle" id="btn-preview-toggle" onclick="App.togglePrintPreview()" title="See what the printed PDF will look like — toggle on/off without printing">👁 Preview</button>
     <button class="btn btn-ghost" onclick="window.print()">Print</button>
   </div>
 </header>
@@ -817,7 +852,7 @@ if (typeof window !== 'undefined') {
   }
   window.addEventListener('resize', () => { if (_zoomState.autoScale) applyZoom(); });
 }
-const APP_VERSION = '8.20.0';
+const APP_VERSION = '8.21.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -13138,6 +13173,11 @@ function renderPartWizard(q, part) {
         <div style="display:flex; gap:6px; align-items:center;">
           ${part.isDraft ? '<span style="padding:2px 8px; background:rgba(255,255,255,0.2); border-radius:3px; font-size:11px;">draft</span>' : ''}
           <button class="btn btn-sm" style="background:rgba(255,255,255,0.15); color:white; border:1px solid rgba(255,255,255,0.3);" onclick="App.savePartAsDraft('${part.id}')" title="Mark this part as a draft (still working on it). Stays on current step.">💾 Save draft</button>
+          <!-- v8.21: Duplicate — deep-clones this part (incl. material,
+               nesting, ops, attachments), renames "(copy)", inserts right
+               after, and opens the copy on the same wizard step you're on.
+               The fastest way to add a "similar but different" part. -->
+          <button class="btn btn-sm" style="background:rgba(255,255,255,0.15); color:white; border:1px solid rgba(255,255,255,0.3);" onclick="App.duplicatePart('${part.id}')" title="Duplicate this part — opens the copy on this same step so you can tweak one thing">⎘ Duplicate</button>
           <!-- v8.18.2: × and Delete are now visually distinct. × just closes
                the wizard back to the parts row (non-destructive); the red
                "🗑 Delete part" button is the only way to actually remove
@@ -13248,7 +13288,12 @@ function renderWizardStepMaterial(q, part) {
   const materials = state.settings.materials || [];
   const grouped = groupedMaterialOptions(materials);
   const isBar = (part.stock?.form === 'Bar/Block' || part.stock?.form === 'Round');
+  const isSheet = part.stock?.form === 'Sheet';
   const useBarCalc = !!part.stock?.useBarCalc;
+  // v8.21: relabel Length/Width as "Sheet length / Sheet width" when in
+  // Sheet mode so the user knows those drive the nesting calc below.
+  const lenLabel = isSheet ? 'Sheet length (in)' : 'Length';
+  const widLabel = isSheet ? 'Sheet width (in)'  : 'Width';
   return `
     <div style="display:grid; grid-template-columns:2fr 1fr 1fr 1fr; gap:14px;">
       <div class="field" style="grid-column:span 2;"><label>Material</label>
@@ -13260,11 +13305,11 @@ function renderWizardStepMaterial(q, part) {
       <div class="field"><label>Thickness (in)</label>
         ${bind({label:'Thickness', value:part.stock?.thickness, type:'number', onChange:v=>{ if(!part.stock) part.stock = {}; part.stock.thickness = v; }, attrs:'step="0.125"'})}
       </div>
-      <div class="field"><label>Length</label>
-        ${bind({label:'Length', value:part.stock?.length, type:'number', onChange:v=>{ if(!part.stock) part.stock = {}; part.stock.length = v; }, attrs:'step="0.25"'})}
+      <div class="field"><label>${lenLabel}</label>
+        ${bind({label:lenLabel, value:part.stock?.length, type:'number', onChange:v=>{ if(!part.stock) part.stock = {}; part.stock.length = v; }, attrs:'step="0.25"', placeholder:isSheet?'96 = 8 ft':''})}
       </div>
-      <div class="field"><label>Width</label>
-        ${bind({label:'Width', value:part.stock?.width, type:'number', onChange:v=>{ if(!part.stock) part.stock = {}; part.stock.width = v; }, attrs:'step="0.25"'})}
+      <div class="field"><label>${widLabel}</label>
+        ${bind({label:widLabel, value:part.stock?.width, type:'number', onChange:v=>{ if(!part.stock) part.stock = {}; part.stock.width = v; }, attrs:'step="0.25"', placeholder:isSheet?'48 = 4 ft':''})}
       </div>
       <div class="field" style="grid-column:span 2;"><label>Notes</label>
         ${bind({label:'Material notes', value:part.materialNotes, onChange:v=>{ part.materialNotes = v; }, placeholder:'Customer-supplied? Cert required?'})}
@@ -13306,6 +13351,7 @@ function renderWizardStepMaterial(q, part) {
         `}
       </div>
     ` : ''}
+    ${isSheet ? renderSheetNestPanel(part) : ''}
     <div style="margin-top:14px; padding:10px 12px; background:#F0F9FF; border-left:3px solid var(--blue); border-radius:3px; font-size:12px;">
       💡 The next steps depend on this part's type — machined gets <strong>Setups → Tooling</strong>, cut blanks get <strong>DXF</strong>, weldments get <strong>Setups → Weld Ops</strong>, hybrids get all of it. Purchased parts skip straight to Review. Pick the type on the Identity step to see the right flow.
     </div>
@@ -13595,6 +13641,155 @@ function renderWizardStepWeldOps(q, part) {
 // v8.8: Collar nesting math. Given outside dims + sheet dims + kerf, returns
 // the max parts that fit on one sheet (best of two orientations) plus the
 // row × column layout for visualization.
+// v8.21: Generic rectangular shelf-pack nester for the universal Material
+// step. Same math as the collar nester but exposed as a flag-driven helper
+// so the Sheet branch can offer rotation as a user-toggleable option.
+// Returns { cols, rows, count, rotated, partLen, partWid } where partLen/Wid
+// are the dims AS LAID OUT (so the SVG renderer knows the cell size).
+function _calcSheetNest(opts) {
+  const partLen0 = Math.max(0.001, num(opts.partLen));
+  const partWid0 = Math.max(0.001, num(opts.partWid));
+  const sheetLen = Math.max(0.001, num(opts.sheetLen));
+  const sheetWid = Math.max(0.001, num(opts.sheetWid));
+  const kerf     = Math.max(0, num(opts.kerf));
+  const allowRotate = opts.allowRotate !== false;
+  const pL = partLen0 + kerf, pW = partWid0 + kerf;
+  const colsA = Math.floor((sheetLen + kerf) / pL);
+  const rowsA = Math.floor((sheetWid + kerf) / pW);
+  const nA = Math.max(0, colsA) * Math.max(0, rowsA);
+  const baseA = { cols:colsA, rows:rowsA, count:nA, rotated:false, partLen:partLen0, partWid:partWid0 };
+  if (!allowRotate) return baseA;
+  const colsB = Math.floor((sheetLen + kerf) / pW);
+  const rowsB = Math.floor((sheetWid + kerf) / pL);
+  const nB = Math.max(0, colsB) * Math.max(0, rowsB);
+  if (nB > nA) return { cols:colsB, rows:rowsB, count:nB, rotated:true, partLen:partWid0, partWid:partLen0 };
+  return baseA;
+}
+
+// v8.21: Sheet Nesting panel — appears in the universal Material step when
+// stock.form === 'Sheet'. Captures part dims + kerf + $/sheet + rotation,
+// shows parts-per-sheet, sheets needed for first qty tier, $/part material,
+// utilization %, and leftover material. Visualization via _renderNestingSVG.
+//
+// State lives under part.stock.sheetNest to keep it isolated from the
+// existing length/width (sheet outer dims) and the bar calc's partLength /
+// kerf fields.
+function renderSheetNestPanel(part) {
+  if (!part.stock) part.stock = {};
+  if (!part.stock.sheetNest) part.stock.sheetNest = {};
+  const sn = part.stock.sheetNest;
+  if (sn.kerf == null) sn.kerf = 0.05;
+  if (sn.allowRotate == null) sn.allowRotate = true;
+  const sheetLen = num(part.stock.length);
+  const sheetWid = num(part.stock.width);
+  const partType = (state.settings.partTypes || []).find(t => t.id === part.typeId) || { color:'var(--navy)' };
+  const qty = (part.qtyTiers && part.qtyTiers[0]) || 1;
+  const readyToCalc = sheetLen > 0 && sheetWid > 0 && num(sn.partLen) > 0 && num(sn.partWid) > 0;
+  let readout = '';
+  let svg = '';
+  if (readyToCalc) {
+    const nest = _calcSheetNest({
+      partLen: sn.partLen, partWid: sn.partWid,
+      sheetLen, sheetWid, kerf: sn.kerf,
+      allowRotate: !!sn.allowRotate,
+    });
+    const sheetPrice = num(sn.sheetPrice);
+    const sheetsNeeded = nest.count > 0 ? Math.ceil(qty / nest.count) : 0;
+    const matPerPart  = nest.count > 0 && sheetPrice > 0 ? sheetPrice / nest.count : 0;
+    const totalMatCost = sheetsNeeded * sheetPrice;
+    const sheetArea  = sheetLen * sheetWid;
+    const partArea   = num(sn.partLen) * num(sn.partWid);
+    const usedArea   = nest.count * partArea;
+    const utilPct    = sheetArea > 0 ? (usedArea / sheetArea) * 100 : 0;
+    const leftPerSheet = Math.max(0, sheetArea - usedArea);
+    const leftTotal    = leftPerSheet * sheetsNeeded;
+    readout = `
+      <div style="font-size:36px; font-weight:700; color:${partType.color}; line-height:1;">
+        ${nest.count}
+        <span style="font-size:13px; color:var(--text-mute); font-weight:400; margin-left:6px;">parts / sheet</span>
+      </div>
+      <div class="text-mute small" style="margin-top:6px;">
+        ${nest.cols} cols × ${nest.rows} rows${nest.rotated ? ' · <span style="color:var(--orange); font-weight:600;">rotated 90°</span>' : ''}
+      </div>
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px 14px; margin-top:14px; padding-top:12px; border-top:1px dashed var(--line-dark);">
+        <div>
+          <div class="text-mute" style="font-size:10px; text-transform:uppercase; letter-spacing:0.06em;">Sheets needed</div>
+          <div style="font-size:18px; font-weight:600;">${sheetsNeeded || '—'}<span class="text-mute" style="font-size:11px; font-weight:400; margin-left:5px;">for qty ${qty}</span></div>
+        </div>
+        <div>
+          <div class="text-mute" style="font-size:10px; text-transform:uppercase; letter-spacing:0.06em;">$/part material</div>
+          <div style="font-size:18px; font-weight:600;">${matPerPart > 0 ? '$'+matPerPart.toFixed(3) : '—'}</div>
+        </div>
+        <div>
+          <div class="text-mute" style="font-size:10px; text-transform:uppercase; letter-spacing:0.06em;">Total material</div>
+          <div style="font-size:18px; font-weight:600;">${totalMatCost > 0 ? '$'+totalMatCost.toFixed(2) : '—'}</div>
+        </div>
+        <div>
+          <div class="text-mute" style="font-size:10px; text-transform:uppercase; letter-spacing:0.06em;">Utilization</div>
+          <div style="font-size:18px; font-weight:600; color:${utilPct >= 70 ? 'var(--green)' : utilPct >= 40 ? 'var(--orange)' : 'var(--red)'};">${utilPct.toFixed(1)}%</div>
+        </div>
+        <div style="grid-column:span 2; padding-top:8px; border-top:1px dashed var(--line-dark);">
+          <div class="text-mute" style="font-size:10px; text-transform:uppercase; letter-spacing:0.06em;">Leftover drop</div>
+          <div style="font-size:13px; margin-top:2px;">
+            <strong>${leftPerSheet.toFixed(1)} in²</strong> / sheet
+            <span class="text-mute">·</span>
+            <strong>${leftTotal.toFixed(1)} in²</strong> total
+            <span class="text-mute">(${(100-utilPct).toFixed(1)}%)</span>
+          </div>
+        </div>
+      </div>
+    `;
+    svg = nest.count > 0 ? _renderNestingSVG(nest, sheetLen, sheetWid, 0, partType.color) : '';
+  } else {
+    readout = `<div class="text-mute small" style="padding:18px 4px;">Enter sheet dims (above) + part dims (left) to see the nesting result.</div>`;
+  }
+  const sheetDimsHint = (sheetLen > 0 && sheetWid > 0)
+    ? `Sheet: <strong>${sheetLen} × ${sheetWid}"</strong>`
+    : `<span style="color:var(--orange);">Sheet dimensions missing — set Length & Width above.</span>`;
+  return `
+    <div style="margin-top:14px; padding:14px 16px; background:#F5F3FF; border:1px solid #C4B5FD; border-radius:5px;">
+      <div style="display:flex; align-items:baseline; justify-content:space-between; margin-bottom:12px;">
+        <div style="font-size:13px; font-weight:700; color:#5B21B6; letter-spacing:0.04em;">🧩 SHEET NESTING CALCULATOR</div>
+        <div style="font-size:11px; color:var(--text-mute);">${sheetDimsHint}</div>
+      </div>
+      <div style="display:grid; grid-template-columns:1.1fr 1fr; gap:18px;">
+        <div>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+            <div class="field"><label>Part length (in)</label>
+              ${bind({label:'Part length', value:sn.partLen, type:'number', onChange:v=>{ part.stock.sheetNest.partLen = v; }, attrs:'step="0.125" min="0"', placeholder:'e.g. 6.0'})}
+            </div>
+            <div class="field"><label>Part width (in)</label>
+              ${bind({label:'Part width', value:sn.partWid, type:'number', onChange:v=>{ part.stock.sheetNest.partWid = v; }, attrs:'step="0.125" min="0"', placeholder:'e.g. 4.0'})}
+            </div>
+            <div class="field"><label>End mill clearance (mil)</label>
+              ${bind({label:'End mill clearance', value:sn.kerf, type:'number', format:v=>Math.round(v*1000), onChange:v=>{ part.stock.sheetNest.kerf = (v == null ? null : v/1000); }, attrs:'step="1" min="0"', placeholder:'50 typical'})}
+            </div>
+            <div class="field"><label>Sheet price ($)</label>
+              ${bind({label:'Sheet price', value:sn.sheetPrice, type:'number', onChange:v=>{ part.stock.sheetNest.sheetPrice = v; }, attrs:'step="0.01" min="0"', placeholder:'e.g. 245.00'})}
+            </div>
+          </div>
+          <label style="display:flex; align-items:center; gap:8px; margin-top:10px; cursor:pointer; font-size:12px; font-weight:600;">
+            <input type="checkbox" ${sn.allowRotate ? 'checked':''}
+                   onchange="App.setSheetNestField('${part.id}','allowRotate', this.checked)"
+                   style="width:16px; height:16px; cursor:pointer;">
+            Allow 90° rotation (pick best orientation automatically)
+          </label>
+          <div class="text-mute small" style="margin-top:8px; line-height:1.5;">
+            Shelf-pack: lays parts in a grid, picks the orientation that fits more. $/part = sheet price ÷ parts/sheet.
+          </div>
+        </div>
+        <div style="padding:14px; background:var(--paper); border:1px solid var(--line); border-radius:4px;">
+          ${readout}
+        </div>
+      </div>
+      ${svg ? `<div style="margin-top:12px; padding-top:12px; border-top:1px dashed #C4B5FD;">
+        <div class="text-mute small" style="margin-bottom:6px;">Layout preview · sheet drawn to scale</div>
+        ${svg}
+      </div>` : ''}
+    </div>
+  `;
+}
+
 function _calcCollarNesting(outsideLen, outsideWid, sheetLen, sheetWid, kerf) {
   outsideLen = Math.max(0.001, num(outsideLen));
   outsideWid = Math.max(0.001, num(outsideWid));
@@ -21080,6 +21275,21 @@ const App = {
     });
   },
 
+  // v8.21: sheet-nest field setter — used by the Allow-rotation checkbox
+  // (and any other non-bound sheetNest control). Bound text/number inputs
+  // already go through bind()'s onChange.
+  setSheetNestField(partId, field, value) {
+    update(s => {
+      const q = s.quotes.find(qq => qq.id === s.ui.activeQuoteId);
+      if (!q) return;
+      const p = (q.parts || []).find(pp => pp.id === partId);
+      if (!p) return;
+      if (!p.stock) p.stock = {};
+      if (!p.stock.sheetNest) p.stock.sheetNest = {};
+      p.stock.sheetNest[field] = value;
+    });
+  },
+
   // v8.2: drop a file onto a wizard step → attach to the active part with
   // a stepId tag so we know which step it documents. Stored inline as a
   // data URL so it persists with the part (survives sync). Hard size limit
@@ -21980,7 +22190,15 @@ const App = {
       reidPartInPlace(copy);
       const idx = q.parts.findIndex(x => x.id === partId);
       q.parts.splice(idx + 1, 0, copy);
+      // Legacy tab system
       s.ui.activeQuoteTab = 'part-' + copy.id;
+      // v8.21: also drive the wizard — open the copy AND land on the same
+      // step the user was on for the original (typical flow is "duplicate
+      // because I want to vary one thing on this step").
+      if (!s.ui.activePartIdForInfo) s.ui.activePartIdForInfo = {};
+      s.ui.activePartIdForInfo[q.id] = copy.id;
+      if (!s.ui.wizardStep) s.ui.wizardStep = {};
+      if (s.ui.wizardStep[orig.id] != null) s.ui.wizardStep[copy.id] = s.ui.wizardStep[orig.id];
     });
   },
   // v8.19: header right-click settings popover
@@ -24162,6 +24380,17 @@ Trimble Tool`;
   toggleTheme() {
     const cur = localStorage.getItem('keystone-theme') || 'light';
     setTheme(cur === 'dark' ? 'light' : 'dark');
+  },
+
+  // v8.21: PDF/Print preview mode. Mirrors what window.print() would
+  // produce — same CSS rules, but rendered as a letter-sized "sheet of
+  // paper" on a gray desk so you can sanity-check before exporting.
+  // Works on every page (quotes, POs, invoices, anything else inside
+  // #app-main). Choice is sticky across reloads so a user who lives in
+  // preview mode while polishing a quote doesn't have to re-toggle.
+  togglePrintPreview() {
+    const on = !document.body.classList.contains('print-preview');
+    setPrintPreview(on);
   },
 
   importSeedCustomers() {
@@ -26994,6 +27223,31 @@ function loadTheme() {
 function setTheme(t) {
   localStorage.setItem('keystone-theme', t);
   loadTheme();
+}
+
+// v8.21: print/PDF preview toggle. Lives outside the main render() loop —
+// just adds/removes a body class and updates the toggle button label.
+// Persisted to localStorage so the choice survives reloads.
+const PREVIEW_KEY = 'aiq-print-preview-v1';
+function setPrintPreview(on) {
+  document.body.classList.toggle('print-preview', !!on);
+  try { localStorage.setItem(PREVIEW_KEY, on ? '1' : '0'); } catch (_) {}
+  const btn = document.getElementById('btn-preview-toggle');
+  if (btn) btn.innerHTML = on ? '✏️ Exit Preview' : '👁 Preview';
+  // Scroll to top so the user sees the "paper" framed on the desk.
+  if (on) window.scrollTo(0, 0);
+}
+function loadPrintPreview() {
+  let on = false;
+  try { on = localStorage.getItem(PREVIEW_KEY) === '1'; } catch (_) {}
+  setPrintPreview(on);
+}
+// Apply once on boot. Wrapped in DOMContentLoaded so #btn-preview-toggle
+// exists by the time we touch it.
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', loadPrintPreview);
+} else {
+  loadPrintPreview();
 }
 
 // Add divs for keypad and template modal (separate hosts so they don't collide
