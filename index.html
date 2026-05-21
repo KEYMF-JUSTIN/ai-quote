@@ -899,7 +899,7 @@ if (typeof window !== 'undefined') {
   }
   window.addEventListener('resize', () => { if (_zoomState.autoScale) applyZoom(); });
 }
-const APP_VERSION = '8.27.0';
+const APP_VERSION = '8.28.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -8150,7 +8150,7 @@ function renderOrder() {
               <td colspan="5"><strong>Parts subtotal</strong></td>
               <td class="num"><strong>${fmtMoney((o.parts || []).reduce((s,p) => s + num(p.extended), 0))}</strong></td>
             </tr>
-            <tr class="nre"><td colspan="5">+ NRE (one-time)</td><td class="num">${fmtMoney(o.nre)}</td></tr>
+            <tr class="nre"><td colspan="5">+ Programming &amp; Setup (one-time)</td><td class="num">${fmtMoney(o.nre)}</td></tr>
             <tr class="unit"><td colspan="5"><strong>ORDER TOTAL</strong></td><td class="num"><strong>${fmtMoney(o.total)}</strong></td></tr>
           </tbody>
         </table>
@@ -17278,7 +17278,7 @@ function renderSetupsCard(q, p, machineOpts) {
                 ${bind({value:st.programHrs, type:'number', placeholder:'0', onChange:v=>{ App.setSetupField(p.id, st.id, 'programHrs', v); }, attrs:'step="0.25" min="0"'})}
               </div>
               <div>
-                <div class="label">Pgm $ <span class="text-mute small">(NRE)</span></div>
+                <div class="label">Pgm $ <span class="text-mute small">(P&S)</span></div>
                 <div class="value-cell">${fmtMoney(programNRE)}</div>
               </div>
               <div>
@@ -17286,7 +17286,7 @@ function renderSetupsCard(q, p, machineOpts) {
                 ${bind({value:st.setupHrs, type:'number', placeholder:'0', onChange:v=>{ App.setSetupField(p.id, st.id, 'setupHrs', v); }, attrs:'step="0.25" min="0"'})}
               </div>
               <div>
-                <div class="label">Setup $ <span class="text-mute small">(NRE)</span></div>
+                <div class="label">Setup $ <span class="text-mute small">(P&S)</span></div>
                 <div class="value-cell">${fmtMoney(setupNRE)}</div>
               </div>
             </div>
@@ -17321,11 +17321,11 @@ function renderSetupsCard(q, p, machineOpts) {
             <div class="setup-block-footer" style="flex-wrap:wrap; gap:14px;">
               <span class="text-mute small">${fmtNum(programHrs,2)}hr pgm + ${fmtNum(setupHrs,2)}hr setup + ${fmtNum(opsTotalMin,1)}min run</span>
               <div style="display:flex; gap:18px; flex-wrap:wrap; align-items:center; margin-left:auto;">
-                <span class="text-mute small" title="Programming NRE ÷ qty ${qty}">
+                <span class="text-mute small" title="Programming charge ÷ qty ${qty}">
                   Pgm <strong style="color:var(--text);">${fmtMoney(programNRE)}</strong>
                   · <span style="color:var(--navy); font-weight:600;">${fmtMoney(programPerPc)}/pc</span>
                 </span>
-                <span class="text-mute small" title="Setup NRE ÷ qty ${qty}">
+                <span class="text-mute small" title="Setup charge ÷ qty ${qty}">
                   Setup <strong style="color:var(--text);">${fmtMoney(setupNRE)}</strong>
                   · <span style="color:var(--navy); font-weight:600;">${fmtMoney(setupPerPc)}/pc</span>
                 </span>
@@ -17358,7 +17358,7 @@ function renderSetupsCard(q, p, machineOpts) {
             <span class="num input-cell" style="max-width:140px;">${bind({label:'Tooling',value:p.tooling, type:'number', onChange:v=>{p.tooling=v;}, attrs:'step="any" min="0"'})}</span>
           </div>
           <div class="setups-footer-row nre">
-            <span><strong>TOTAL ONE-TIME / NRE</strong> <span class="text-mute small">setup costs + tooling + outside setup + specialty tooling + DXF setup</span></span>
+            <span><strong>TOTAL PROGRAMMING &amp; SETUP</strong> <span class="text-mute small">programming + setup hrs + tooling + outside setup + specialty tooling + DXF setup</span></span>
             <strong>${fmtMoney(totalNRE(p))}</strong>
           </div>
           <div class="setups-footer-row total">
@@ -17479,7 +17479,7 @@ function renderOutsideServicesCard(q, p) {
   const subtotal = items.reduce((s,o) => s + num(o.cost), 0);
   const setup = items.reduce((s,o) => s + num(o.setupCost), 0);
   const totalSummary = items.length > 0
-    ? `${fmtMoney(subtotal)}/part${setup > 0 ? ' + ' + fmtMoney(setup) + ' setup (NRE)' : ''}`
+    ? `${fmtMoney(subtotal)}/part${setup > 0 ? ' + ' + fmtMoney(setup) + ' programming & setup' : ''}`
     : '';
   return `
     <div class="card">
@@ -17497,7 +17497,7 @@ function renderOutsideServicesCard(q, p) {
       ${!isOpen ? '' : items.length === 0 ? `
         <div class="card-body">
           <div class="text-mute small" style="padding:6px 0;">
-            For finishing services like heat treat, anodize, paint, powder coat, deburring, plating, etc. — click <strong>+ Add Service</strong> for each one needed. Costs roll into the per-part price; setup charges roll into NRE.
+            For finishing services like heat treat, anodize, paint, powder coat, deburring, plating, etc. — click <strong>+ Add Service</strong> for each one needed. Costs roll into the per-part price; setup charges roll into Programming &amp; Setup.
           </div>
         </div>
       ` : `
@@ -17508,7 +17508,7 @@ function renderOutsideServicesCard(q, p) {
               <th>Description</th>
               <th style="width:16%;">Vendor</th>
               <th class="num" style="width:11%;">$ per part</th>
-              <th class="num" style="width:11%;">Setup (NRE)</th>
+              <th class="num" style="width:11%;">Pgm &amp; Setup</th>
               <th class="num" style="width:7%;" title="Supplier sales tax % paid to the vendor (internal cost — never on customer PDF)">Tax %</th>
               <th class="action" style="width:60px;"></th>
             </tr></thead>
@@ -17546,7 +17546,7 @@ function renderOutsideServicesCard(q, p) {
               <tr class="total">
                 <td colspan="3"><strong>SERVICES SUBTOTAL / PART</strong></td>
                 <td class="num"><strong>${fmtMoney(subtotal)}</strong></td>
-                <td class="num text-mute small">${setup > 0 ? 'Setup: ' + fmtMoney(setup) + ' (NRE)' : ''}</td>
+                <td class="num text-mute small">${setup > 0 ? 'Setup: ' + fmtMoney(setup) + ' (P&S)' : ''}</td>
                 <td colspan="2" class="text-mute small">incl. supplier tax</td>
               </tr>
             </tbody>
@@ -17574,7 +17574,7 @@ function renderDxfCard(q, p) {
   const perPartTotal = totalDxfPerPart(p);
   const setupTotal = totalDxfSetup(p);
   const totalSummary = files.length > 0
-    ? `${fmtMoney(perPartTotal)}/part${setupTotal > 0 ? ' + ' + fmtMoney(setupTotal) + ' setup (NRE)' : ''}`
+    ? `${fmtMoney(perPartTotal)}/part${setupTotal > 0 ? ' + ' + fmtMoney(setupTotal) + ' setup (P&S)' : ''}`
     : '';
   return `
     <div class="card">
@@ -17610,7 +17610,7 @@ function renderDxfCard(q, p) {
                 <th class="num" style="width:6%;">Thk (in)</th>
                 <th class="num" style="width:6%;">Qty / part</th>
                 <th class="num" style="width:10%;">$ / piece</th>
-                <th class="num" style="width:8%;">Setup (NRE)</th>
+                <th class="num" style="width:8%;">Pgm &amp; Setup</th>
                 <th class="num" style="width:6%;" title="Supplier sales tax % paid to the cut vendor (internal cost — never on customer PDF)">Tax %</th>
                 <th>Notes</th>
                 <th class="action" style="width:60px;"></th>
@@ -17661,7 +17661,7 @@ function renderDxfCard(q, p) {
                 <tr class="total">
                   <td colspan="6"><strong>DXF SUBTOTAL / PART</strong></td>
                   <td class="num"><strong>${fmtMoney(perPartTotal)}</strong></td>
-                  <td class="num text-mute small">${setupTotal > 0 ? 'Setup: ' + fmtMoney(setupTotal) + ' (NRE)' : ''}</td>
+                  <td class="num text-mute small">${setupTotal > 0 ? 'Setup: ' + fmtMoney(setupTotal) + ' (P&S)' : ''}</td>
                   <td colspan="3" class="text-mute small">incl. supplier tax</td>
                 </tr>
               </tbody>
@@ -17683,7 +17683,7 @@ function renderSpecialtyToolingCard(q, p) {
   });
   const noVendors = toolingVendors.length === 0;
   const total = totalSpecialtyTooling(p);
-  const totalSummary = tools.length > 0 ? `${fmtMoney(total)} (NRE)` : '';
+  const totalSummary = tools.length > 0 ? `${fmtMoney(total)} (P&S)` : '';
   return `
     <div class="card">
       ${renderCollapsibleHeader({
@@ -17706,7 +17706,7 @@ function renderSpecialtyToolingCard(q, p) {
           ` : ''}
           ${tools.length === 0 ? `
             <div class="text-mute small" style="padding:6px 0;">
-              For one-time custom or specialty tooling purchases (form taps, custom carbide, special end mills, fixtures), click <strong>+ Add Tool</strong>. Costs roll into the part's NRE total automatically. For generic tooling/fixturing dollars without itemization, just punch a number into the "Tooling / Fixturing" field on the operations table above.
+              For one-time custom or specialty tooling purchases (form taps, custom carbide, special end mills, fixtures), click <strong>+ Add Tool</strong>. Costs roll into the part's Programming &amp; Setup total automatically. For generic tooling/fixturing dollars without itemization, just punch a number into the "Tooling / Fixturing" field on the operations table above.
             </div>
           ` : `
             <table class="tbl">
@@ -17783,7 +17783,7 @@ function renderSpecialtyToolingCard(q, p) {
                   `;
                 }).join('')}
                 <tr class="total">
-                  <td colspan="8"><strong>SPECIALTY TOOLING TOTAL (NRE, incl. supplier tax)</strong></td>
+                  <td colspan="8"><strong>SPECIALTY TOOLING TOTAL (Programming &amp; Setup, incl. supplier tax)</strong></td>
                   <td class="num"><strong>${fmtMoney(total)}</strong></td>
                   <td></td>
                 </tr>
@@ -18172,7 +18172,7 @@ function renderPartEditor(q, p) {
     </div>
 
     <div class="card">
-      <div class="card-header"><span>Pricing Summary  (per piece — does NOT include NRE)</span></div>
+      <div class="card-header"><span>Pricing Summary  (per piece — does NOT include Programming &amp; Setup)</span></div>
       <div class="card-body tight">
         <table class="tbl">
           <thead><tr><th>Quantity</th>${p.qtyTiers.map(qt => `<th class="num">${fmtInt(qt)}</th>`).join('')}</tr></thead>
@@ -18187,7 +18187,7 @@ function renderPartEditor(q, p) {
             <tr><td>Outside services (with markup)</td>${p.qtyTiers.map(() => `<td class="num">${fmtMoney(totalOutside(p)*(1+num(state.settings.markups.outside)))}</td>`).join('')}</tr>
             <tr class="unit"><td><strong>UNIT PRICE</strong></td>${p.qtyTiers.map((qt,i) => `<td class="num"><strong>${fmtMoney(unitPriceAt(p,i))}</strong></td>`).join('')}</tr>
             <tr class="total"><td><strong>EXTENDED  (qty × unit)</strong></td>${p.qtyTiers.map((qt,i) => `<td class="num"><strong>${fmtMoney(extendedAt(p,i))}</strong></td>`).join('')}</tr>
-            <tr class="nre"><td colspan="${p.qtyTiers.length}"><strong>One-time / NRE for this part (added once to quote)</strong></td><td class="num"><strong>${fmtMoney(totalNRE(p))}</strong></td></tr>
+            <tr class="nre"><td colspan="${p.qtyTiers.length}"><strong>Programming &amp; Setup for this part (added once to quote)</strong></td><td class="num"><strong>${fmtMoney(totalNRE(p))}</strong></td></tr>
           </tbody>
         </table>
       </div>
@@ -18285,21 +18285,21 @@ function renderQuoteSummary(q) {
         </tbody>
       </table></div>
     </div>
-    <div class="card"><div class="card-header"><span>One-Time / NRE Charges</span></div>
+    <div class="card"><div class="card-header"><span>Programming &amp; Setup Charges</span></div>
       <div class="card-body tight"><table class="tbl">
-        <thead><tr><th>Part #</th><th>Description</th><th>Material</th><th class="num">NRE ($)</th></tr></thead>
+        <thead><tr><th>Part #</th><th>Description</th><th>Material</th><th class="num">Pgm &amp; Setup ($)</th></tr></thead>
         <tbody>${q.parts.map(p => `
           <tr><td>${esc(p.partNum)}</td><td>${esc(p.description)}</td><td>${esc(materialLabelFor(p))}</td><td class="num">${fmtMoney(totalNRE(p))}</td></tr>`).join('')}
-          <tr class="nre"><td colspan="3"><strong>TOTAL ONE-TIME / NRE</strong></td><td class="num"><strong>${fmtMoney(nre)}</strong></td></tr>
+          <tr class="nre"><td colspan="3"><strong>TOTAL PROGRAMMING &amp; SETUP</strong></td><td class="num"><strong>${fmtMoney(nre)}</strong></td></tr>
         </tbody>
       </table></div>
     </div>
-    <div class="card"><div class="card-header"><span>Quote Total  (parts + NRE)</span></div>
+    <div class="card"><div class="card-header"><span>Quote Total  (parts + Programming &amp; Setup)</span></div>
       <div class="card-body tight"><table class="tbl">
         <thead><tr><th>Quantity</th>${tiers.map(t => `<th class="num">Qty ${fmtInt(t)}</th>`).join('')}</tr></thead>
         <tbody>
           <tr><td>Parts subtotal</td>${subtotals.map(s => `<td class="num">${fmtMoney(s)}</td>`).join('')}</tr>
-          <tr class="nre"><td>+ NRE</td>${tiers.map(() => `<td class="num">${fmtMoney(nre)}</td>`).join('')}</tr>
+          <tr class="nre"><td>+ Programming &amp; Setup</td>${tiers.map(() => `<td class="num">${fmtMoney(nre)}</td>`).join('')}</tr>
           <tr class="unit"><td><strong>QUOTE TOTAL</strong></td>${totals.map(t => `<td class="num"><strong>${fmtMoney(t)}</strong></td>`).join('')}</tr>
         </tbody>
       </table></div>
@@ -25487,7 +25487,7 @@ Online Metals,Brass,Round,1.25 dia,per_lb,5.20`;
             if (order.nreTotal && order.nreTotal > 0) {
               inv.lines.push({
                 id: uid(),
-                description: 'One-time / NRE charges (setup, programming, tooling)',
+                description: 'Programming & Setup charges (programming, setup hrs, tooling)',
                 partNum: '',
                 qty: 1,
                 unitCost: order.nreTotal,
