@@ -899,7 +899,7 @@ if (typeof window !== 'undefined') {
   }
   window.addEventListener('resize', () => { if (_zoomState.autoScale) applyZoom(); });
 }
-const APP_VERSION = '8.28.0';
+const APP_VERSION = '8.29.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -12402,6 +12402,27 @@ function renderSettings() {
         </table>
         <div class="card-body" style="border-top:1px solid var(--line); padding:10px 16px; font-size:12px; color:var(--text-mute);">
           Vendor dropdowns show only your <strong>favorite vendors</strong> by default — toggle "Show all" if you need to assign a non-favorite. Manage vendors and favorites on the dedicated <a href="javascript:App.go('vendors')">Vendors</a> page.
+        </div>
+      </div>
+    </div>
+
+    <!-- v8.29: Developer / Test Data card. Lives at the bottom of Settings
+         because it's a destructive-ish operation (creates a 50-part quote
+         + a test customer). Useful for shaking out bugs before installing
+         the app on multiple shop terminals. Hidden behind a confirm. -->
+    <div class="card">
+      <div class="card-header" style="background:#FEF3C7; color:#92400E;">
+        <span>🧪 Developer / Test Data</span>
+      </div>
+      <div class="card-body">
+        <div class="row" style="align-items:flex-start; gap:14px;">
+          <button class="btn" style="background:#92400E; color:white; border-color:#92400E; font-weight:700;" onclick="App.buildStressQuote()">⚡ Build 50-part stress quote</button>
+          <div style="flex:1; font-size:12px; color:var(--text); line-height:1.5;">
+            Creates a "Stress Test Co." customer (if missing) and a new multipart quote with <strong>50 parts</strong> covering every wizard option:
+            all 7 part types, every stock form, programming + setup hrs, nested ops, DXF rows, specialty tooling, outside services, customer-supplied material, manual unit-cost override, sheet nesting, bar calc, multi-tier qty, weld ops, purchased components.
+            <br><br>
+            Open the quote, scroll around, drop files on it, switch tabs, run Preview mode, hit Print, convert to order — anything that breaks needs fixing before this app goes on every shop PC. Delete the quote + customer when done.
+          </div>
         </div>
       </div>
     </div>
@@ -27387,6 +27408,229 @@ Online Metals,Brass,Round,1.25 dia,per_lb,5.20`;
   resetSettings() {
     if (!confirm('Reset rates, markups, and densities to defaults? Customers and quotes are not affected.')) return;
     update(s => { s.settings = deepCopy(DEFAULT_SETTINGS); });
+  },
+
+  // v8.29: stress-test data generator. Creates a 50-part quote that
+  // exercises every option in the wizard — all part types, every stock
+  // form, programming + setup hrs, nested ops, DXF rows, specialty
+  // tooling, outside services, CSM, manual price override, sheet
+  // nesting, bar calc, multi-tier qty. The point is to shake out
+  // layout/perf/render bugs before rolling the app out to multiple
+  // shop terminals.
+  buildStressQuote() {
+    if (!confirm('Generate a 50-part stress-test quote?\n\nCreates "Stress Test Co." (if missing) + a new multipart quote with 50 parts covering every wizard option. Useful before installing on multiple terminals — open it, scroll around, find anything that breaks.\n\nThis is throwaway data — delete the quote + customer when done.')) return;
+    update(s => {
+      // 1. Find/create the test customer
+      let cust = s.customers.find(c => c.name === 'Stress Test Co.');
+      if (!cust) {
+        cust = newCustomer();
+        cust.name = 'Stress Test Co.';
+        cust.code = 'STRESS';
+        cust.contact = 'Test Engineer';
+        cust.email = 'test@example.com';
+        cust.phone = '555-0123';
+        cust.billStreet = '1234 Test Way';
+        cust.billCity = 'Grafton'; cust.billState = 'OH'; cust.billZip = '44044';
+        cust.shipSameAsBill = true;
+        cust.salesRep = 'Justin';
+        cust.paymentTerms = 'Net 30';
+        cust.notes = 'Auto-generated for stress testing — delete when done.';
+        s.customers.unshift(cust);
+      }
+      // 2. Create the quote
+      const q = newQuote('multipart');
+      q.customerId = cust.id;
+      q.contact = cust.contact; q.email = cust.email; q.phone = cust.phone;
+      q.quotedBy = 'Justin';
+      q.leadTime = '4-6 weeks';
+      q.notes = '50-part stress test — every option exercised. Delete when done.';
+      q.parts = [];  // wipe the default first-part stub
+      // 3. Seed pools
+      const machines = ['Doosan mill','GR Haas','Puma lathe','ST30 Haas lathe','Bridgeport','Welding'];
+      const materials = ['6061 Aluminum','7075 Aluminum','A36 Steel','4140','Cold Rolled Steel','Copper','Brass','FR-4','G10','G11'];
+      const partTypes = [
+        ...Array(20).fill('machined'),
+        ...Array(10).fill('cutblank'),
+        ...Array(6).fill('welded'),
+        ...Array(5).fill('hybrid'),
+        ...Array(4).fill('purchased'),
+        ...Array(2).fill('collar'),
+        ...Array(2).fill('turninsulation'),
+        'machined',  // pad to 50 — gets the "everything on" treatment
+      ];
+      const pick = (arr, i) => arr[i % arr.length];
+      const rand = (min, max) => min + Math.random() * (max - min);
+      const randInt = (min, max) => Math.floor(rand(min, max + 1));
+      const round = (n, step) => Math.round(n / step) * step;
+      // 4. Build 50 parts
+      for (let i = 0; i < 50; i++) {
+        const typeId = partTypes[i];
+        const p = newPart({ typeId });
+        const seq = String(i + 1).padStart(3, '0');
+        p.partNum = `STRESS-${seq}`;
+        p.description = `Test part ${i+1} — ${typeId}`;
+        p.customerPN = `CUST-${seq}`;
+        p.material = pick(materials, i);
+        p.notes = `Auto-generated · index ${i}`;
+        // Multi-tier qty on every 4th part
+        p.qtyTiers = (i % 4 === 0) ? [10, 25, 50, 100] : [randInt(5, 50)];
+        // Stock form rotation
+        const form = ['Bar/Block', 'Sheet', 'Round'][i % 3];
+        p.stock.form = form;
+        p.stock.partLength = round(rand(2, 12), 0.125);
+        p.stock.partWidth  = round(rand(1, 8), 0.125);
+        p.stock.partHeight = round(rand(0.125, 2), 0.125);
+        p.stock.thickness  = p.stock.partHeight;
+        p.stock.length     = round(rand(36, 96), 0.5);
+        p.stock.width      = round(rand(24, 48), 0.5);
+        p.stock.sheetLength = 96;
+        p.stock.sheetWidth  = 48;
+        p.stock.barLength   = 144;
+        // Sheet nesting active on every 5th sheet-form part
+        if (form === 'Sheet' && i % 5 === 0) {
+          p.stock.sheetNest = {
+            partLen: p.stock.partLength,
+            partWid: p.stock.partWidth,
+            kerf: 0.0625,
+            sheetPrice: round(rand(80, 350), 5),
+            allowRotate: true,
+          };
+        }
+        // Bar calc active on every 5th bar/round part
+        if ((form === 'Bar/Block' || form === 'Round') && i % 5 === 1) {
+          p.stock.useBarCalc = true;
+          p.stock.partLength = round(rand(2, 8), 0.125);
+          p.stock.kerf = 0.030;
+          p.stock.extraStock = 1.0;
+        }
+        // Setups — 1 to 3 (skip for purchased + turninsulation; those have no machining)
+        if (typeId !== 'purchased' && typeId !== 'turninsulation') {
+          const nSetups = 1 + (i % 3);
+          for (let si = 0; si < nSetups; si++) {
+            const st = newSetup(si + 1);
+            st.name = `OP${(si+1)*10}`;
+            st.machine = pick(machines, i + si);
+            st.fixture = pick(['Kurt 6" vise', '8" 4-jaw', 'Soft jaws', 'Custom fixture #' + (i % 7 + 1), 'V-block + clamps'], i + si);
+            st.programHrs = round(rand(0.25, 2), 0.25);
+            st.setupHrs   = round(rand(0.5, 4), 0.25);
+            // 1-4 ops per setup
+            const nOps = 1 + (i + si) % 4;
+            for (let oi = 0; oi < nOps; oi++) {
+              const op = newSetupOp();
+              op.description = pick([
+                'Face mill top + drill 4× ø.250',
+                'Bore ø1.500 ±.001',
+                'Tap 4× 3/8-16 thru',
+                'Profile contour pocket',
+                'Drill + countersink mounting holes',
+                'Chamfer all edges .015',
+                'Slot mill 2 keyways',
+                'Ream ø.375 + thread tap',
+              ], i + si + oi);
+              op.runTime = round(rand(1, 25), 0.5);
+              op.runUnit = 'min';
+              st.ops.push(op);
+            }
+            p.setups.push(st);
+          }
+        }
+        // Weld ops on welded parts
+        if (typeId === 'welded') {
+          const nWelds = 1 + (i % 3);
+          for (let wi = 0; wi < nWelds; wi++) {
+            const w = newWeldOp();
+            w.machine = 'Welding';
+            w.process = pick(['MIG', 'TIG', 'Stick'], i + wi);
+            w.filler = pick(['ER70S-6', 'ER308L', 'E7018'], i + wi);
+            w.fillerSize = pick(['.035', '.045', '3/32'], i + wi);
+            w.lengthIn = round(rand(2, 36), 0.5);
+            w.position = pick(['1F', '2F', '3F'], i + wi);
+            w.passCount = 1 + (wi % 3);
+            w.prepMin = round(rand(2, 8), 0.5);
+            w.weldMin = round(rand(0.5, 5), 0.25);
+            w.cleanupMin = round(rand(1, 4), 0.5);
+            p.weldOps.push(w);
+          }
+        }
+        // DXF rows on cutblanks + hybrids
+        if (typeId === 'cutblank' || typeId === 'hybrid') {
+          const dxf = newDxfFile();
+          dxf.filename = `${p.partNum}.dxf`;
+          dxf.process = pick(['laser', 'waterjet', 'plasma'], i);
+          dxf.qtyPerPart = 1;
+          dxf.pricePerPiece = round(rand(8, 75), 0.25);
+          dxf.setupCost = round(rand(50, 250), 5);
+          dxf.material = p.material;
+          dxf.thicknessIn = p.stock.thickness;
+          dxf.supplierTaxPct = 6.75;
+          p.dxfFiles.push(dxf);
+        }
+        // Specialty tooling on every 5th part
+        if (i % 5 === 2) {
+          const t = newSpecialtyTool();
+          t.description = pick([
+            'M16x1.5 form tap',
+            'ø.250 solid carbide ball end mill (4 flute)',
+            'Custom thread mill',
+            'Carbide insert grade KC5010 (qty 10)',
+            'Custom drill jig fixture',
+          ], i);
+          t.qty = randInt(1, 4);
+          t.unitCost = round(rand(45, 380), 1);
+          t.supplierTaxPct = 6.75;
+          t.includeOnQuote = (i % 2 === 0);
+          p.specialtyTooling.push(t);
+        }
+        // Outside services — set a couple of cost values on existing entries
+        if (i % 4 === 1 && Array.isArray(p.outsideServices)) {
+          // Pick 1-2 services to set a cost on
+          p.outsideServices.forEach((svc, idx) => {
+            if (idx < 2) svc.cost = round(rand(5, 45), 0.25);
+          });
+        }
+        // CSM on every 9th part
+        if (i % 9 === 4) {
+          p.customerSuppliedMaterial = true;
+          p.csmDeclaredValue = round(rand(15, 250), 1);
+          p.csmHandlingFeePct = pick([10, 15, 20, 25], i);
+          p.csmNotes = 'Customer ships material; we charge handling fee only.';
+        }
+        // Manual unit-cost override on every 11th part
+        if (i % 11 === 5) {
+          p.manualUnitCost = round(rand(25, 380), 1);
+        }
+        // Purchased parts — fill in materialCost as a component
+        if (typeId === 'purchased') {
+          p.materialCost.isComponent = true;
+          p.materialCost.packSize = pick([10, 25, 50, 100], i);
+          p.materialCost.perPack = round(rand(15, 95), 1);
+          p.materialCost.vendorPartNum = `MCM-${randInt(10000, 99999)}A${randInt(100, 999)}`;
+          p.materialCost.vendorUrl = `https://www.mcmaster.com/${p.materialCost.vendorPartNum}/`;
+        } else {
+          // Set a per-piece material cost for everything else
+          p.materialCost.perPiece = [round(rand(2, 45), 0.05)];
+        }
+        // Last part: turn EVERYTHING on
+        if (i === 49) {
+          p.partNum = 'STRESS-EVERYTHING';
+          p.description = 'Final part — every option enabled at once (kitchen sink)';
+          p.qtyTiers = [10, 25, 50, 100, 250];
+          // Already has setups + specialty + outside from above
+          // Force a couple extra flags
+          p.materialCost.supplierTaxPct = 6.75;
+          p.materialCost.perPiece = [12.34];
+          p.tooling = 175;  // generic tooling line
+        }
+        q.parts.push(p);
+      }
+      // 5. Save + navigate
+      s.quotes.unshift(q);
+      s.ui.view = 'quote';
+      s.ui.activeQuoteId = q.id;
+      s.ui.activeQuoteTab = 'info';
+      logActivity('Built stress quote', q.quoteNum, '50 parts auto-generated');
+    });
+    showToast(`✨ Built 50-part stress quote on "Stress Test Co." — open it, scroll around, find anything that breaks.`, 6500);
   },
 
   exportBackup() {
