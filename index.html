@@ -272,6 +272,9 @@
      in .kind-icon-lg to upscale to 40×40 without the SVG ballooning into
      whatever blank parent it lands in. */
   .kind-icon-lg svg { width:40px !important; height:40px !important; display:block; }
+  /* v8.33: AI features off → hide every node tagged .ai-feature in one
+     shot. Toggle by App.setAiEnabled() (Settings → AI features card). */
+  body.ai-off .ai-feature { display:none !important; }
 
   /* v8.27: Summary tab — paper-style customer PDF preview. The existing
      4 tables are wrapped in a letter-sized "sheet of paper" on a gray
@@ -926,7 +929,7 @@ if (typeof window !== 'undefined') {
   }
   window.addEventListener('resize', () => { if (_zoomState.autoScale) applyZoom(); });
 }
-const APP_VERSION = '8.32.1';
+const APP_VERSION = '8.33.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -953,6 +956,13 @@ async function workerHealthCheck(force) {
 }
 function workerHealthCached() { return _workerHealthCache; }   // synchronous read for renderers
 async function workerCall(path, body, opts) {
+  // v8.33: AI features can be toggled off in Settings. When off, fail
+  // every Worker call with a friendly error — the existing callers all
+  // have try/catch + showToast, so the user gets a "AI is off" message
+  // instead of a silent failure.
+  if (state && state.settings && state.settings.aiEnabled === false) {
+    throw new Error('AI features are turned off. Enable in Settings → AI features.');
+  }
   opts = opts || {};
   const url = WORKER_URL + path;
   const ctl = new AbortController();
@@ -1407,6 +1417,11 @@ function migrateState() {
   // v7.22: PO history archive
   if (!Array.isArray(state.archivedPos)) state.archivedPos = [];
   if (!Array.isArray(state.archivedPoLines)) state.archivedPoLines = [];
+  // v8.33: AI features toggle — defaults OFF since Jemma is taking over
+  // AI/ERP duties. When false: header AI pill hidden, workerCall throws a
+  // friendly error, all .ai-feature DOM nodes hidden via body.ai-off CSS.
+  // Reversible from Settings → AI features card.
+  if (state.settings.aiEnabled == null) state.settings.aiEnabled = false;
   // v7.24: Invoice history archive
   if (!Array.isArray(state.archivedInvoices)) state.archivedInvoices = [];
   // v7.38: Quote history archive
@@ -6402,6 +6417,10 @@ function renderHeaderConnPill() {
                        && SyncEngine.config.email && SyncEngine.config.password;
   const lastErr = (typeof window !== 'undefined' && typeof window._lastSyncError === 'string') ? window._lastSyncError : '';
   const retryTitle = lastErr ? ('Last error: ' + lastErr + ' — click to retry') : 'Click to retry connecting to cloud sync';
+  // v8.33: skip the AI pill entirely when AI features are off — Jemma
+  // handles AI/ERP elsewhere, no point in a constant red "AI Offline"
+  // indicator on a tool the user has intentionally disabled.
+  const aiOn = !(window.state && window.state.settings && window.state.settings.aiEnabled === false);
   el.innerHTML = `
     <button class="btn btn-ghost" onclick="App.gotoSyncCard()" title="${title}"
       style="display:inline-flex; align-items:center; gap:6px; padding:4px 10px; background:${bg}; color:${fg}; border:none; border-radius:14px; font-size:11px; font-weight:700; letter-spacing:0.04em;">
@@ -6412,11 +6431,11 @@ function renderHeaderConnPill() {
       style="display:inline-flex; align-items:center; gap:4px; padding:4px 8px; margin-left:4px; background:rgba(220,67,24,0.18); color:var(--orange); border:none; border-radius:14px; font-size:11px; font-weight:700;">
       🔄 Reconnect
     </button>` : ''}
-    <button class="btn btn-ghost" onclick="App.refreshWorkerHealth()" title="${esc(aiTitle)}"
+    ${aiOn ? `<button class="btn btn-ghost" onclick="App.refreshWorkerHealth()" title="${esc(aiTitle)}"
       style="display:inline-flex; align-items:center; gap:6px; padding:4px 10px; margin-left:6px; background:${aiBg}; color:${aiFg}; border:none; border-radius:14px; font-size:11px; font-weight:700; letter-spacing:0.04em;">
       <span style="display:inline-block; width:7px; height:7px; border-radius:50%; background:${aiDot};"></span>
       ✨ ${esc(aiLabel)}
-    </button>
+    </button>` : ''}
   `;
 }
 
@@ -6494,6 +6513,13 @@ function render() {
   try { if (typeof PdfViewer !== 'undefined') PdfViewer._mountAllThumbnails(); } catch (_) {}
   // v8.27: paint PDF thumbs on part chips (data-part-thumb-pdf placeholders)
   try { _paintPartChipPdfThumbs(); } catch (_) {}
+  // v8.33: keep <body class="ai-off"> synced with the setting so CSS can
+  // hide every .ai-feature node in one shot. Re-applied on every render
+  // so a setting flip propagates instantly.
+  try {
+    const off = state && state.settings && state.settings.aiEnabled === false;
+    document.body.classList.toggle('ai-off', !!off);
+  } catch (_) {}
   renderMsgImportModal();
   renderMissingCustFolderModal();
   // v7.34: user management dialogs
@@ -8631,6 +8657,7 @@ function renderPoSmartDropZone(po) {
   const error = sd.poId === po.id ? sd.error : '';
   return `
     <div data-po-smart-drop="${esc(po.id)}"
+         class="ai-feature"
          style="border:2px dashed var(--orange); background:#FFF7ED; padding:14px 16px; margin-bottom:14px; border-radius:5px; cursor:pointer;"
          onclick="document.getElementById('po-smart-input-${esc(po.id)}').click()">
       <div style="display:flex; align-items:center; gap:14px;">
@@ -12135,6 +12162,31 @@ function renderSettings() {
       <button class="btn btn-danger" onclick="App.resetSettings()">Reset to Defaults</button>
     </div>
 
+    <!-- v8.33: AI features master switch. Toggling off hides every AI
+         entry-point (smart drop on POs, cart import, McMaster lookup,
+         header AI pill) and makes Worker calls throw a friendly error.
+         Default OFF since Jemma handles AI/ERP elsewhere. -->
+    <div class="card">
+      <div class="card-header" style="background:${s.aiEnabled ? '#E0E7FF' : '#F3F4F6'}; color:${s.aiEnabled ? '#4338CA' : '#374151'};">
+        <span>✨ AI features ${s.aiEnabled ? '— ON' : '— OFF'}</span>
+      </div>
+      <div class="card-body">
+        <div class="row" style="align-items:center; gap:16px;">
+          <label style="display:inline-flex; align-items:center; gap:10px; cursor:pointer; font-weight:700; font-size:14px;">
+            <input type="checkbox" ${s.aiEnabled ? 'checked' : ''}
+                   onchange="App.setAiEnabled(this.checked)"
+                   style="width:20px; height:20px; cursor:pointer;">
+            Use Claude AI features in this app
+          </label>
+          <div style="flex:1; font-size:12px; color:var(--text); line-height:1.5;">
+            When <strong>ON</strong>: smart drop zones on POs, McMaster URL paste, cart-screenshot import, Claude-extract on drawings dropped in the wizard, AI Online/Offline pill in the header.
+            <br><br>
+            When <strong>OFF</strong>: all of the above are hidden. The Cloudflare Worker stays deployed but isn't called. File drops still attach plainly (no Claude extraction). Use this if Jemma (or another system) handles AI/ERP duties.
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="card">
       <div class="card-header">
         <span>Shop Info · letterhead for PDF quotes</span>
@@ -13391,8 +13443,9 @@ function renderQuoteWizardChipRow(q) {
         ${chips || '<span class="text-mute small" style="align-self:center;">No parts yet</span>'}
         <div style="margin-left:auto; display:flex; gap:8px; align-self:stretch;">
           <!-- v8.15: import from supplier cart. Paste/screenshot cart →
-               Claude reads line items → bulk-creates Purchased parts. -->
-          <button class="btn" style="padding:10px 16px; min-height:80px; background:#FFFFFF; border:2px solid var(--line-dark); display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; cursor:pointer;"
+               Claude reads line items → bulk-creates Purchased parts.
+               v8.33: tagged .ai-feature so it disappears when AI is off. -->
+          <button class="btn ai-feature" style="padding:10px 16px; min-height:80px; background:#FFFFFF; border:2px solid var(--line-dark); display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; cursor:pointer;"
                   onclick="App.openCartImport()"
                   onmouseover="this.style.borderColor='#16A34A';" onmouseout="this.style.borderColor='var(--line-dark)';"
                   title="Paste or screenshot your supplier shopping cart — Claude reads every line and adds them as Purchased parts at once">
@@ -13403,7 +13456,7 @@ function renderQuoteWizardChipRow(q) {
                Click → paste URL/part# modal → fetch → create Purchased part
                with everything pre-filled in one shot. Mustard "M" badge
                approximates McMaster's signature catalog yellow. -->
-          <button class="btn" style="padding:10px 16px; min-height:80px; background:#FFFFFF; border:2px solid var(--line-dark); display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; cursor:pointer;"
+          <button class="btn ai-feature" style="padding:10px 16px; min-height:80px; background:#FFFFFF; border:2px solid var(--line-dark); display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; cursor:pointer;"
                   onclick="App.promptAddMcMasterPart()"
                   onmouseover="this.style.borderColor='#F2C40D';" onmouseout="this.style.borderColor='var(--line-dark)';"
                   title="Paste a McMaster URL or part # — auto-creates a Purchased part with description, price, vendor link filled in">
@@ -24990,6 +25043,14 @@ Trimble Tool`;
   toggleTheme() {
     const cur = localStorage.getItem('keystone-theme') || 'light';
     setTheme(cur === 'dark' ? 'light' : 'dark');
+  },
+
+  // v8.33: master switch for all Claude/Worker-backed features. Setting
+  // flows through: workerCall() throws when off, renderHeaderConnPill
+  // hides the AI pill, body.ai-off CSS hides every .ai-feature node.
+  setAiEnabled(on) {
+    update(s => { s.settings.aiEnabled = !!on; });
+    showToast(on ? '✨ AI features turned ON.' : '🔌 AI features turned OFF — Jemma can handle it.', 3500);
   },
 
   // v8.21: PDF/Print preview mode. Mirrors what window.print() would
