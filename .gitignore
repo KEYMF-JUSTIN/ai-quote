@@ -17,5 +17,7 @@ _site/
 # Details at https://github.com/github/pages-gem/issues/768
 Gemfile.lock
 
-# Local-only assets (desktop icon, etc.) — not part of the deployed site
-icons/
+# v8.34: icons/ is now part of the deployed site (favicons via
+# <link rel="icon" href="icons/ai-quote.svg">). Regenerate via:
+#   python scripts/build_app_icon.py
+# scripts/ is tracked so the icon generator ships with the repo.

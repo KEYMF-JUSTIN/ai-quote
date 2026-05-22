@@ -4,9 +4,13 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=1200">
 <title>AI Quote</title>
-<link rel="icon" type="image/x-icon" href="icons/ai-quote.ico">
-<link rel="icon" type="image/png" sizes="any" href="icons/ai-quote.png">
-<link rel="apple-touch-icon" href="icons/ai-quote.png">
+<!-- v8.34: rebuilt from the Keystone arch + probe logo via scripts/build_app_icon.py.
+     SVG first (modern browsers), then ICO (Windows + legacy), then PNG fallbacks.
+     ?v= busts CDN + browser cache so the new artwork shows up immediately. -->
+<link rel="icon" type="image/svg+xml" href="icons/ai-quote.svg?v=8.34">
+<link rel="icon" type="image/x-icon" href="icons/ai-quote.ico?v=8.34">
+<link rel="icon" type="image/png" sizes="256x256" href="icons/ai-quote.png?v=8.34">
+<link rel="apple-touch-icon" sizes="180x180" href="icons/apple-touch-icon.png?v=8.34">
 <meta name="theme-color" content="#1F2937">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -929,7 +933,7 @@ if (typeof window !== 'undefined') {
   }
   window.addEventListener('resize', () => { if (_zoomState.autoScale) applyZoom(); });
 }
-const APP_VERSION = '8.33.0';
+const APP_VERSION = '8.34.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
