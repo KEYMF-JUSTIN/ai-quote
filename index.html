@@ -922,7 +922,7 @@ if (typeof window !== 'undefined') {
   }
   window.addEventListener('resize', () => { if (_zoomState.autoScale) applyZoom(); });
 }
-const APP_VERSION = '8.31.0';
+const APP_VERSION = '8.32.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -1134,44 +1134,90 @@ const QUOTE_NUM_BASE = 4250;       // starting quote # if no existing quotes
 // v7.45: Quote kinds — determines the workflow/path for a quote. Each kind
 // gets a focused editor in future versions (welding ops, BOM, etc.). For
 // v7.45, the kind is primarily metadata + a single-part lock for 'machining'.
+// v8.32: Quote-kind taxonomy. Single emoji icons replaced with inline
+// multi-color SVG glyphs (32×32 viewBox, ~28px optical). The 'icon' field
+// is HTML — consumers inject it directly with ${k.icon}. Legacy single-
+// part 'machining' kind kept for backward-compat (existing quotes still
+// resolve to a sensible label/icon) but hidden from the picker via
+// `legacy: true` — new quotes pick from Prototype / One-Off / Quick /
+// Spot, which all behave like the old machining kind but capture customer
+// INTENT (analytics: "how much spot-quote work did we do this month?").
 const QUOTE_KINDS = [
   {
     id: 'multipart',
-    label: 'Multi-part machining',
-    short: 'Multi-part',
-    icon: '⚙',
-    desc: 'Several machined parts in one quote — the default workflow you\'ve been using. Each part has its own material, ops, qty tiers.',
+    label: 'Multi-Part Production',
+    short: 'Multi-Part',
+    icon: `<svg viewBox="0 0 32 32" width="100%" height="100%" xmlns="http://www.w3.org/2000/svg"><rect x="4" y="4" width="14" height="14" rx="2" fill="#3B82F6" fill-opacity="0.4" stroke="#1E5BAE" stroke-width="1.6"/><rect x="9" y="9" width="14" height="14" rx="2" fill="#3B82F6" fill-opacity="0.65" stroke="#1E5BAE" stroke-width="1.6"/><rect x="14" y="14" width="14" height="14" rx="2" fill="#1E5BAE" fill-opacity="0.85" stroke="#1E40AF" stroke-width="1.6"/></svg>`,
+    desc: 'Production quote covering multiple distinct parts — each with its own material, ops, qty tiers. The standard workflow for production runs.',
     color: '#1E5BAE',
   },
   {
-    id: 'machining',
-    label: 'Single-part machining',
-    short: 'Single',
-    icon: '🔧',
-    desc: 'A focused one-part quote. Locks the quote to a single part so the editor stays simple.',
+    id: 'prototype',
+    label: 'Prototype',
+    short: 'Prototype',
+    icon: `<svg viewBox="0 0 32 32" width="100%" height="100%" xmlns="http://www.w3.org/2000/svg"><path d="M16 4a8 8 0 00-5 14.3c.7.6 1 1.4 1 2.2v1.5h8v-1.5c0-.8.3-1.6 1-2.2A8 8 0 0016 4z" fill="#F59E0B" fill-opacity="0.35" stroke="#0F766E" stroke-width="1.6" stroke-linejoin="round"/><rect x="12" y="23" width="8" height="2.6" rx="1" fill="#0F766E"/><line x1="13.5" y1="28" x2="18.5" y2="28" stroke="#0F766E" stroke-width="1.6" stroke-linecap="round"/><path d="M16 10v6m-3-3h6" stroke="#0F766E" stroke-width="2" stroke-linecap="round"/></svg>`,
+    desc: 'Single part, proof-of-concept or first article. Locks the quote to one part so the editor stays focused.',
     color: '#0F766E',
   },
   {
+    id: 'oneoff',
+    label: 'One-Off',
+    short: 'One-Off',
+    icon: `<svg viewBox="0 0 32 32" width="100%" height="100%" xmlns="http://www.w3.org/2000/svg"><path d="M16 5l10 5.5v11L16 27 6 21.5v-11z" fill="#C56B1C" fill-opacity="0.3" stroke="#C56B1C" stroke-width="1.6" stroke-linejoin="round"/><path d="M6 10.5L16 16l10-5.5M16 16v11" stroke="#C56B1C" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" fill="none"/><circle cx="16" cy="16" r="2.2" fill="#C56B1C"/></svg>`,
+    desc: 'Single part, single order — no production run planned. Shop-floor lingo for "one and done."',
+    color: '#C56B1C',
+  },
+  {
+    id: 'quickquote',
+    label: 'Quick Quote',
+    short: 'Quick',
+    icon: `<svg viewBox="0 0 32 32" width="100%" height="100%" xmlns="http://www.w3.org/2000/svg"><path d="M19 3L7 19h8l-3 10L25 13h-8l2-10z" fill="#F59E0B" fill-opacity="0.7" stroke="#D97706" stroke-width="1.6" stroke-linejoin="round"/></svg>`,
+    desc: 'Single part, fast turnaround. Use for "can you give me a price on this today?" requests.',
+    color: '#F59E0B',
+  },
+  {
+    id: 'spotquote',
+    label: 'Spot Quote',
+    short: 'Spot',
+    icon: `<svg viewBox="0 0 32 32" width="100%" height="100%" xmlns="http://www.w3.org/2000/svg"><circle cx="16" cy="16" r="12" fill="#7C3AED" fill-opacity="0.1" stroke="#7C3AED" stroke-width="1.5"/><circle cx="16" cy="16" r="8" fill="#7C3AED" fill-opacity="0.22" stroke="#7C3AED" stroke-width="1.3"/><circle cx="16" cy="16" r="4" fill="#7C3AED" fill-opacity="0.55" stroke="#7C3AED" stroke-width="1"/><circle cx="16" cy="16" r="1.5" fill="#FBBF24"/></svg>`,
+    desc: 'Single part, price-only — customer just wants a number, no commitment to buy. Useful for win-rate tracking.',
+    color: '#7C3AED',
+  },
+  {
     id: 'welding',
-    label: 'Welding job',
+    label: 'Welding Job',
     short: 'Welding',
-    icon: '🔥',
-    desc: 'Weld-focused work: process, weld feet, filler, certs. Weld-specific ops table coming in v7.47 — for now uses the standard part editor.',
-    color: '#C84317',
+    icon: `<svg viewBox="0 0 32 32" width="100%" height="100%" xmlns="http://www.w3.org/2000/svg"><ellipse cx="16" cy="24" rx="11" ry="2.6" fill="#C73E1D" fill-opacity="0.35" stroke="#C73E1D" stroke-width="1.5"/><path d="M12 22L16 8l4 14z" fill="#F59E0B" stroke="#C73E1D" stroke-width="1.5" stroke-linejoin="round"/><circle cx="8" cy="10" r="1" fill="#F59E0B"/><circle cx="24" cy="12" r="1.2" fill="#F59E0B"/><circle cx="11" cy="5" r="0.8" fill="#F59E0B"/><circle cx="22" cy="6" r="0.8" fill="#F59E0B"/></svg>`,
+    desc: 'Weld-focused work: process, weld feet, filler, certs.',
+    color: '#C73E1D',
   },
   {
     id: 'build',
-    label: 'Machine build',
+    label: 'Machine Build',
     short: 'Build',
-    icon: '🏗',
-    desc: 'Assembly of components — bought-out parts + machined parts + sub-assemblies + assembly labor. BOM view coming in v7.47 — for now uses the standard part editor.',
+    icon: `<svg viewBox="0 0 32 32" width="100%" height="100%" xmlns="http://www.w3.org/2000/svg"><rect x="4" y="6" width="24" height="20" rx="1.5" fill="#7F77DD" fill-opacity="0.18" stroke="#7F77DD" stroke-width="1.6"/><line x1="4" y1="11" x2="28" y2="11" stroke="#7F77DD" stroke-width="1.5"/><circle cx="10" cy="18" r="2.6" fill="#7F77DD" fill-opacity="0.55" stroke="#7F77DD" stroke-width="1.2"/><circle cx="16" cy="18" r="2.6" fill="#7F77DD" fill-opacity="0.55" stroke="#7F77DD" stroke-width="1.2"/><circle cx="22" cy="18" r="2.6" fill="#7F77DD" fill-opacity="0.55" stroke="#7F77DD" stroke-width="1.2"/><circle cx="6.5" cy="8.5" r="0.8" fill="#7F77DD"/><circle cx="9" cy="8.5" r="0.8" fill="#7F77DD"/></svg>`,
+    desc: 'Assembly of components — bought-out + machined + sub-assemblies + assembly labor. Uses the BOM view.',
     color: '#7F77DD',
+  },
+  // Legacy: hidden from new-quote picker, kept for resolution of existing
+  // quotes with kind === 'machining'. v8.32 phases this out in favor of
+  // the 4 more-specific single-part kinds above. Existing quotes still
+  // render with the original look; users can manually re-tag via the
+  // new "↻ Change kind" picker.
+  {
+    id: 'machining',
+    label: 'Single-Part Machining',
+    short: 'Single',
+    icon: `<svg viewBox="0 0 32 32" width="100%" height="100%" xmlns="http://www.w3.org/2000/svg"><circle cx="16" cy="16" r="11" fill="#0F766E" fill-opacity="0.15" stroke="#0F766E" stroke-width="1.5"/><path d="M16 9v14M9 16h14" stroke="#0F766E" stroke-width="2" stroke-linecap="round"/></svg>`,
+    desc: 'Legacy single-part kind. New quotes should use Prototype / One-Off / Quick Quote / Spot Quote instead.',
+    color: '#0F766E',
+    legacy: true,
   },
 ];
 const QUOTE_KIND_BY_ID = Object.fromEntries(QUOTE_KINDS.map(k => [k.id, k]));
-function quoteKindLabel(q) { const k = QUOTE_KIND_BY_ID[q && q.kind]; return k ? k.label : 'Multi-part machining'; }
-function quoteKindShort(q) { const k = QUOTE_KIND_BY_ID[q && q.kind]; return k ? k.short : 'Multi-part'; }
-function quoteKindIcon(q)  { const k = QUOTE_KIND_BY_ID[q && q.kind]; return k ? k.icon  : '⚙'; }
+function quoteKindLabel(q) { const k = QUOTE_KIND_BY_ID[q && q.kind]; return k ? k.label : 'Multi-Part Production'; }
+function quoteKindShort(q) { const k = QUOTE_KIND_BY_ID[q && q.kind]; return k ? k.short : 'Multi-Part'; }
+function quoteKindIcon(q)  { const k = QUOTE_KIND_BY_ID[q && q.kind]; return k ? k.icon  : QUOTE_KIND_BY_ID.multipart.icon; }
 function quoteKindColor(q) { const k = QUOTE_KIND_BY_ID[q && q.kind]; return k ? k.color : '#1E5BAE'; }
 const DEFAULT_SETTINGS = {"rates": [{"name": "Doosan mill", "setupRate": 300.0, "runRate": 300.0}, {"name": "GR Haas", "setupRate": 275.0, "runRate": 275.0}, {"name": "Puma lathe", "setupRate": 300.0, "runRate": 300.0}, {"name": "ST30 Haas lathe", "setupRate": 200.0, "runRate": 200.0}, {"name": "Welding", "setupRate": 160.0, "runRate": 160.0}, {"name": "Laguna router", "setupRate": 160.0, "runRate": 160.0}, {"name": "CNC plasma cutter", "setupRate": 140.0, "runRate": 140.0}, {"name": "Manual lathe", "setupRate": 120.0, "runRate": 120.0}, {"name": "Bridgeport", "setupRate": 100.0, "runRate": 100.0}, {"name": "Programming", "setupRate": 175.0, "runRate": 175.0}, {"name": "Engineering", "setupRate": 220.0, "runRate": 220.0}, {"name": "3D modeling", "setupRate": 140.0, "runRate": 140.0}], "markups": {"material": 0.25, "outside": 0.2}, "tierLaborDiscounts": [0, 5, 10, 15], "materials": [{"name": "6061 Aluminum", "density": 0.098, "vendorIds": []}, {"name": "7075 Aluminum", "density": 0.102, "vendorIds": []}, {"name": "A36 Steel", "density": 0.284, "vendorIds": []}, {"name": "Cold Rolled Steel", "density": 0.284, "vendorIds": []}, {"name": "4140", "density": 0.284, "vendorIds": []}, {"name": "4140 Q&T", "density": 0.284, "vendorIds": []}, {"name": "Copper", "density": 0.323, "vendorIds": []}, {"name": "Brass", "density": 0.307, "vendorIds": []}, {"name": "GPO-3", "density": 0.067, "vendorIds": []}, {"name": "G10", "density": 0.065, "vendorIds": []}, {"name": "G11", "density": 0.065, "vendorIds": []}, {"name": "Other", "density": 0.0, "vendorIds": []}], "vendors": [], "nextPoNum": 1001, "nextPackingSlipNum": 1001, "nextInvoiceNum": 2001, "salesTaxRate": 6.75, "paymentTerms": ["Net 30", "Net 15", "Net 45", "Net 60", "Due on receipt", "COD", "Prepaid"], "shopInfo": {"name": "Keystone Machine and Fab", "address": "827 Mechanic Street\nGrafton, OH 44044", "phone": "440-926-1234", "email": "quotes@keystonefab.com", "website": "", "tagline": "Precision machining and fabrication", "quoteValidDays": 30, "footerTerms": "Quote valid 30 days from date above. FOB shop, freight prepaid and added unless otherwise specified. Standard machine shop quality unless drawing specifies otherwise. Net 30 terms with approved credit."}};
 const SEED_CUSTOMERS = [{"code": "ABLEST MOLDI", "name": "Ablest Molding Inc - C", "contact": "", "email": "mikejenkins@ablestmolding.com", "phone": "", "billStreet": "16210 Wheeler Rd", "billCity": "Lagrange", "billState": "OH", "billZip": "44050", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "AFFILIATED M", "name": "Affiliated Metal", "contact": "", "email": "jland@affiliatedmetal.com", "phone": "440-235-3345", "billStreet": "25600 Chapin St", "billCity": "Olmsted Falls", "billState": "OH", "billZip": "44138", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "AFFILIATED 2", "name": "Affiliated Metal Industries INC.", "contact": "", "email": "jland@affiliatedmetal.com", "phone": "440-235-3345", "billStreet": "25600 Chapin St", "billCity": "Olmsted Falls", "billState": "OH", "billZip": "44138", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "AMERICAN TAN", "name": "AMERICAN TANK AND FAB", "contact": "", "email": "ap@atfco.com", "phone": "2166883176", "billStreet": "12314 ELMWOOD AVE", "billCity": "Cleveland", "billState": "OH", "billZip": "44111", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "BADGER MAGNE", "name": "Badger Magnetics", "contact": "", "email": "Ap.mke@badgermagnetics.com", "phone": "414-375-1105", "billStreet": "7939 W. Tower Ave.", "billCity": "Milwaukee", "billState": "WI", "billZip": "53223", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "BONEFISH SYS", "name": "Bonefish Systems", "contact": "", "email": "", "phone": "614-427-3827", "billStreet": "", "billCity": "150 Erie Court", "billState": "OH", "billZip": "", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "BRAND X ELEC", "name": "Brand X Electrical, LLC", "contact": "", "email": "mj@brandxelectrical.net", "phone": "", "billStreet": "18748 Mennell Rd", "billCity": "Grafton", "billState": "OH", "billZip": "44044", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "CAM INNOVATI", "name": "CAM INNOVATION INC", "contact": "", "email": "accounting@caminnovation.com", "phone": "717 637 5988", "billStreet": "215 PHILIDELPHIA ST", "billCity": "HANOVER", "billState": "PA", "billZip": "17331", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": "Website: Bryan 116"}, {"code": "COIL MANUFAC", "name": "COIL MANUFACTURING INC.", "contact": "", "email": "curtis.hill@cmicoil.com", "phone": "205-838-5985", "billStreet": "Coil Manufacturing, Inc. 940 Alton Parkway", "billCity": "Birmingham", "billState": "AL", "billZip": "35210", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "DXP ENTERPRI", "name": "DXP ENTERPRISES INC.", "contact": "", "email": "accountspayable@dxpe.com", "phone": "513 500-8617 Eric Shulltz", "billStreet": "4620 FOREST AVE.", "billCity": "NORWOOD", "billState": "OH", "billZip": "45212", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": "Work phone: 513-827-1672 Tracey A/P"}, {"code": "EFFOX FLEXTO", "name": "Effox Flextor Mader", "contact": "", "email": "", "phone": "440-355-4505", "billStreet": "", "billCity": "", "billState": "", "billZip": "", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "ELCTROLOCK I", "name": "ELCTROLOCK, INC.", "contact": "", "email": "Accounts.payable@electrolock.com", "phone": "440 364 0206", "billStreet": "17930 Great Lakes Parkway Hiram, Ohio 44234", "billCity": "HIRAM", "billState": "OH", "billZip": "44234", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "EXPERT CRANE", "name": "Expert Crane", "contact": "", "email": "ap@expertcrane.com", "phone": "1-800-860-6680 EX1282 julia m", "billStreet": "5755 Grant Ave", "billCity": "Cleveland", "billState": "OH", "billZip": "44105", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "FERROUS 85 C", "name": "Ferrous 85 CO", "contact": "", "email": "accountspayable@ferragon.com", "phone": "216-671-6161", "billStreet": "11103 Memphis Ave", "billCity": "Brooklyn", "billState": "OH", "billZip": "44144", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "FERROUS META", "name": "Ferrous Metals", "contact": "", "email": "accountspayable@ferragon.com", "phone": "216-671-6161", "billStreet": "11103 Memphis Ave", "billCity": "Brooklyn", "billState": "OH", "billZip": "44144", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": "Website: zzoric@ferrousmetalprocessing.com"}, {"code": "FIVE STAR FA", "name": "Five Star Fabrication", "contact": "", "email": "matt@weldandfabnow.com", "phone": "440-666-0427", "billStreet": "3910 1/2 Avon Lake Rd", "billCity": "Litchfield", "billState": "OH", "billZip": "44253", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "FOX EQUIPMEN", "name": "Fox Equipment, LLC", "contact": "", "email": "ap@foxequipment.com", "phone": "904-531-3150", "billStreet": "965 Bunker Avenue", "billCity": "Green Cove Springs", "billState": "FL", "billZip": "32043", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "FUSION INCOR", "name": "FUSION INCORPORATED", "contact": "", "email": "ap@fusion-inc.com", "phone": "440 946 3300", "billStreet": "JOHN SUFFRON 4658 E355 ST  USA", "billCity": "Willoughby", "billState": "OH", "billZip": "44094", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "GE VERNOVA", "name": "GE Vernova", "contact": "", "email": "", "phone": "346 833 7130", "billStreet": "7101 W Erie Ave", "billCity": "Lorain", "billState": "OH", "billZip": "44053", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "HANNON ELECT", "name": "HANNON ELECTRIC COMPANY", "contact": "", "email": "tleyman@hanco.com", "phone": "330 456 4728", "billStreet": "1605 WAYNESBURG DR SE", "billCity": "CANTON", "billState": "OH", "billZip": "44707", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "HORIZON META", "name": "HORIZON METALS INC.", "contact": "", "email": "horizonmet@aol.com", "phone": "440 235 3338", "billStreet": "P.O. BOX 38310", "billCity": "Olmsted Falls", "billState": "OH", "billZip": "44138", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "HYCAL CORP", "name": "HyCAL Corp.", "contact": "", "email": "sswan@hycalcorp.com", "phone": "248-697-8099", "billStreet": "Ferrolux Metals Co. & Autolum 27800 W. Jefferson Ave.", "billCity": "Gibraltar", "billState": "MI", "billZip": "48173", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "INNOMOTICS L", "name": "Innomotics LLC", "contact": "", "email": "Nrider09@yahoo.com", "phone": "", "billStreet": "", "billCity": "", "billState": "", "billZip": "", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "INNOMOTICS 2", "name": "Innomotics LLC (EIN 38-4207664)", "contact": "", "email": "", "phone": "513-827-1672", "billStreet": "Innomotics LLC PO Box 4356 MC-IMA069", "billCity": "Portland", "billState": "OR", "billZip": "97208-4356", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "INTEGRATED P", "name": "Integrated Power Services Cle LLC", "contact": "", "email": "APCleveland@ips.us", "phone": "216-433-7800", "billStreet": "Integrated Power Services Cle INC 5325 West 130th St", "billCity": "Cleveland", "billState": "OH", "billZip": "44130", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "INTEGRATED 2", "name": "Integrated Power Services Denver, LLC", "contact": "", "email": "RDZAPDept@ips.us", "phone": "303-935-4615", "billStreet": "4850 Moline St", "billCity": "Denver", "billState": "CO", "billZip": "80239", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "INTEGRATED 3", "name": "Integrated Power Services IL LLC", "contact": "", "email": "jedders@ips.us", "phone": "708-877-5310", "billStreet": "Integrated Power Services, IL LLC 17001 S. Vincennes Rd", "billCity": "Thornton", "billState": "IL", "billZip": "60476", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "INTEGRATED 4", "name": "Integrated Power Services OK LLC", "contact": "", "email": "ehqapinvoices@ips.us", "phone": "405-631-1344  ext390", "billStreet": "OK 6707 N Interstate Dr", "billCity": "Norman", "billState": "OK", "billZip": "730690", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "IPS CALIFORN", "name": "IPS CALIFORNIA", "contact": "", "email": "IVCAP@ips.us", "phone": "559 651 0606", "billStreet": "7515 W SUNNYVIEW AVE", "billCity": "VISALIA", "billState": "CA", "billZip": "93291", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "IPS HOUSTON", "name": "IPS HOUSTON SERVICE CENTER", "contact": "", "email": "PHansford@ips.us", "phone": "281 471 4611 AP", "billStreet": "1500 EAST MAIN ST", "billCity": "La Porte", "billState": "TX", "billZip": "77571", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": "Work phone: Cameron Rogers 281-471-4611"}, {"code": "JUSTIN M JEN", "name": "Justin M Jenkins", "contact": "", "email": "", "phone": "", "billStreet": "827 Mechanic St", "billCity": "Grafton", "billState": "OH", "billZip": "44044", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "KAPUCINSKI M", "name": "KAPUCINSKI MACHINE", "contact": "", "email": "rtk4@windstream.net", "phone": "440 213 1465", "billStreet": "15922 WHEELER RD", "billCity": "Lagrange", "billState": "OH", "billZip": "44050", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "KAPUCINSKI 2", "name": "Kapucinski Machine LLC.", "contact": "", "email": "rtk4@windstream.net", "phone": "440-213-1465", "billStreet": "15922 Wheeler Rd", "billCity": "Lagrange", "billState": "OH", "billZip": "44050", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "KENCOIL INC", "name": "Kencoil Inc.", "contact": "", "email": "dgervais@kencoil.com", "phone": "504-394-4010", "billStreet": "2805 Engineers Rd   70037", "billCity": "Belle Chasse", "billState": "LA", "billZip": "70037", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "KS WILSON HO", "name": "KS Wilson Holdings LLC.", "contact": "", "email": "", "phone": "", "billStreet": "", "billCity": "", "billState": "", "billZip": "", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "LEPPERT MACH", "name": "Leppert Machine Co Inc", "contact": "", "email": "", "phone": "419-522-4721", "billStreet": "650 Wayne St", "billCity": "Mansfield", "billState": "OH", "billZip": "44905", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "M P A INC", "name": "M P & A INC.", "contact": "", "email": "Nathan@MPAbag.us", "phone": "+1 (440) 926-1074", "billStreet": "1024 Commerce Dr", "billCity": "Grafton", "billState": "OH", "billZip": "44044", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "MADER ELECTR", "name": "Mader Electric Motors", "contact": "", "email": "davidl@maderelectricmotors.com", "phone": "239-731-5455", "billStreet": "Dave Lindley 18161 N. Tamiami Trail N. Ft Myers, Fl  33903", "billCity": "N. Ft Myers", "billState": "FL", "billZip": "33903", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "MASTER BOLT", "name": "Master Bolt, LLC", "contact": "", "email": "lisa.albright@ohiomet.com", "phone": "", "billStreet": "811 Taylor St", "billCity": "Elyria", "billState": "OH", "billZip": "44035", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "MESSER LLC", "name": "Messer LLC", "contact": "", "email": "", "phone": "", "billStreet": "PO Box 7448", "billCity": "Philadelphia", "billState": "PA", "billZip": "19101", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "PENNSYLVANIA", "name": "PENNSYLVANIA STEEL", "contact": "", "email": "clevelandinvoices@pasteel.com", "phone": "800-543-3743", "billStreet": "4521 WILLOW PARKWAY", "billCity": "Cleveland", "billState": "OH", "billZip": "44125", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "PRECISION CO", "name": "PRECISION COIL & ROTOR", "contact": "", "email": "tracey.berry@pecoil.com", "phone": "", "billStreet": "4305 BEACON DR.", "billCity": "OKLAHOMA CITY", "billState": "OK", "billZip": "73179", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "PRECISION CU", "name": "Precision Cut Fab", "contact": "", "email": "pcf@precisioncutfab.com", "phone": "", "billStreet": "9921 York Alpha Dr North Royalton, Oh 44133", "billCity": "North Royalton", "billState": "OH", "billZip": "44133", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "PURIFIED FLO", "name": "Purified Flow Technologies", "contact": "", "email": "sarahk.purifiedflowtechnologies@yahoo.com", "phone": "", "billStreet": "Purified Flow Technologles LLC 5506 Linn Rd  US", "billCity": "Amherst", "billState": "OH", "billZip": "44001", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "RUSH PRECISI", "name": "Rush Precision Machine", "contact": "", "email": "djenkins@rush-cnc.com", "phone": "", "billStreet": "15861 Wheeler Rd Lagrange, Oh 44050", "billCity": "Lagrange", "billState": "OH", "billZip": "44050", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "SHERMAN AND", "name": "Sherman and sons", "contact": "", "email": "shermansonslawncare@yahoo.com", "phone": "330-225-1599", "billStreet": "790 Barchard St", "billCity": "Grafton", "billState": "OH", "billZip": "44044", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "SMARTAUGER L", "name": "SMART-AUGER LLC", "contact": "", "email": "cmgurreri@smart-auger.com", "phone": "910 465 1144", "billStreet": "Smart-Auger LLC", "billCity": "", "billState": "", "billZip": "", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "SPECIALTY FI", "name": "Specialty Fitters Inc", "contact": "", "email": "office@specialtyfitters.com", "phone": "", "billStreet": "5630 Ternes Ln", "billCity": "Elyria", "billState": "OH", "billZip": "44035", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "SUPERIOR ROL", "name": "Superior Roll Forming LLC", "contact": "", "email": "k.westover@welser.com", "phone": "", "billStreet": "5535 Wegman Drive   44280", "billCity": "Valley City", "billState": "OH", "billZip": "44280", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "SWIGER COIL", "name": "Swiger Coil Systems", "contact": "", "email": "shari.lahm@ips.us", "phone": "", "billStreet": "4677 Manufacturing Rd", "billCity": "Cleveland", "billState": "OH", "billZip": "44135", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "TAMPA ARMATU", "name": "Tampa Armature Works, Inc", "contact": "", "email": "rudy.hernandez@tawinc.com", "phone": "305-884-1717", "billStreet": "9930 NW 89th Ave", "billCity": "Miami", "billState": "FL", "billZip": "33178", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "TECOWESTINGH", "name": "Teco-Westinghouse Motor Company", "contact": "", "email": "accountspayable@tecowestinghouse.com", "phone": "512-255-4141", "billStreet": ". 5100 N. IH-35 Round Rock, Tx  79681 US", "billCity": "Round Rock", "billState": "TX", "billZip": "79681", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "THE ELECTRIC", "name": "THE ELECTRIC MOTOR COIL CO. LTD", "contact": "", "email": "AP@emccltd.com", "phone": "705 735 0111", "billStreet": "191 SAUNDERS RD Canada", "billCity": "BARRIE", "billState": "ON", "billZip": "", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "THE SUPERIOR", "name": "THE SUPERIOR ALLOY STEEL CO.", "contact": "", "email": "Sales@superioralloysteel.com", "phone": "216 432 0900", "billStreet": "3835 LAKESIDE AVE.", "billCity": "Cleveland", "billState": "OH", "billZip": "44114", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "UNIVERSAL CO", "name": "Universal Coil Manufacturing", "contact": "", "email": "Justin@keymf.com", "phone": "504-367-8880", "billStreet": "2605 N Concord Rd", "billCity": "Belle Chasse", "billState": "LA", "billZip": "70037", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "US MACHINE A", "name": "US MACHINE AND PRECISION GRINDING", "contact": "", "email": "gregusmachine@yahoo.com", "phone": "440 284 0711", "billStreet": "880 TAYLOR S.", "billCity": "Elyria", "billState": "OH", "billZip": "44035", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "WABTEC CORPO", "name": "Wabtec Corporation", "contact": "", "email": "jdoemling@wabtec.com", "phone": "1-216-429-3349", "billStreet": "4477 E. 49th Street", "billCity": "Cleveland", "billState": "OH", "billZip": "44125", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}, {"code": "WILLIS CNC", "name": "WILLIS CNC", "contact": "", "email": "bev@williscnc.com", "phone": "440 926 0434", "billStreet": "1008 Commerce Dr", "billCity": "Grafton", "billState": "OH", "billZip": "44044", "shipSameAsBill": true, "shipStreet": "", "shipCity": "", "shipState": "", "shipZip": "", "salesRep": "", "paymentTerms": "", "status": "Active", "notes": ""}];
@@ -1278,6 +1324,7 @@ const state = {
     quoteArchiveImport: { open:false, rowsText:'', rows:null, headers:null, map:null, filename:'', sheetName:'', loading:false, error:'' }, // v7.38
     mcMasterPaste: null, // v7.43: { partId, text, extracted } — transient smart-paste state
     newQuoteKindPicker: false, // v7.45: when true, show the type-picker modal before creating a quote
+    changeQuoteKindPicker: null, // v8.32: { quoteId } when re-tagging an existing quote via the same picker modal
     followUpDays: 14,
     // v7.37 Customer History panel — per-section search + show-all toggles
     custHist: {
@@ -10508,7 +10555,10 @@ function renderArchivedQuote() {
 function renderNewQuoteKindPickerModal() {
   const host = document.getElementById('quote-parser-host');
   if (!host) return;
-  if (!state.ui.newQuoteKindPicker) {
+  // v8.32: same modal serves "+ New Quote" (create) and "↻ Change kind"
+  // (re-tag existing). Both states are mutually exclusive; either one
+  // opens this modal.
+  if (!state.ui.newQuoteKindPicker && !state.ui.changeQuoteKindPicker) {
     if (host.dataset.modalOwner === 'newQuoteKindPicker') {
       host.innerHTML = '';
       host.dataset.modalOwner = '';
@@ -10517,29 +10567,29 @@ function renderNewQuoteKindPickerModal() {
   }
   host.dataset.modalOwner = 'newQuoteKindPicker';
   host.innerHTML = `
-    <div class="modal-backdrop" onclick="App.closeNewQuoteKindPicker()">
+    <div class="modal-backdrop" onclick="${state.ui.changeQuoteKindPicker ? 'App.closeChangeQuoteKindPicker()' : 'App.closeNewQuoteKindPicker()'}">
       <div class="modal" style="width:820px; max-width:96vw;" onclick="event.stopPropagation()">
         <div class="modal-header" style="display:flex; align-items:center; justify-content:space-between;">
-          <span>New Quote — pick the type</span>
-          <button class="btn btn-sm" onclick="App.closeNewQuoteKindPicker()" style="background:rgba(255,255,255,0.18); color:white;">✕</button>
+          <span>${state.ui.changeQuoteKindPicker ? '↻ Change Quote Kind' : 'New Quote — pick the type'}</span>
+          <button class="btn btn-sm" onclick="${state.ui.changeQuoteKindPicker ? 'App.closeChangeQuoteKindPicker()' : 'App.closeNewQuoteKindPicker()'}" style="background:rgba(255,255,255,0.18); color:white;">✕</button>
         </div>
         <div class="modal-body" style="padding:18px;">
           <p style="margin:0 0 14px; color:var(--text-mute); font-size:13px;">
-            The kind determines the workflow inside the quote. You can change it later.
+            ${state.ui.changeQuoteKindPicker ? 'Re-tag this quote. Doesn\'t touch any data — just changes the kind label, color, and which workflow features show up. Reversible.' : 'The kind determines the workflow inside the quote. You can change it later.'}
           </p>
           <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
-            ${QUOTE_KINDS.map(k => `
-              <button onclick="App.createQuoteOfKind('${k.id}')" style="
+            ${QUOTE_KINDS.filter(k => !k.legacy).map(k => `
+              <button onclick="${state.ui.changeQuoteKindPicker ? `App.applyChangeQuoteKind('${state.ui.changeQuoteKindPicker.quoteId}','${k.id}')` : `App.createQuoteOfKind('${k.id}')`}" style="
                   text-align:left; padding:14px 16px; background:var(--paper);
                   border:1.5px solid var(--line-dark); border-radius:6px;
-                  cursor:pointer; display:flex; gap:12px; align-items:flex-start;
+                  cursor:pointer; display:flex; gap:14px; align-items:flex-start;
                   font-family:inherit;
                   transition:border-color 0.12s, background 0.12s;"
                   onmouseover="this.style.borderColor='${k.color}'; this.style.background='${k.color}15';"
                   onmouseout="this.style.borderColor='var(--line-dark)'; this.style.background='var(--paper)';">
-                <div style="font-size:24px; line-height:1;">${k.icon}</div>
+                <div style="flex:0 0 44px; width:44px; height:44px; line-height:0;">${k.icon}</div>
                 <div style="flex:1;">
-                  <div style="font-size:14px; font-weight:600; color:${k.color}; margin-bottom:4px;">${esc(k.label)}</div>
+                  <div style="font-size:14px; font-weight:700; color:${k.color}; margin-bottom:4px;">${esc(k.label)}</div>
                   <div style="font-size:12px; color:var(--text-mute); line-height:1.45;">${esc(k.desc)}</div>
                 </div>
               </button>
@@ -10547,7 +10597,7 @@ function renderNewQuoteKindPickerModal() {
           </div>
         </div>
         <div class="modal-footer">
-          <button class="btn" onclick="App.closeNewQuoteKindPicker()">Cancel</button>
+          <button class="btn" onclick="${state.ui.changeQuoteKindPicker ? 'App.closeChangeQuoteKindPicker()' : 'App.closeNewQuoteKindPicker()'}">Cancel</button>
         </div>
       </div>
     </div>
@@ -14823,7 +14873,14 @@ function renderQuote() {
       <div>
         <div class="page-title" style="font-size:16px;">
           ${esc(q.quoteNum || 'New Quote')}
-          <span class="pill" style="background:${quoteKindColor(q)}22; color:${quoteKindColor(q)}; border:1px solid ${quoteKindColor(q)}55; vertical-align:middle; margin-left:6px; font-size:11px;" title="${esc(quoteKindLabel(q))}">${quoteKindIcon(q)} ${esc(quoteKindShort(q))}</span>
+          <!-- v8.32: kind pill is now clickable → opens picker to re-tag.
+               Inline-flex so the SVG icon sits cleanly next to the label. -->
+          <button onclick="App.openChangeQuoteKindPicker('${q.id}')" title="${esc(quoteKindLabel(q))} · click to change kind"
+                  style="display:inline-flex; align-items:center; gap:6px; background:${quoteKindColor(q)}22; color:${quoteKindColor(q)}; border:1px solid ${quoteKindColor(q)}55; vertical-align:middle; margin-left:8px; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; padding:3px 10px 3px 4px; border-radius:12px; cursor:pointer; font-family:inherit;">
+            <span style="display:inline-flex; width:22px; height:22px; line-height:0;">${quoteKindIcon(q)}</span>
+            ${esc(quoteKindShort(q))}
+            <span style="opacity:0.6; font-size:9px; margin-left:1px;">↻</span>
+          </button>
         </div>
       </div>
       <div class="header-actions">
@@ -20668,6 +20725,29 @@ const App = {
       logActivity('Changed quote kind', q.quoteNum, `${QUOTE_KIND_BY_ID[oldKind]?.label || oldKind} → ${QUOTE_KIND_BY_ID[kind]?.label || kind}`);
     });
     showToast(`Quote kind changed to ${QUOTE_KIND_BY_ID[kind]?.label || kind}`);
+  },
+
+  // v8.32: open the kind picker in "change" mode. Wired to the kind pill
+  // on the quote page — click → modal opens → pick a new kind → apply.
+  openChangeQuoteKindPicker(quoteId) {
+    state.ui.changeQuoteKindPicker = { quoteId };
+    state.ui.newQuoteKindPicker = false;  // mutex
+    render();
+  },
+  closeChangeQuoteKindPicker() {
+    state.ui.changeQuoteKindPicker = null;
+    render();
+  },
+  applyChangeQuoteKind(quoteId, kind) {
+    update(s => {
+      const q = s.quotes.find(x => x.id === quoteId); if (!q) return;
+      const oldKind = q.kind || 'multipart';
+      if (oldKind === kind) { s.ui.changeQuoteKindPicker = null; return; }
+      q.kind = kind;
+      logActivity('Changed quote kind', q.quoteNum, `${QUOTE_KIND_BY_ID[oldKind]?.label || oldKind} → ${QUOTE_KIND_BY_ID[kind]?.label || kind}`);
+      s.ui.changeQuoteKindPicker = null;
+    });
+    showToast(`Quote re-tagged → ${QUOTE_KIND_BY_ID[kind]?.label || kind}`, 3500);
   },
   // v7.46 — Parse a SharePoint URL into the three settings fields.
   parseSharePointUrlIntoSettings(rawUrl) {
