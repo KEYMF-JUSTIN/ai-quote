@@ -268,6 +268,10 @@
   /* Hide fallback once the canvas has been painted (it gets a data attribute) */
   .part-card-thumb.pdf canvas[data-rendered="1"] + .part-card-thumb-fallback { display:none; }
   .part-card-thumb-badge { position:absolute; top:2px; right:2px; background:rgba(31,41,55,0.85); color:white; font-size:9px; font-weight:700; padding:1px 5px; border-radius:8px; pointer-events:none; }
+  /* v8.33: kind-icon SVGs have intrinsic 20×20. The picker card wraps them
+     in .kind-icon-lg to upscale to 40×40 without the SVG ballooning into
+     whatever blank parent it lands in. */
+  .kind-icon-lg svg { width:40px !important; height:40px !important; display:block; }
 
   /* v8.27: Summary tab — paper-style customer PDF preview. The existing
      4 tables are wrapped in a letter-sized "sheet of paper" on a gray
@@ -922,7 +926,7 @@ if (typeof window !== 'undefined') {
   }
   window.addEventListener('resize', () => { if (_zoomState.autoScale) applyZoom(); });
 }
-const APP_VERSION = '8.32.0';
+const APP_VERSION = '8.32.1';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -1147,7 +1151,7 @@ const QUOTE_KINDS = [
     id: 'multipart',
     label: 'Multi-Part Production',
     short: 'Multi-Part',
-    icon: `<svg viewBox="0 0 32 32" width="100%" height="100%" xmlns="http://www.w3.org/2000/svg"><rect x="4" y="4" width="14" height="14" rx="2" fill="#3B82F6" fill-opacity="0.4" stroke="#1E5BAE" stroke-width="1.6"/><rect x="9" y="9" width="14" height="14" rx="2" fill="#3B82F6" fill-opacity="0.65" stroke="#1E5BAE" stroke-width="1.6"/><rect x="14" y="14" width="14" height="14" rx="2" fill="#1E5BAE" fill-opacity="0.85" stroke="#1E40AF" stroke-width="1.6"/></svg>`,
+    icon: `<svg viewBox="0 0 32 32" width="20" height="20" xmlns="http://www.w3.org/2000/svg"><rect x="4" y="4" width="14" height="14" rx="2" fill="#3B82F6" fill-opacity="0.4" stroke="#1E5BAE" stroke-width="1.6"/><rect x="9" y="9" width="14" height="14" rx="2" fill="#3B82F6" fill-opacity="0.65" stroke="#1E5BAE" stroke-width="1.6"/><rect x="14" y="14" width="14" height="14" rx="2" fill="#1E5BAE" fill-opacity="0.85" stroke="#1E40AF" stroke-width="1.6"/></svg>`,
     desc: 'Production quote covering multiple distinct parts — each with its own material, ops, qty tiers. The standard workflow for production runs.',
     color: '#1E5BAE',
   },
@@ -1155,7 +1159,7 @@ const QUOTE_KINDS = [
     id: 'prototype',
     label: 'Prototype',
     short: 'Prototype',
-    icon: `<svg viewBox="0 0 32 32" width="100%" height="100%" xmlns="http://www.w3.org/2000/svg"><path d="M16 4a8 8 0 00-5 14.3c.7.6 1 1.4 1 2.2v1.5h8v-1.5c0-.8.3-1.6 1-2.2A8 8 0 0016 4z" fill="#F59E0B" fill-opacity="0.35" stroke="#0F766E" stroke-width="1.6" stroke-linejoin="round"/><rect x="12" y="23" width="8" height="2.6" rx="1" fill="#0F766E"/><line x1="13.5" y1="28" x2="18.5" y2="28" stroke="#0F766E" stroke-width="1.6" stroke-linecap="round"/><path d="M16 10v6m-3-3h6" stroke="#0F766E" stroke-width="2" stroke-linecap="round"/></svg>`,
+    icon: `<svg viewBox="0 0 32 32" width="20" height="20" xmlns="http://www.w3.org/2000/svg"><path d="M16 4a8 8 0 00-5 14.3c.7.6 1 1.4 1 2.2v1.5h8v-1.5c0-.8.3-1.6 1-2.2A8 8 0 0016 4z" fill="#F59E0B" fill-opacity="0.35" stroke="#0F766E" stroke-width="1.6" stroke-linejoin="round"/><rect x="12" y="23" width="8" height="2.6" rx="1" fill="#0F766E"/><line x1="13.5" y1="28" x2="18.5" y2="28" stroke="#0F766E" stroke-width="1.6" stroke-linecap="round"/><path d="M16 10v6m-3-3h6" stroke="#0F766E" stroke-width="2" stroke-linecap="round"/></svg>`,
     desc: 'Single part, proof-of-concept or first article. Locks the quote to one part so the editor stays focused.',
     color: '#0F766E',
   },
@@ -1163,7 +1167,7 @@ const QUOTE_KINDS = [
     id: 'oneoff',
     label: 'One-Off',
     short: 'One-Off',
-    icon: `<svg viewBox="0 0 32 32" width="100%" height="100%" xmlns="http://www.w3.org/2000/svg"><path d="M16 5l10 5.5v11L16 27 6 21.5v-11z" fill="#C56B1C" fill-opacity="0.3" stroke="#C56B1C" stroke-width="1.6" stroke-linejoin="round"/><path d="M6 10.5L16 16l10-5.5M16 16v11" stroke="#C56B1C" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" fill="none"/><circle cx="16" cy="16" r="2.2" fill="#C56B1C"/></svg>`,
+    icon: `<svg viewBox="0 0 32 32" width="20" height="20" xmlns="http://www.w3.org/2000/svg"><path d="M16 5l10 5.5v11L16 27 6 21.5v-11z" fill="#C56B1C" fill-opacity="0.3" stroke="#C56B1C" stroke-width="1.6" stroke-linejoin="round"/><path d="M6 10.5L16 16l10-5.5M16 16v11" stroke="#C56B1C" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" fill="none"/><circle cx="16" cy="16" r="2.2" fill="#C56B1C"/></svg>`,
     desc: 'Single part, single order — no production run planned. Shop-floor lingo for "one and done."',
     color: '#C56B1C',
   },
@@ -1171,7 +1175,7 @@ const QUOTE_KINDS = [
     id: 'quickquote',
     label: 'Quick Quote',
     short: 'Quick',
-    icon: `<svg viewBox="0 0 32 32" width="100%" height="100%" xmlns="http://www.w3.org/2000/svg"><path d="M19 3L7 19h8l-3 10L25 13h-8l2-10z" fill="#F59E0B" fill-opacity="0.7" stroke="#D97706" stroke-width="1.6" stroke-linejoin="round"/></svg>`,
+    icon: `<svg viewBox="0 0 32 32" width="20" height="20" xmlns="http://www.w3.org/2000/svg"><path d="M19 3L7 19h8l-3 10L25 13h-8l2-10z" fill="#F59E0B" fill-opacity="0.7" stroke="#D97706" stroke-width="1.6" stroke-linejoin="round"/></svg>`,
     desc: 'Single part, fast turnaround. Use for "can you give me a price on this today?" requests.',
     color: '#F59E0B',
   },
@@ -1179,7 +1183,7 @@ const QUOTE_KINDS = [
     id: 'spotquote',
     label: 'Spot Quote',
     short: 'Spot',
-    icon: `<svg viewBox="0 0 32 32" width="100%" height="100%" xmlns="http://www.w3.org/2000/svg"><circle cx="16" cy="16" r="12" fill="#7C3AED" fill-opacity="0.1" stroke="#7C3AED" stroke-width="1.5"/><circle cx="16" cy="16" r="8" fill="#7C3AED" fill-opacity="0.22" stroke="#7C3AED" stroke-width="1.3"/><circle cx="16" cy="16" r="4" fill="#7C3AED" fill-opacity="0.55" stroke="#7C3AED" stroke-width="1"/><circle cx="16" cy="16" r="1.5" fill="#FBBF24"/></svg>`,
+    icon: `<svg viewBox="0 0 32 32" width="20" height="20" xmlns="http://www.w3.org/2000/svg"><circle cx="16" cy="16" r="12" fill="#7C3AED" fill-opacity="0.1" stroke="#7C3AED" stroke-width="1.5"/><circle cx="16" cy="16" r="8" fill="#7C3AED" fill-opacity="0.22" stroke="#7C3AED" stroke-width="1.3"/><circle cx="16" cy="16" r="4" fill="#7C3AED" fill-opacity="0.55" stroke="#7C3AED" stroke-width="1"/><circle cx="16" cy="16" r="1.5" fill="#FBBF24"/></svg>`,
     desc: 'Single part, price-only — customer just wants a number, no commitment to buy. Useful for win-rate tracking.',
     color: '#7C3AED',
   },
@@ -1187,7 +1191,7 @@ const QUOTE_KINDS = [
     id: 'welding',
     label: 'Welding Job',
     short: 'Welding',
-    icon: `<svg viewBox="0 0 32 32" width="100%" height="100%" xmlns="http://www.w3.org/2000/svg"><ellipse cx="16" cy="24" rx="11" ry="2.6" fill="#C73E1D" fill-opacity="0.35" stroke="#C73E1D" stroke-width="1.5"/><path d="M12 22L16 8l4 14z" fill="#F59E0B" stroke="#C73E1D" stroke-width="1.5" stroke-linejoin="round"/><circle cx="8" cy="10" r="1" fill="#F59E0B"/><circle cx="24" cy="12" r="1.2" fill="#F59E0B"/><circle cx="11" cy="5" r="0.8" fill="#F59E0B"/><circle cx="22" cy="6" r="0.8" fill="#F59E0B"/></svg>`,
+    icon: `<svg viewBox="0 0 32 32" width="20" height="20" xmlns="http://www.w3.org/2000/svg"><ellipse cx="16" cy="24" rx="11" ry="2.6" fill="#C73E1D" fill-opacity="0.35" stroke="#C73E1D" stroke-width="1.5"/><path d="M12 22L16 8l4 14z" fill="#F59E0B" stroke="#C73E1D" stroke-width="1.5" stroke-linejoin="round"/><circle cx="8" cy="10" r="1" fill="#F59E0B"/><circle cx="24" cy="12" r="1.2" fill="#F59E0B"/><circle cx="11" cy="5" r="0.8" fill="#F59E0B"/><circle cx="22" cy="6" r="0.8" fill="#F59E0B"/></svg>`,
     desc: 'Weld-focused work: process, weld feet, filler, certs.',
     color: '#C73E1D',
   },
@@ -1195,7 +1199,7 @@ const QUOTE_KINDS = [
     id: 'build',
     label: 'Machine Build',
     short: 'Build',
-    icon: `<svg viewBox="0 0 32 32" width="100%" height="100%" xmlns="http://www.w3.org/2000/svg"><rect x="4" y="6" width="24" height="20" rx="1.5" fill="#7F77DD" fill-opacity="0.18" stroke="#7F77DD" stroke-width="1.6"/><line x1="4" y1="11" x2="28" y2="11" stroke="#7F77DD" stroke-width="1.5"/><circle cx="10" cy="18" r="2.6" fill="#7F77DD" fill-opacity="0.55" stroke="#7F77DD" stroke-width="1.2"/><circle cx="16" cy="18" r="2.6" fill="#7F77DD" fill-opacity="0.55" stroke="#7F77DD" stroke-width="1.2"/><circle cx="22" cy="18" r="2.6" fill="#7F77DD" fill-opacity="0.55" stroke="#7F77DD" stroke-width="1.2"/><circle cx="6.5" cy="8.5" r="0.8" fill="#7F77DD"/><circle cx="9" cy="8.5" r="0.8" fill="#7F77DD"/></svg>`,
+    icon: `<svg viewBox="0 0 32 32" width="20" height="20" xmlns="http://www.w3.org/2000/svg"><rect x="4" y="6" width="24" height="20" rx="1.5" fill="#7F77DD" fill-opacity="0.18" stroke="#7F77DD" stroke-width="1.6"/><line x1="4" y1="11" x2="28" y2="11" stroke="#7F77DD" stroke-width="1.5"/><circle cx="10" cy="18" r="2.6" fill="#7F77DD" fill-opacity="0.55" stroke="#7F77DD" stroke-width="1.2"/><circle cx="16" cy="18" r="2.6" fill="#7F77DD" fill-opacity="0.55" stroke="#7F77DD" stroke-width="1.2"/><circle cx="22" cy="18" r="2.6" fill="#7F77DD" fill-opacity="0.55" stroke="#7F77DD" stroke-width="1.2"/><circle cx="6.5" cy="8.5" r="0.8" fill="#7F77DD"/><circle cx="9" cy="8.5" r="0.8" fill="#7F77DD"/></svg>`,
     desc: 'Assembly of components — bought-out + machined + sub-assemblies + assembly labor. Uses the BOM view.',
     color: '#7F77DD',
   },
@@ -1208,7 +1212,7 @@ const QUOTE_KINDS = [
     id: 'machining',
     label: 'Single-Part Machining',
     short: 'Single',
-    icon: `<svg viewBox="0 0 32 32" width="100%" height="100%" xmlns="http://www.w3.org/2000/svg"><circle cx="16" cy="16" r="11" fill="#0F766E" fill-opacity="0.15" stroke="#0F766E" stroke-width="1.5"/><path d="M16 9v14M9 16h14" stroke="#0F766E" stroke-width="2" stroke-linecap="round"/></svg>`,
+    icon: `<svg viewBox="0 0 32 32" width="20" height="20" xmlns="http://www.w3.org/2000/svg"><circle cx="16" cy="16" r="11" fill="#0F766E" fill-opacity="0.15" stroke="#0F766E" stroke-width="1.5"/><path d="M16 9v14M9 16h14" stroke="#0F766E" stroke-width="2" stroke-linecap="round"/></svg>`,
     desc: 'Legacy single-part kind. New quotes should use Prototype / One-Off / Quick Quote / Spot Quote instead.',
     color: '#0F766E',
     legacy: true,
@@ -10587,7 +10591,7 @@ function renderNewQuoteKindPickerModal() {
                   transition:border-color 0.12s, background 0.12s;"
                   onmouseover="this.style.borderColor='${k.color}'; this.style.background='${k.color}15';"
                   onmouseout="this.style.borderColor='var(--line-dark)'; this.style.background='var(--paper)';">
-                <div style="flex:0 0 44px; width:44px; height:44px; line-height:0;">${k.icon}</div>
+                <div style="flex:0 0 44px; width:44px; height:44px; line-height:0; display:flex; align-items:center; justify-content:center;"><span style="display:inline-block; width:40px; height:40px;" class="kind-icon-lg">${k.icon}</span></div>
                 <div style="flex:1;">
                   <div style="font-size:14px; font-weight:700; color:${k.color}; margin-bottom:4px;">${esc(k.label)}</div>
                   <div style="font-size:12px; color:var(--text-mute); line-height:1.45;">${esc(k.desc)}</div>
