@@ -280,6 +280,29 @@
   .summary-paper .card { box-shadow:none; border:1px solid #999; background:white; margin-bottom:14px; }
   .summary-paper .card-header { background:white !important; color:var(--navy) !important; border-bottom:2px solid var(--navy); padding:8px 12px; }
   .summary-paper table.tbl tr.unit td { background:white !important; color:var(--green) !important; border-top:2px solid var(--green); border-bottom:2px solid var(--green); }
+  /* v8.31: protect column widths so a quote with many qty tiers can't squeeze
+     Description into a 1-char-wide column (which made the header text render
+     vertically one letter per line). Also forces tables to scroll horizontally
+     inside the paper frame rather than mangle layout. */
+  .summary-paper table.tbl { table-layout:auto; width:100%; }
+  .summary-paper table.tbl th, .summary-paper table.tbl td { word-break:normal; overflow-wrap:break-word; white-space:normal; }
+  .summary-paper table.tbl th:first-child, .summary-paper table.tbl td:first-child { min-width:80px; white-space:nowrap; }
+  .summary-paper table.tbl th:nth-child(2), .summary-paper table.tbl td:nth-child(2) { min-width:160px; max-width:280px; }
+  .summary-paper table.tbl th.num, .summary-paper table.tbl td.num { min-width:64px; white-space:nowrap; }
+  /* If the table genuinely overflows the paper, let it scroll horizontally
+     instead of crushing every column. */
+  .summary-paper .card-body { overflow-x:auto; }
+
+  /* v8.31: same guards on the actual print output (window.print() → PDF) */
+  @media print {
+    table.tbl { table-layout:auto; }
+    table.tbl th, table.tbl td { word-break:normal; overflow-wrap:break-word; }
+    table.tbl th:first-child, table.tbl td:first-child { white-space:nowrap; }
+    table.tbl th.num, table.tbl td.num { white-space:nowrap; }
+    /* Force landscape only when there are 5+ qty columns? Can't detect that
+       in pure CSS — instead set @page size to letter portrait and let users
+       switch to landscape in the browser print dialog if needed. */
+  }
   /* Internal cards normally hidden via .no-print; show when user toggles */
   body.summary-show-internal .summary-paper .no-print { display:revert !important; }
   body.summary-show-internal .summary-paper .no-print { border:1px dashed var(--orange); }
@@ -899,7 +922,7 @@ if (typeof window !== 'undefined') {
   }
   window.addEventListener('resize', () => { if (_zoomState.autoScale) applyZoom(); });
 }
-const APP_VERSION = '8.30.0';
+const APP_VERSION = '8.31.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -27526,8 +27549,10 @@ Online Metals,Brass,Round,1.25 dia,per_lb,5.20`;
         p.customerPN = `CUST-${seq}`;
         p.material = pick(materials, i);
         p.notes = `Auto-generated · index ${i}`;
-        // Multi-tier qty on every 4th part
-        p.qtyTiers = (i % 4 === 0) ? [10, 25, 50, 100] : [randInt(5, 50)];
+        // v8.31: all parts share the SAME qty tiers — realistic ("give me
+        // 10/25/100 of each part") AND avoids the PDF column explosion that
+        // happened when every part had a different random qty.
+        p.qtyTiers = [10, 25, 100];
         // Stock form rotation
         const form = ['Bar/Block', 'Sheet', 'Round'][i % 3];
         p.stock.form = form;
@@ -27668,7 +27693,9 @@ Online Metals,Brass,Round,1.25 dia,per_lb,5.20`;
         if (i === 49) {
           p.partNum = 'STRESS-EVERYTHING';
           p.description = 'Final part — every option enabled at once (kitchen sink)';
-          p.qtyTiers = [10, 25, 50, 100, 250];
+          // v8.31: keep same tiers as the rest of the quote (was [10/25/50/100/250]
+          // which broke PDF columns). Real shops quote uniform tiers per quote.
+          p.qtyTiers = [10, 25, 100];
           // Already has setups + specialty + outside from above
           // Force a couple extra flags
           p.materialCost.supplierTaxPct = 6.75;
