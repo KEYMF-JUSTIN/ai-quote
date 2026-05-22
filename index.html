@@ -899,7 +899,7 @@ if (typeof window !== 'undefined') {
   }
   window.addEventListener('resize', () => { if (_zoomState.autoScale) applyZoom(); });
 }
-const APP_VERSION = '8.29.0';
+const APP_VERSION = '8.30.0';
 
 // =================================================================
 // v7.51: Cloudflare Worker bridge — powers all Claude-backed features
@@ -1337,6 +1337,15 @@ function migrateState() {
   if (!Array.isArray(state.archivedInvoices)) state.archivedInvoices = [];
   // v7.38: Quote history archive
   if (!Array.isArray(state.archivedQuotes)) state.archivedQuotes = [];
+  // v8.30: "parked" imported records — separate from state.archivedX because
+  // those get auto-promoted back into state.quotes/invoices by the
+  // backfill migration above. parkedX stays parked: round-trips through
+  // backup + cloud sync, lives outside the working data stream. Used by
+  // App.parkImportedHistory() to clear the imported-tagged clutter out
+  // of the live lists without losing the history.
+  if (!Array.isArray(state.parkedQuotes))   state.parkedQuotes   = [];
+  if (!Array.isArray(state.parkedOrders))   state.parkedOrders   = [];
+  if (!Array.isArray(state.parkedInvoices)) state.parkedInvoices = [];
   // v7.50: Purchasing workspace — vendor purchase records
   if (!Array.isArray(state.purchases)) state.purchases = [];
   // v7.45: quote kind — default existing quotes to multi-part machining
@@ -1979,6 +1988,9 @@ const SyncEngine = {
     'archivedPoLines',
     'archivedInvoices',
     'archivedQuotes',
+    'parkedQuotes',     // v8.30
+    'parkedOrders',     // v8.30
+    'parkedInvoices',   // v8.30
     'rfqInbox',
     'activity',
     'priceBook',
@@ -12403,6 +12415,48 @@ function renderSettings() {
         <div class="card-body" style="border-top:1px solid var(--line); padding:10px 16px; font-size:12px; color:var(--text-mute);">
           Vendor dropdowns show only your <strong>favorite vendors</strong> by default — toggle "Show all" if you need to assign a non-favorite. Manage vendors and favorites on the dedicated <a href="javascript:App.go('vendors')">Vendors</a> page.
         </div>
+      </div>
+    </div>
+
+    <!-- v8.30: Maintenance card. Move imported (JobBOSS) records out of
+         the live working data into parked storage — keeps the working
+         tree clean without losing the history. Reversible. -->
+    <div class="card">
+      <div class="card-header" style="background:#E0F2FE; color:#075985;">
+        <span>🗄 Maintenance · Imported History</span>
+      </div>
+      <div class="card-body">
+        ${(() => {
+          const qLive = (state.quotes || []).filter(q => q.imported).length;
+          const oLive = (state.orders || []).filter(o => o.imported).length;
+          const iLive = (state.invoices || []).filter(x => x.imported).length;
+          const liveTotal = qLive + oLive + iLive;
+          const qPark = (state.parkedQuotes || []).length;
+          const oPark = (state.parkedOrders || []).length;
+          const iPark = (state.parkedInvoices || []).length;
+          const parkTotal = qPark + oPark + iPark;
+          return `
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:18px; margin-bottom:14px;">
+              <div style="padding:12px; background:var(--bg); border:1px solid var(--line); border-radius:4px;">
+                <div class="text-mute" style="font-size:10px; text-transform:uppercase; letter-spacing:0.06em; font-weight:700;">On the live lists</div>
+                <div style="font-size:28px; font-weight:700; color:${liveTotal > 0 ? 'var(--orange)' : 'var(--text-mute)'};">${liveTotal}</div>
+                <div class="text-mute small">${qLive} quotes · ${oLive} orders · ${iLive} invoices flagged imported</div>
+              </div>
+              <div style="padding:12px; background:var(--bg); border:1px solid var(--line); border-radius:4px;">
+                <div class="text-mute" style="font-size:10px; text-transform:uppercase; letter-spacing:0.06em; font-weight:700;">Parked</div>
+                <div style="font-size:28px; font-weight:700; color:${parkTotal > 0 ? 'var(--navy)' : 'var(--text-mute)'};">${parkTotal}</div>
+                <div class="text-mute small">${qPark} quotes · ${oPark} orders · ${iPark} invoices in cold storage</div>
+              </div>
+            </div>
+            <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+              <button class="btn" style="background:#075985; color:white; border-color:#075985; font-weight:700;" onclick="App.parkImportedHistory()" ${liveTotal === 0 ? 'disabled' : ''}>🗄 Park ${liveTotal} imported record${liveTotal === 1 ? '' : 's'}</button>
+              <button class="btn" onclick="App.restoreParkedHistory()" ${parkTotal === 0 ? 'disabled' : ''}>↩ Restore parked (${parkTotal})</button>
+              <div class="text-mute small" style="flex:1; min-width:240px; line-height:1.5;">
+                Moves every record tagged "imported" (JobBOSS bulk-load) out of the live working lists. Your own quotes, the order you just converted, and anything you typed in by hand — <strong>all stay put</strong>. Parked records survive backup + cloud sync; restore brings them back.
+              </div>
+            </div>
+          `;
+        })()}
       </div>
     </div>
 
@@ -27633,6 +27687,66 @@ Online Metals,Brass,Round,1.25 dia,per_lb,5.20`;
     showToast(`✨ Built 50-part stress quote on "Stress Test Co." — open it, scroll around, find anything that breaks.`, 6500);
   },
 
+  // v8.30: Move all imported (JobBOSS / historical) records OUT of the
+  // live working lists into parkedX arrays. Leaves real working data
+  // alone — only items with imported===true get moved. Reversible via
+  // App.restoreParkedHistory(). Survives backup + cloud sync.
+  parkImportedHistory() {
+    const qCount = (state.quotes  || []).filter(q => q.imported).length;
+    const oCount = (state.orders  || []).filter(o => o.imported).length;
+    const iCount = (state.invoices|| []).filter(x => x.imported).length;
+    const total  = qCount + oCount + iCount;
+    if (total === 0) {
+      alert('Nothing to park — no records on the live lists are flagged "imported".\n\nNote: the converted order you just created is NOT imported, so it stays put. Solid quotes you typed in yourself also stay put.');
+      return;
+    }
+    if (!confirm(`Park ${total} imported records?\n\n  • ${qCount} quotes (with the 📜 imported pill)\n  • ${oCount} orders\n  • ${iCount} invoices\n\nThese will move OUT of the live lists and into parked storage — they stay in the backup + sync, just don't clutter the working tree. Reversible (Settings → Maintenance → Restore parked).`)) return;
+    update(s => {
+      if (!Array.isArray(s.parkedQuotes))   s.parkedQuotes   = [];
+      if (!Array.isArray(s.parkedOrders))   s.parkedOrders   = [];
+      if (!Array.isArray(s.parkedInvoices)) s.parkedInvoices = [];
+      const parkedQ = (s.quotes   || []).filter(q => q.imported);
+      const parkedO = (s.orders   || []).filter(o => o.imported);
+      const parkedI = (s.invoices || []).filter(x => x.imported);
+      s.parkedQuotes.unshift(...parkedQ);
+      s.parkedOrders.unshift(...parkedO);
+      s.parkedInvoices.unshift(...parkedI);
+      s.quotes   = (s.quotes   || []).filter(q => !q.imported);
+      s.orders   = (s.orders   || []).filter(o => !o.imported);
+      s.invoices = (s.invoices || []).filter(x => !x.imported);
+      // If the active quote/order/invoice was an imported one we just
+      // moved, kick the view back to the list page so we don't render
+      // against a stale id.
+      if (s.ui.activeQuoteId   && !s.quotes.find(q   => q.id === s.ui.activeQuoteId))   { s.ui.activeQuoteId   = null; if (s.ui.view === 'quote')   s.ui.view = 'quotes'; }
+      if (s.ui.activeOrderId   && !s.orders.find(o   => o.id === s.ui.activeOrderId))   { s.ui.activeOrderId   = null; if (s.ui.view === 'order')   s.ui.view = 'orders'; }
+      if (s.ui.activeInvoiceId && !s.invoices.find(x => x.id === s.ui.activeInvoiceId)) { s.ui.activeInvoiceId = null; if (s.ui.view === 'invoice') s.ui.view = 'invoices'; }
+      logActivity('Parked imported history', '', `${qCount} quotes + ${oCount} orders + ${iCount} invoices → parked`);
+    });
+    showToast(`🗄 Parked ${total} imported records. Live lists are now clean — solid quotes + your converted order are untouched.`, 6000);
+  },
+
+  // v8.30: opposite of parkImportedHistory — restore everything back to
+  // the live lists. Use when you want the historical records back in
+  // play (e.g. for win-rate analytics, price history lookups).
+  restoreParkedHistory() {
+    const qCount = (state.parkedQuotes   || []).length;
+    const oCount = (state.parkedOrders   || []).length;
+    const iCount = (state.parkedInvoices || []).length;
+    const total  = qCount + oCount + iCount;
+    if (total === 0) { alert('Nothing parked to restore.'); return; }
+    if (!confirm(`Restore ${total} parked records back to the live lists?\n\n  • ${qCount} quotes\n  • ${oCount} orders\n  • ${iCount} invoices\n\nThey'll show up again with the 📜 imported pill.`)) return;
+    update(s => {
+      s.quotes   = [...(s.parkedQuotes   || []), ...(s.quotes   || [])];
+      s.orders   = [...(s.parkedOrders   || []), ...(s.orders   || [])];
+      s.invoices = [...(s.parkedInvoices || []), ...(s.invoices || [])];
+      s.parkedQuotes = [];
+      s.parkedOrders = [];
+      s.parkedInvoices = [];
+      logActivity('Restored parked history', '', `${qCount} quotes + ${oCount} orders + ${iCount} invoices → live`);
+    });
+    showToast(`Restored ${total} records.`, 4000);
+  },
+
   exportBackup() {
     const blob = new Blob([JSON.stringify({
       version: APP_VERSION, exportedAt: new Date().toISOString(),
@@ -27643,6 +27757,10 @@ Online Metals,Brass,Round,1.25 dia,per_lb,5.20`;
       archivedJobs: state.archivedJobs, archivedRoutings: state.archivedRoutings,
       archivedPos: state.archivedPos, archivedPoLines: state.archivedPoLines,
       archivedInvoices: state.archivedInvoices,
+      // v8.30: parked imported records (separate from auto-promoted archivedX)
+      parkedQuotes: state.parkedQuotes,
+      parkedOrders: state.parkedOrders,
+      parkedInvoices: state.parkedInvoices,
     }, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
